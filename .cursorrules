@@ -1,0 +1,4 @@
+Always use `uv` for package management. 
+When creating new Python files, ensure they are compatible with Python 3.13.
+Follow the Ruff formatting standards defined in pyproject.toml.
+When suggesting git commands, prioritize Graphite (`gt`) workflows.

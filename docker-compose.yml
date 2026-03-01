@@ -1,0 +1,83 @@
+services:
+  app:
+    build: .
+    container_name: example-app
+    # 1. Tells Docker to load the variables from your new .env file
+    env_file: 
+      - .env
+    environment:
+      # 2. Dynamically builds the URLs using the secure variables
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://cache:6379/0
+      - S3_ENDPOINT=http://objectstore:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - venv_storage:/app/.venv 
+    command: sh -c "uv sync --frozen && /app/.venv/bin/python -m src.main"
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      objectstore:
+        condition: service_healthy
+    # 3. UNLOCKS THE GPU! Connects the host NVIDIA GPU to the container
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: all
+    #          capabilities: [gpu]
+
+  db:
+    image: postgres:15
+    container_name: example-db
+    env_file: 
+      - .env
+    # The environment variables are injected automatically by the env_file, 
+    # so we don't need the explicit environment block here anymore!
+    healthcheck:
+      # Use the variables here too so the healthcheck doesn't break if you change the username
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - database-data:/var/lib/postgresql/data
+
+  cache:
+    image: redis:7
+    container_name: example-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  objectstore:
+    image: minio/minio:RELEASE.2024-02-17T01-15-57Z
+    container_name: example-minio
+    env_file:
+      - .env
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - objectstore-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  database-data:
+  objectstore-data:
+  venv_storage:

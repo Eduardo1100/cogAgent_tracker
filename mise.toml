@@ -1,0 +1,29 @@
+[tools]
+node = "20.11.1" # Frontend build and tooling.
+python = "3.13" # Backend runtime.
+terraform = "1.6.6" # IaC tooling pinned for reproducible plans.
+
+[env]
+PYTHONUNBUFFERED = "1" # Make logs show up immediately.
+DATABASE_URL = "postgres://app:app@localhost:9999/app" # Local dev default.
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.install]
+run = "uv sync --locked" # One command to sync Python deps from lockfile.
+
+[tasks.dev]
+run = "docker-compose up" # Local dependencies in containers.
+
+[tasks.check]
+run = "uv run ruff check . && uv run ruff format --check . && uv run ty check" # Single quality gate.
+
+[tasks.test]
+run = "uv run pytest" # Standardized test entry point.
+
+[tasks.setup]
+description = "Install python versions and sync dependencies"
+run = "uv sync"
+
+[tasks.train]
+description = "Run the training script"
+run = "uv run python train.py"

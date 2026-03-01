@@ -1,0 +1,34 @@
+[project]
+name = "production-template"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.42.59",
+    "fastapi>=0.135.1",
+    "psycopg[binary]>=3.3.3",
+    "pydantic-settings>=2.13.1",
+    "redis>=7.2.1",
+    "sqlalchemy>=2.0.47",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "transformers>=5.2.0",
+    "uvicorn>=0.41.0",
+]
+
+[tool.ruff]
+# Target version (matching your mise/uv version)
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+# Enable specific rulesets
+# E: Error, F: Pyflakes, I: Isort (sorting imports), UP: Pyupgrade
+select = ["E", "F", "I", "UP", "NPY"] # NPY adds specific checks for NumPy
+ignore = []
+
+[tool.ruff.format]
+# Use "Black-style" formatting
+quote-style = "double"
+indent-style = "space"
