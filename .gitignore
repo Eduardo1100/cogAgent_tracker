@@ -1,4 +1,76 @@
-node_modules/
+# =========================
+# 🛑 SECRETS & ENV VARS
+# =========================
+# NEVER commit your environment variables! 
 .env
+.env.*
+!.env.example
+
+# =========================
+# 🧠 MACHINE LEARNING & AI
+# =========================
+# Ignore massive PyTorch model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# Ignore Weights & Biases local sync folders
+wandb/
+
+# Ignore HuggingFace local cache (if downloaded locally)
+.huggingface/
+
+# =========================
+# 📊 DATA, LOGS, & EVALS
+# =========================
+# Ignore the local runs folder you created in your evaluation script
+runs/
+logs/
+
+# Ignore ALFWorld downloaded data/environments (if stored in the repo)
+alfworld_data/
+data/
+datasets/
+
+# =========================
+# 🐍 PYTHON CORE
+# =========================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
 .venv/
-.mise/
+venv/
+env/
+ENV/
+
+# Pytest and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# uv / pip package manager caches
+.uv/
+
+# =========================
+# 🛠️ IDE & OS FILES
+# =========================
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# PyCharm / IntelliJ
+.idea/
+
+# Mac OS
+.DS_Store
+
+# Windows
+Thumbs.db

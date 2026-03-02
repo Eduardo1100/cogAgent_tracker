@@ -6,6 +6,11 @@ from src.storage.database import get_db
 from botocore.exceptions import ClientError
 from src.storage.s3 import get_s3_client
 from src.storage.cache import get_redis_client
+from src.storage.database import engine, Base
+from src.storage.models import ExperimentRun, EpisodeRun
+
+# Tell SQLAlchemy to create the tables if they don't exist yet
+Base.metadata.create_all(bind=engine)
 
 # Initialize the app
 app = FastAPI(title="My Awesome AI API")
