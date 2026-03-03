@@ -11,17 +11,21 @@ WORKDIR /app
 
 # 2. Crucial environment variables for multi-stage Docker + uv
 ENV UV_LINK_MODE=copy
+ENV UV_CONCURRENT_DOWNLOADS=2
+ENV UV_CONCURRENT_INSTALLS=2
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_PYTHON_INSTALL_DIR=/python
 
+RUN apt-get update && apt-get install -y build-essential
+
 # 3. Explicitly copy dependency files so uv can see them
+WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # 4. Install Python and sync dependencies into a dedicated .venv
-RUN uv python install 3.13
+RUN uv python install 3.11
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
-
 
 # ==========================================
 # Stage 2: Final Run stage (The Lean Runner)

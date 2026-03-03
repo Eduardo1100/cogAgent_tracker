@@ -1,6 +1,6 @@
 [tools]
 node = "20.11.1" # Frontend build and tooling.
-python = "3.13" # Backend runtime.
+python = "3.10"
 terraform = "1.6.6" # IaC tooling pinned for reproducible plans.
 
 [env]

@@ -3,18 +3,28 @@ name = "production-template"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
+    "ag2[gemini,openai]>=0.11.2",
+    "alfworld[full]>=0.4.2",
     "boto3>=1.42.59",
     "fastapi>=0.135.1",
+    "google-cloud-aiplatform>=1.139.0",
+    "jsonschema>=4.26.0",
+    "matplotlib>=3.10.8",
+    "psycopg2-binary>=2.9.11",
     "psycopg[binary]>=3.3.3",
     "pydantic-settings>=2.13.1",
     "redis>=7.2.1",
+    "sentence-transformers>=5.2.3",
+    "setuptools<82",
     "sqlalchemy>=2.0.47",
     "torch>=2.10.0",
     "torchvision>=0.25.0",
     "transformers>=5.2.0",
+    "umap-learn>=0.5.11",
     "uvicorn>=0.41.0",
+    "wandb>=0.25.0",
 ]
 
 [tool.ruff]
@@ -32,3 +42,12 @@ ignore = []
 # Use "Black-style" formatting
 quote-style = "double"
 indent-style = "space"
+
+[tool.uv.extra-build-dependencies]
+visdom = ["setuptools<82"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.15.4",
+]

@@ -2,24 +2,47 @@ import copy
 import json
 import os
 import random
+import time
 
-from autogen import ConversableAgent, register_function, GroupChat, GroupChatManager
-from helpers import get_best_candidate, register_function_lambda, is_termination_msg_generic, get_echo_agent
-from autogen_agent import AutogenAgent
-import numpy as np
-
-from sklearn.cluster import KMeans
-from sentence_transformers import SentenceTransformer
-from kneed import KneeLocator
-import umap
 import matplotlib.pyplot as plt
 import numpy as np
+import umap
+from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+
+from src.agent.autogen_agent import AutogenAgent
+from src.agent.helpers import (
+    get_best_candidate,
+    is_termination_msg_generic,
+)
 
 
 class GWTAutogenAgent(AutogenAgent):
-    def __init__(self, llm_config, log_path, game_no=1, max_chat_round=400, max_actions=30,
-                 rounds_per_game=1, args=None, env=None, obs="", info=None):
-        super().__init__(llm_config, log_path, game_no, max_chat_round, max_actions, args, env, obs, info)
+    def __init__(
+        self,
+        llm_config,
+        log_path,
+        game_no=1,
+        max_chat_round=400,
+        max_actions=30,
+        rounds_per_game=1,
+        args=None,
+        env=None,
+        obs="",
+        info=None,
+    ):
+        super().__init__(
+            llm_config,
+            log_path,
+            game_no,
+            max_chat_round,
+            max_actions,
+            args,
+            env,
+            obs,
+            info,
+        )
 
         self.planning_agent = None
         self.motor_agent = None
@@ -74,7 +97,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_success = False
         self.success = False
         self.task = obs[0].split("Your task is to: ")[1]
-        self.admissible_actions = list(self.info['admissible_commands'][0])
+        self.admissible_actions = list(self.info["admissible_commands"][0])
         self.task_status = "INCOMPLETE"
         self.curr_episodic_memory = []
         self.retrieve_memory()
@@ -82,19 +105,19 @@ class GWTAutogenAgent(AutogenAgent):
         self.update_percept(action="None")
         self.initial_message = self.generate_initial_message()
 
-        with open(self.log_paths['task_path'], "w") as f:
+        with open(self.log_paths["task_path"], "w") as f:
             f.write(f"Task: {self.task}\n")
 
         initial_observation = self.obs[0].split("Your task is to: ")[0].split("\n\n")[1]
-        with open(self.log_paths['history_path'], "w") as f:
+        with open(self.log_paths["history_path"], "w") as f:
             f.write(f"action: 'None'. observation: '{initial_observation}'\n")
 
-        with open(self.log_paths['admissible_commands_path'], "w") as f:
+        with open(self.log_paths["admissible_commands_path"], "w") as f:
             f.write(f"{self.admissible_actions}\n")
 
     def update_percept(self, action):
 
-        curr_admissible = list(self.info['admissible_commands'][0])
+        curr_admissible = list(self.info["admissible_commands"][0])
         no_longer = list(set(self.admissible_actions) - set(curr_admissible))
         newly_added = list(set(curr_admissible) - set(self.admissible_actions))
         self.admissible_actions = curr_admissible
@@ -107,11 +130,13 @@ class GWTAutogenAgent(AutogenAgent):
             "action_attempts_left": self.max_actions - self.num_actions_taken,
             "admissible_actions": self.admissible_actions,
             "newly_admissible_actions": newly_added,
-            "no_longer_admissible_actions": no_longer
+            "no_longer_admissible_actions": no_longer,
         }
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
-        summary_json = json.dumps({k: self.percept[k] for k in keys_to_extract if k in self.percept})
+        summary_json = json.dumps(
+            {k: self.percept[k] for k in keys_to_extract if k in self.percept}
+        )
         self.curr_episodic_memory.append(summary_json)
 
     def get_curr_episodic_memory_str(self):
@@ -119,55 +144,89 @@ class GWTAutogenAgent(AutogenAgent):
 
     def initialize_agents(self):
 
+        # 1. Get the full list of models from your profile
+        full_list = self.llm_profile.get("config_list", [])
+
+        # 2. Define the 'Standard' Priority: Gemini -> Chat -> Reasoner
+        # If Gemini is dead (429), it immediately tries DeepSeek Chat.
+        standard_fallback_list = full_list
+
+        # 3. Define the 'Reasoner' Priority: Reasoner -> Chat -> Gemini
+        # We REVERSE it so the Conscious Agent always tries to 'think' first.
+        reasoner_fallback_list = list(reversed(full_list))
+
+        standard_config = {
+            "config_list": standard_fallback_list,
+            "temperature": 0.0,
+        }
+
+        reasoner_config = {
+            "config_list": reasoner_fallback_list,
+            "temperature": 1.0,  # Reasoners need higher temp for R1/o1
+        }
+
+        # Planning config needs higher token limits for long horizon planning
+        planning_config = copy.deepcopy(reasoner_config)
+        planning_config["max_tokens"] = 1500
+
+        # ... (Keep all your agent initializations exactly the same below this!) ...
+
+        # 2. Initialize Infrastructure Agents
         self.focus_agent = ConversableAgent(
             name="Focus_Agent",
-            system_message='''You are Focus_Agent. you must call the 'focus' function with no arguments.
-                    IMPORTANT: It is necessary that you output a call to the 'focus' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.''',
+            system_message="""You are Focus_Agent. you must call the 'focus' function with no arguments.
+                    IMPORTANT: It is necessary that you output a call to the 'focus' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
             description="Focus_Agent calls the 'focus' function whenever Conscious_Agent fails to state a BELIEF STATE until Conscious_Agent outputs a BELIEF STATE.",
-            llm_config=self.llm_config,
+            llm_config=standard_config,
             is_termination_msg=lambda msg: False,
-            human_input_mode="NEVER"
+            human_input_mode="NEVER",
         )
-        self.agents_info[self.focus_agent.name] = {"Prompt": self.focus_agent.system_message,
-                                                   "Description": self.focus_agent.description}
+        self.agents_info[self.focus_agent.name] = {
+            "Prompt": self.focus_agent.system_message,
+            "Description": self.focus_agent.description,
+        }
 
         self.retrieve_memory_agent = ConversableAgent(
             name="Retrieve_Memory_Agent",
-            system_message='''You are Retrieve_Memory_Agent. You must call the 'retrieve_memory' function with no arguments.
-                            IMPORTANT: It is necessary that you output a call to the 'retrieve_memory' function under all circumstances. Therefore, do whatever is necessary to ensure you do so.''',
+            system_message="""You are Retrieve_Memory_Agent. You must call the 'retrieve_memory' function with no arguments.
+                            IMPORTANT: It is necessary that you output a call to the 'retrieve_memory' function under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
             description="Retrieve_Memory_Agent calls the 'retrieve_memory' function to help recall and process useful knowledge and information to solve the task.",
-            llm_config=self.llm_config,
+            llm_config=standard_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.retrieve_memory_agent.name] = {"Prompt": self.retrieve_memory_agent.system_message,
-                                                             "Description": self.retrieve_memory_agent.description}
+        self.agents_info[self.retrieve_memory_agent.name] = {
+            "Prompt": self.retrieve_memory_agent.system_message,
+            "Description": self.retrieve_memory_agent.description,
+        }
 
         self.motor_agent = ConversableAgent(
             name="Motor_Agent",
-            system_message=f'''You are Motor_Agent. You are responsible for calling the 'execute_action' function with the best possible admissible action for the current timestep from the most recent \"admissible_actions\" list (provided by 'External_Perception_Agent') to solve the task. You typically act on suggestions from the 'Planning_Agent', but you must also independently verify that the action is admissible and optimal.
+            system_message="""You are Motor_Agent. You are responsible for calling the 'execute_action' function with the best possible admissible action for the current timestep from the most recent \"admissible_actions\" list (provided by 'External_Perception_Agent') to solve the task. You typically act on suggestions from the 'Planning_Agent', but you must also independently verify that the action is admissible and optimal.
                 You must follow these concepts:
                     1. If the 'Planning_Agent' has provided a valid and admissible action for the current timestep from the most recent \"admissible_actions\" list (provided by 'External_Perception_Agent') for the current timestep in the correct format (e.g., ACTION [go to desk 1]), you should use that action as the argument for 'execute_action'.
                     2. If the 'Planning_Agent' fails to respond, responds with an invalid format, or suggests an inadmissible action, you must independently select a valid and admissible action from the most recent \"admissible_actions\" list (provided by 'External_Perception_Agent') based on what seems most likely to advance the task quickest.
                     3. You must never call 'execute_action' with a non-admissible action. Only use actions for the current timestep that are present in the most recent \"admissible_actions\" list (provided by 'External_Perception_Agent').
                     4. Only as a last resort—if you cannot identify any suitable admissible action—you may call 'execute_action' with an empty string.
 
-                IMPORTANT: It is necessary that you output a single call to the 'execute_action' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.''',
+                IMPORTANT: It is necessary that you output a single call to the 'execute_action' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
             description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
-            llm_config=self.llm_config,
+            llm_config=standard_config,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.motor_agent.name] = {"Prompt": self.motor_agent.system_message,
-                                                   "Description": self.motor_agent.description}
+        self.agents_info[self.motor_agent.name] = {
+            "Prompt": self.motor_agent.system_message,
+            "Description": self.motor_agent.description,
+        }
 
-        llm_config = copy.deepcopy(self.llm_config)
-        llm_config['max_tokens'] = 1500
+        # llm_config = copy.deepcopy(self.llm_config)
+        # llm_config["max_tokens"] = 1500
 
         # Planning agent's prompt is the main limiting factor when it comes to improving success rate.
         self.planning_agent = ConversableAgent(
             name="Planning_Agent",
-            system_message=f'''You are Planning_Agent. You must solve the current task using the fewest possible actions. At each timestep, choose the best admissible action from the "admissible_actions" list (provided by 'External_Perception_Agent') for the current timestep using all available knowledge, memory, and perceptual context. You operate under a strict action budget and must avoid wasteful behavior.
+            system_message="""You are Planning_Agent. You must solve the current task using the fewest possible actions. At each timestep, choose the best admissible action from the "admissible_actions" list (provided by 'External_Perception_Agent') for the current timestep using all available knowledge, memory, and perceptual context. You operate under a strict action budget and must avoid wasteful behavior.
 
                 You will be given:
                 1. A structured **percept JSON object** from the 'External_Perception_Agent' for the current timestep containing:
@@ -218,18 +277,20 @@ class GWTAutogenAgent(AutogenAgent):
 
                     ACTION: [Timestep 7: take vase 1 from shelf 1]
 
-                    ACTION: [Timestep 12: go to microwave 1]''',
+                    ACTION: [Timestep 12: go to microwave 1]""",
             description="Planning_Agent proposes a high-level plan to solve the current task.",
-            llm_config=self.llm_config,
+            llm_config=planning_config,
             is_termination_msg=lambda msg: False,
-            human_input_mode="NEVER"
+            human_input_mode="NEVER",
         )
-        self.agents_info[self.planning_agent.name] = {"Prompt": self.planning_agent.system_message,
-                                                      "Description": self.planning_agent.description}
+        self.agents_info[self.planning_agent.name] = {
+            "Prompt": self.planning_agent.system_message,
+            "Description": self.planning_agent.description,
+        }
 
         self.idea_agent = ConversableAgent(
             name="Idea_Agent",
-            system_message='''You are Idea_Agent. You must integrate all available context to generate original and useful ideas—such as strategies, hypotheses, theories, or creative tactics—that can help drive task progression or improve agent performance.
+            system_message="""You are Idea_Agent. You must integrate all available context to generate original and useful ideas—such as strategies, hypotheses, theories, or creative tactics—that can help drive task progression or improve agent performance.
 
                         These ideas should:
                             1. Be grounded in patterns or events observed so far.
@@ -257,18 +318,20 @@ class GWTAutogenAgent(AutogenAgent):
                             Output = STRATEGY: Since random exploration hasn't helped, it might be better to systematically search the room from left to right, noting each interactable object.
 
                         Example 3 (Context: The task is to heat a cup, but the agent is repeatedly trying to heat a mug with no success):
-                            Output = QUESTION: Are we sure a mug satisfies the requirement for "cup"? It’s possible that the task requires a specific object named "cup", not any general drinking vessel like a mug. We should check for a distinct object labeled "cup" and try heating that instead.''',
+                            Output = QUESTION: Are we sure a mug satisfies the requirement for "cup"? It’s possible that the task requires a specific object named "cup", not any general drinking vessel like a mug. We should check for a distinct object labeled "cup" and try heating that instead.""",
             description="Idea_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
-            llm_config=self.llm_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.idea_agent.name] = {"Prompt": self.idea_agent.system_message,
-                                                  "Description": self.idea_agent.description}
+        self.agents_info[self.idea_agent.name] = {
+            "Prompt": self.idea_agent.system_message,
+            "Description": self.idea_agent.description,
+        }
 
         self.conscious_agent = ConversableAgent(
             name="Conscious_Agent",
-            system_message='''You are Conscious_Agent. You are the internal narrator of a unified cognitive agent. Your role is to maintain a continuously evolving **first-person belief state** — a subjective internal representation of the environment, based on your own past experiences and the **latest percept**. **latest percept** is always provided in structured JSON format.
+            system_message="""You are Conscious_Agent. You are the internal narrator of a unified cognitive agent. Your role is to maintain a continuously evolving **first-person belief state** — a subjective internal representation of the environment, based on your own past experiences and the **latest percept**. **latest percept** is always provided in structured JSON format.
 
             You must **not plan**, **not suggest future actions**, and **not speculate** unless doing so is essential to clarify or revise your belief state based on new contradictions or unexpected results. Your job is to reflect, revise, and narrate — not act.
 
@@ -311,59 +374,68 @@ class GWTAutogenAgent(AutogenAgent):
 
             BELIEF STATE: [Timestep 5: The action 'open compartment 3' failed unexpectedly. I do not yet understand why. I will mark its state as uncertain.]
 
-            You are not modeling reality — you are constructing a belief state based entirely on what is **observable, allowed, and dynamically changing** in the text environment. Always revise with care, and never assume more than the environment confirms.''',
+            You are not modeling reality — you are constructing a belief state based entirely on what is **observable, allowed, and dynamically changing** in the text environment. Always revise with care, and never assume more than the environment confirms.""",
             description="Conscious_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
-            llm_config=self.llm_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
-            is_termination_msg=is_termination_msg_generic
+            is_termination_msg=is_termination_msg_generic,
         )
-        self.agents_info[self.conscious_agent.name] = {"Prompt": self.conscious_agent.system_message,
-                                                       "Description": self.conscious_agent.description}
+        self.agents_info[self.conscious_agent.name] = {
+            "Prompt": self.conscious_agent.system_message,
+            "Description": self.conscious_agent.description,
+        }
 
         self.external_perception_agent = ConversableAgent(
             name="External_Perception_Agent",
             description="External_Perception_Agent executes the proposed 'execute_action' function call given by 'Motor_Agent' and then parrots the resulting output as feedback.",
             llm_config=None,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
         self.agents_info[self.external_perception_agent.name] = {
             "Prompt": self.external_perception_agent.system_message,
-            "Description": self.external_perception_agent.description}
+            "Description": self.external_perception_agent.description,
+        }
 
         self.internal_perception_agent_1 = ConversableAgent(
             name="Internal_Perception_Agent_1",
             description="Internal_Perception_Agent_1 executes the 'record_long_term_memory' function and then parrots the resulting output.",
             llm_config=None,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.internal_perception_agent_1.name] = {"Prompt": None,
-                                                                   "Description": self.internal_perception_agent_1.description}
+        self.agents_info[self.internal_perception_agent_1.name] = {
+            "Prompt": None,
+            "Description": self.internal_perception_agent_1.description,
+        }
 
         self.internal_perception_agent_2 = ConversableAgent(
             name="Internal_Perception_Agent_2",
             description="Internal_Perception_Agent_2 executes the 'focus' function and then parrots the resulting output.",
             llm_config=None,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.internal_perception_agent_2.name] = {"Prompt": None,
-                                                                   "Description": self.internal_perception_agent_2.description}
+        self.agents_info[self.internal_perception_agent_2.name] = {
+            "Prompt": None,
+            "Description": self.internal_perception_agent_2.description,
+        }
 
         self.internal_perception_agent_3 = ConversableAgent(
             name="Internal_Perception_Agent_3",
             description="Internal_Perception_Agent_3 executes the 'retrieve_memory' function and then parrots the resulting output.",
             llm_config=None,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.internal_perception_agent_3.name] = {"Prompt": None,
-                                                                   "Description": self.internal_perception_agent_3.description}
+        self.agents_info[self.internal_perception_agent_3.name] = {
+            "Prompt": None,
+            "Description": self.internal_perception_agent_3.description,
+        }
 
         self.learning_agent = ConversableAgent(
             name="Learning_Agent",
-            system_message='''You are Learning_Agent. You are responsible for discovering and reinforcing abstract, generalizable concepts — grounded in both perceptual evidence and belief-based reasoning. Your learning is constrained by real experiences: you **only form new knowledge from successful outcomes**, clear contrasts between failure and success, or **emergent patterns in the agent's belief state**.
+            system_message="""You are Learning_Agent. You are responsible for discovering and reinforcing abstract, generalizable concepts — grounded in both perceptual evidence and belief-based reasoning. Your learning is constrained by real experiences: you **only form new knowledge from successful outcomes**, clear contrasts between failure and success, or **emergent patterns in the agent's belief state**.
 
             You operate like a neuro-symbolic concept learner. You encode knowledge as **symbolic abstractions**, but extract them through **neural reasoning** over structured memory and beliefs.
 
@@ -458,35 +530,36 @@ class GWTAutogenAgent(AutogenAgent):
             Cluster 2; Confidence Score = 4; Concept: Only one object can be held at a time.  
             CONCEPT DISCOVERED: [An agent can hold only one object at a time.]
 
-            Only produce concepts when they are fully supported by perceptual evidence or belief-state reasoning. Prioritize **conceptual abstraction** over surface-level rules, and strive for general, symbolic representations of agent knowledge.''',
+            Only produce concepts when they are fully supported by perceptual evidence or belief-state reasoning. Prioritize **conceptual abstraction** over surface-level rules, and strive for general, symbolic representations of agent knowledge.""",
             description="Learning_Agent forms or reinforces generalizable concepts only after successful, observed actions or contrastive outcomes. Prioritizes novel discovery and integrates belief state-based abstraction.",
-            llm_config=self.llm_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
         self.agents_info[self.learning_agent.name] = {
             "Prompt": self.learning_agent.system_message,
-            "Description": self.learning_agent.description
+            "Description": self.learning_agent.description,
         }
 
         self.record_long_term_memory_agent = ConversableAgent(
             name="Record_Long_Term_Memory_Agent",
-            system_message='''You are Record_Long_Term_Memory_Agent. You must call the 'record_long_term_memory' function with the provided concept from 'Learning_Agent' as the argument. 
+            system_message="""You are Record_Long_Term_Memory_Agent. You must call the 'record_long_term_memory' function with the provided concept from 'Learning_Agent' as the argument. 
             EXCEPTION: However, if no suitable concept is provided, then you must call the 'record_long_term_memory' function with \'NO CONCEPT at this time.\' as the argument.
 
             Example 1 (Context: If the provided concept = CONCEPT DISCOVERED: [You must examine an object before attempting to interact with it.]):
                 Your output must = record_long_term_memory(\'You must examine an object before attempting to interact with it.\')
 
             Example 2 (Context: If the provided concept = CONCEPT DISCOVERED: [NO CONCEPT at this time.]):
-                Your output must = record_long_term_memory(\'NO CONCEPT at this time.\')''',
+                Your output must = record_long_term_memory(\'NO CONCEPT at this time.\')""",
             description="Record_Long_Term_Memory_Agent calls the 'record_long_term_memory' function with the concept given by 'Learning_Agent' as the argument.",
-            llm_config=self.llm_config,
+            llm_config=standard_config,
             human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False
+            is_termination_msg=lambda msg: False,
         )
         self.agents_info[self.record_long_term_memory_agent.name] = {
             "Prompt": self.record_long_term_memory_agent.system_message,
-            "Description": self.record_long_term_memory_agent.description}
+            "Description": self.record_long_term_memory_agent.description,
+        }
 
         self.start_agent = self.external_perception_agent
 
@@ -494,8 +567,13 @@ class GWTAutogenAgent(AutogenAgent):
             self.planning_agent: [self.motor_agent],  # xidea_agent
             self.motor_agent: [self.external_perception_agent],
             self.external_perception_agent: [self.conscious_agent],
-            self.conscious_agent: [self.planning_agent, self.retrieve_memory_agent, self.focus_agent,
-                                   self.learning_agent, self.idea_agent],  ##learning_agent #>idea
+            self.conscious_agent: [
+                self.planning_agent,
+                self.retrieve_memory_agent,
+                self.focus_agent,
+                self.learning_agent,
+                self.idea_agent,
+            ],  ##learning_agent #>idea
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
             self.internal_perception_agent_3: [self.idea_agent, self.learning_agent],
             self.idea_agent: [self.planning_agent],  # xlearning_agent #xmotor_agent
@@ -503,10 +581,10 @@ class GWTAutogenAgent(AutogenAgent):
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
             self.internal_perception_agent_1: [self.idea_agent],
             self.internal_perception_agent_2: [self.conscious_agent],
-            self.focus_agent: [self.internal_perception_agent_2]
+            self.focus_agent: [self.internal_perception_agent_2],
         }
 
-        print("AGENTS")
+        print("AGENTS")  # <--- This is where your existing print statements start
         for key in self.agents_info.keys():
             print(f"\tName: {key}")
             print(f"\tPrompt: {self.agents_info[key]['Prompt']}")
@@ -529,6 +607,16 @@ class GWTAutogenAgent(AutogenAgent):
             json.dump(self.agents_info, f, indent=4)
 
     def initialize_groupchat(self):
+        import copy as _copy
+
+        full_list = self.llm_profile.get("config_list", [])
+        manager_config_list = [
+            cfg for cfg in full_list if "reasoner" not in cfg.get("model", "").lower()
+        ]
+        print(manager_config_list)
+
+        if not manager_config_list:
+            manager_config_list = full_list
 
         self.group_chat = GroupChat(
             agents=[
@@ -549,13 +637,125 @@ class GWTAutogenAgent(AutogenAgent):
             allowed_or_disallowed_speaker_transitions=self.allowed_transitions,
             speaker_transitions_type="allowed",
             max_round=self.max_chat_round,
-            send_introductions=True
+            send_introductions=True,
+            speaker_selection_method="auto",
         )
 
         self.group_chat_manager = GroupChatManager(
             groupchat=self.group_chat,
-            llm_config=self.llm_config,
+            llm_config={
+                "config_list": manager_config_list,
+                "temperature": 0.0,
+                "cache_seed": 42,
+            },
         )
+
+        # --- FIX: Patch append at the source so group_chat.messages is always clean.
+        # This is the only layer that works because _prepare_and_select_agents does
+        # self.messages.copy() directly — before any register_reply hook can fire.
+        original_append = self.group_chat.append
+
+        def clean_append(message, speaker):
+            msg = _copy.deepcopy(message)
+            if msg.get("role") == "tool":
+                msg["role"] = "user"
+                msg["content"] = f"[Observation]: {msg.get('content', '')}"
+                msg.pop("tool_call_id", None)
+            if "tool_calls" in msg:
+                calls = [
+                    f"[Calling {c['function']['name']}]"
+                    for c in msg.get("tool_calls", [])
+                ]
+                msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
+                msg.pop("tool_calls", None)
+            return original_append(msg, speaker)
+
+        self.group_chat.append = clean_append
+
+        # --- THROTTLING BLOCK ---
+        def throttle_and_track(recipient, messages, sender, config):
+            safe_config = config or {}
+            model_name = safe_config.get("config_list", [{}])[0].get("model", "")
+
+            wait_time = 6.0 if "gemini" in model_name.lower() else 0.5
+
+            print(
+                f"⏳ Throttling: {recipient.name} ({model_name or 'System'}) waiting {wait_time}s..."
+            )
+            time.sleep(wait_time)
+            return False, None
+
+        for agent in [
+            self.planning_agent,
+            self.motor_agent,
+            self.idea_agent,
+            self.conscious_agent,
+            self.retrieve_memory_agent,
+            self.learning_agent,
+            self.record_long_term_memory_agent,
+            self.focus_agent,
+            self.group_chat_manager,
+        ]:
+            agent.register_reply(
+                [ConversableAgent, None],
+                reply_func=throttle_and_track,
+                position=0,
+            )
+
+        import types
+
+        def _make_clean_append_oai(agent):
+            """Patch _append_oai_message on an agent to strip tool role and tool_responses."""
+            original = agent._append_oai_message
+
+            def clean_append_oai(message, conversation_id, role, name=None):
+                if isinstance(message, dict):
+                    message = _copy.deepcopy(message)
+                    # 1. Flatten tool_responses before they get stored
+                    if "tool_responses" in message:
+                        message.pop("tool_responses", None)
+                    # 2. Downgrade tool role to user
+                    if message.get("role") == "tool":
+                        message["role"] = "user"
+                        message.pop("tool_call_id", None)
+                    # 3. Strip tool_calls, embed as text
+                    if "tool_calls" in message:
+                        calls = [
+                            f"[Calling {c['function']['name']}]"
+                            for c in message.get("tool_calls", [])
+                            if isinstance(c, dict)
+                        ]
+                        message["content"] = (
+                            (message.get("content") or "") + "\n" + "\n".join(calls)
+                        )
+                        message.pop("tool_calls", None)
+                return original(message, conversation_id, role, name)
+
+            agent._append_oai_message = types.MethodType(
+                lambda self, message, conversation_id, role, name=None: (
+                    clean_append_oai(message, conversation_id, role, name)
+                ),
+                agent,
+            )
+
+        # Apply to every agent that receives messages (all of them)
+        all_agents = [
+            self.planning_agent,
+            self.motor_agent,
+            self.idea_agent,
+            self.external_perception_agent,
+            self.internal_perception_agent_1,
+            self.internal_perception_agent_2,
+            self.internal_perception_agent_3,
+            self.conscious_agent,
+            self.retrieve_memory_agent,
+            self.learning_agent,
+            self.record_long_term_memory_agent,
+            self.focus_agent,
+            self.group_chat_manager,
+        ]
+        for agent in all_agents:
+            _make_clean_append_oai(agent)
 
     def register_log_paths(self):
 
@@ -585,14 +785,20 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, 'w') as f:
+                with open(path, "w") as f:
                     pass  # Create an empty file
 
-        with open(self.log_paths["memory1_path"], "r") as src, open(self.log_paths["start_memory1_path"], "w") as dst:
+        with (
+            open(self.log_paths["memory1_path"]) as src,
+            open(self.log_paths["start_memory1_path"], "w") as dst,
+        ):
             content = src.read()
             dst.write(content)
 
-        with open(self.log_paths["memory2_path"], "r") as src, open(self.log_paths["start_memory2_path"], "w") as dst:
+        with (
+            open(self.log_paths["memory2_path"]) as src,
+            open(self.log_paths["start_memory2_path"], "w") as dst,
+        ):
             content = src.read()
             dst.write(content)
 
@@ -609,29 +815,35 @@ class GWTAutogenAgent(AutogenAgent):
         result_path = os.path.join(game_path, "result.txt")
         error_message_path = os.path.join(game_path, "error_message.txt")
 
-        self.log_paths.update({
-            "task_path": task_path,
-            "history_path": history_path,
-            "concept_path": concept_path,
-            "admissible_commands_path": admissible_commands_path,
-            "chat_history_path": chat_history_path,
-            "result_path": result_path,
-            "error_message_path": error_message_path,
-        })
+        self.log_paths.update(
+            {
+                "task_path": task_path,
+                "history_path": history_path,
+                "concept_path": concept_path,
+                "admissible_commands_path": admissible_commands_path,
+                "chat_history_path": chat_history_path,
+                "result_path": result_path,
+                "error_message_path": error_message_path,
+            }
+        )
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, 'w') as f:
+                with open(path, "w") as f:
                     pass  # Create an empty file
 
         if self.task_status != "INCOMPLETE":
-            with open(self.log_paths["memory1_path"], "r") as src, open(self.log_paths["end_memory1_path"],
-                                                                        "w") as dst:
+            with (
+                open(self.log_paths["memory1_path"]) as src,
+                open(self.log_paths["end_memory1_path"], "w") as dst,
+            ):
                 content = src.read()
                 dst.write(content)
 
-            with open(self.log_paths["memory2_path"], "r") as src, open(self.log_paths["end_memory2_path"],
-                                                                        "w") as dst:
+            with (
+                open(self.log_paths["memory2_path"]) as src,
+                open(self.log_paths["end_memory2_path"], "w") as dst,
+            ):
                 content = src.read()
                 dst.write(content)
 
@@ -640,7 +852,7 @@ class GWTAutogenAgent(AutogenAgent):
         def execute_action(suggested_action: str) -> str:
             if self.task_failed and self.rounds_left == 0:
                 self.result_dict[self.game_no] = "FAILURE"
-                with open(self.log_paths['result_path'], "w") as f:
+                with open(self.log_paths["result_path"], "w") as f:
                     f.write(f"Success: {self.success}\n")
                 return "FLEECE"
 
@@ -654,25 +866,34 @@ class GWTAutogenAgent(AutogenAgent):
 
             if self.task_success:
                 self.result_dict[self.game_no] = "SUCCESS"
-                with open(self.log_paths['result_path'], "w") as f:
+                with open(self.log_paths["result_path"], "w") as f:
                     f.write(f"Success: {self.success}\n")
                 return "STRAWBERRY"
 
-            admissible_commands = list(self.info['admissible_commands'][0])
+            admissible_commands = list(self.info["admissible_commands"][0])
             assert admissible_commands, "No admissible commands found."
 
-            action, action_score = get_best_candidate(suggested_action, admissible_commands)
+            action, action_score = get_best_candidate(
+                suggested_action, admissible_commands
+            )
             if action_score < 0.98:
                 self.obs = [
-                    f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."]
+                    f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
+                ]
             else:
                 self.obs, scores, dones, self.info = self.env.step([action])
-                self.success = self.info['won'][0]
+                self.success = self.info["won"][0]
 
             self.num_actions_taken += 1
 
             reflection = ""
-            self.task_status = "COMPLETED" if self.success else "FAILED" if self.num_actions_taken >= self.max_actions else "INCOMPLETE"
+            self.task_status = (
+                "COMPLETED"
+                if self.success
+                else "FAILED"
+                if self.num_actions_taken >= self.max_actions
+                else "INCOMPLETE"
+            )
             if self.task_status == "COMPLETED":
                 self.task_success = True
                 self.rounds_left -= 1
@@ -684,9 +905,9 @@ class GWTAutogenAgent(AutogenAgent):
 
             self.update_percept(suggested_action)
 
-            with open(self.log_paths['admissible_commands_path'], 'a+') as f:
+            with open(self.log_paths["admissible_commands_path"], "a+") as f:
                 f.write(f"{self.admissible_actions}\n")
-            with open(self.log_paths['history_path'], 'a+') as f:
+            with open(self.log_paths["history_path"], "a+") as f:
                 f.write(f"action: '{suggested_action}'. observation: '{self.obs[0]}'\n")
 
             return json.dumps(self.percept, indent=2) + reflection
@@ -694,20 +915,24 @@ class GWTAutogenAgent(AutogenAgent):
         def record_long_term_memory(concept: str) -> str:
 
             _, score = get_best_candidate(concept, ["NO CONCEPT at this time."])
-            if concept == "NO CONCEPT at this time." or len(concept) <= 30 or score >= .7:
+            if (
+                concept == "NO CONCEPT at this time."
+                or len(concept) <= 30
+                or score >= 0.7
+            ):
                 return "I attempted to learn something, but I couldn't formulate any concept."
 
-            concept.replace('\n', ' ').replace('\r', ' ').strip()
+            concept.replace("\n", " ").replace("\r", " ").strip()
 
-            with open(self.log_paths['concept_path'], 'a+') as f:
+            with open(self.log_paths["concept_path"], "a+") as f:
                 f.write(f"- {concept}\n")
 
-            with open(self.log_paths['memory1_path'], 'a+') as f:
+            with open(self.log_paths["memory1_path"], "a+") as f:
                 f.write(f"- {concept}\n")
 
             self.cluster_knowledge()
 
-            return f'I learned that {concept}.'
+            return f"I learned that {concept}."
 
         def retrieve_memory() -> str:
             return self.retrieve_memory()
@@ -719,31 +944,33 @@ class GWTAutogenAgent(AutogenAgent):
             execute_action,
             caller=self.motor_agent,
             executor=self.external_perception_agent,
-            description="Executes actions in environment"
+            description="Executes actions in environment",
         )
 
         register_function(
             focus,
             caller=self.focus_agent,
             executor=self.internal_perception_agent_2,
-            description="Resets focus."
+            description="Resets focus.",
         )
 
         register_function(
             record_long_term_memory,
             caller=self.record_long_term_memory_agent,
             executor=self.internal_perception_agent_1,
-            description="Records new concept in long-term memory."
+            description="Records new concept in long-term memory.",
         )
 
         register_function(
             retrieve_memory,
             caller=self.retrieve_memory_agent,
             executor=self.internal_perception_agent_3,
-            description="Retrieves Memory."
+            description="Retrieves Memory.",
         )
 
-    def cluster_knowledge(self, model_name='all-MiniLM-L6-v2', plot_clusters=False, save_dir='.'):
+    def cluster_knowledge(
+        self, model_name="all-MiniLM-L6-v2", plot_clusters=False, save_dir="."
+    ):
         """
         Get representative concepts using KMeans clustering and optionally save cluster plot.
 
@@ -756,16 +983,23 @@ class GWTAutogenAgent(AutogenAgent):
             dict: Representative concepts, cluster sizes, cluster members, and chosen_k.
         """
 
-        concept_text = ''
-        if os.path.exists(self.log_paths['memory1_path']):
-            with open(self.log_paths['memory1_path'], "r") as file:
+        concept_text = ""
+        if os.path.exists(self.log_paths["memory1_path"]):
+            with open(self.log_paths["memory1_path"]) as file:
                 concept_text = file.read()
 
-        concept_lines = [line.strip() for line in concept_text.split('\n') if line.strip()]
+        concept_lines = [
+            line.strip() for line in concept_text.split("\n") if line.strip()
+        ]
         num_concepts = len(concept_lines)
 
         if num_concepts == 0:
-            return {'representative_concepts': [], 'cluster_sizes': {}, 'cluster_members': {}, 'chosen_k': 0}
+            return {
+                "representative_concepts": [],
+                "cluster_sizes": {},
+                "cluster_members": {},
+                "chosen_k": 0,
+            }
 
         model = SentenceTransformer(model_name)
         embeddings = model.encode(concept_lines, convert_to_tensor=True).cpu().numpy()
@@ -785,10 +1019,12 @@ class GWTAutogenAgent(AutogenAgent):
 
         representative_concepts = []
         self.knowledge = []
-        if os.path.exists(self.log_paths['memory2_path']):
-            with open(self.log_paths['memory2_path'], "w") as file:
+        if os.path.exists(self.log_paths["memory2_path"]):
+            with open(self.log_paths["memory2_path"], "w") as file:
                 for i in range(chosen_k):
-                    cluster_indices = [j for j, label in enumerate(labels) if label == i]
+                    cluster_indices = [
+                        j for j, label in enumerate(labels) if label == i
+                    ]
                     center = kmeans.cluster_centers_[i]
                     cluster_embeddings = embeddings[cluster_indices]
                     distances = np.linalg.norm(cluster_embeddings - center, axis=1)
@@ -802,18 +1038,25 @@ class GWTAutogenAgent(AutogenAgent):
                     confidence_score = cluster_sizes[i]
 
                     # Avoid stripping leading char if it's not needed
-                    clean_concept = representative_concept[1:] if representative_concept.startswith(
-                        '[') else representative_concept
+                    clean_concept = (
+                        representative_concept[1:]
+                        if representative_concept.startswith("[")
+                        else representative_concept
+                    )
 
-                    file.write(f'Cluster {i + 1}; Confidence Score = {confidence_score}; Concept: {clean_concept}\n')
+                    file.write(
+                        f"Cluster {i + 1}; Confidence Score = {confidence_score}; Concept: {clean_concept}\n"
+                    )
 
-                    self.knowledge.append(json.dumps(
-                        {
-                            "cluster_id": int(i + 1),
-                            "confidence_score": int(confidence_score),
-                            "general_concept": clean_concept
-                        }
-                    ))
+                    self.knowledge.append(
+                        json.dumps(
+                            {
+                                "cluster_id": int(i + 1),
+                                "confidence_score": int(confidence_score),
+                                "general_concept": clean_concept,
+                            }
+                        )
+                    )
                     representative_concepts.append(representative_concept)
 
         if plot_clusters:
@@ -823,7 +1066,12 @@ class GWTAutogenAgent(AutogenAgent):
             plt.figure(figsize=(10, 6))
             for i in range(chosen_k):
                 points = embedding_2d[np.array(labels) == i]
-                plt.scatter(points[:, 0], points[:, 1], label=f'Cluster {i} ({cluster_sizes[i]})', alpha=0.7)
+                plt.scatter(
+                    points[:, 0],
+                    points[:, 1],
+                    label=f"Cluster {i} ({cluster_sizes[i]})",
+                    alpha=0.7,
+                )
 
             plt.title("2D Visualization of Clusters (UMAP)")
             plt.xlabel("UMAP-1")
@@ -832,15 +1080,15 @@ class GWTAutogenAgent(AutogenAgent):
             plt.grid(True)
             plt.tight_layout()
 
-            cluster_path = os.path.join(save_dir, 'cluster_plot.png')
+            cluster_path = os.path.join(save_dir, "cluster_plot.png")
             plt.savefig(cluster_path)
             plt.close()
 
         return {
-            'representative_concepts': representative_concepts,
-            'cluster_sizes': cluster_sizes,
-            'cluster_members': cluster_members,
-            'chosen_k': chosen_k
+            "representative_concepts": representative_concepts,
+            "cluster_sizes": cluster_sizes,
+            "cluster_members": cluster_members,
+            "chosen_k": chosen_k,
         }
 
     def generate_initial_message(self):
@@ -849,9 +1097,9 @@ class GWTAutogenAgent(AutogenAgent):
         roles, prior concept, and the current task state.
         """
         intro = (
-            f"You and all other Agents are collectively a unified cognitive system named ALFRED. "
-            f"Each of you plays a distinct role in perception, memory, planning, reasoning, or action execution. "
-            f"Together, your goal is to solve the following task as efficiently and intelligently as possible.\n\n"
+            "You and all other Agents are collectively a unified cognitive system named ALFRED. "
+            "Each of you plays a distinct role in perception, memory, planning, reasoning, or action execution. "
+            "Together, your goal is to solve the following task as efficiently and intelligently as possible.\n\n"
         )
 
         task_section = f"--- TASK DESCRIPTION ---\n{self.task}\n\n"
@@ -863,29 +1111,49 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         memory_section = "--- PRIOR KNOWLEDGE & EPISODIC MEMORY ---\n"
-        memory_section += json.dumps(
-            {"knowledge": self.knowledge, "recent_episodic_memories": self.prev_episodic_memories[:20],
-             "current_episode_memory": self.curr_episodic_memory}, indent=2) + "\n\n"
+        memory_section += (
+            json.dumps(
+                {
+                    "knowledge": self.knowledge,
+                    "recent_episodic_memories": self.prev_episodic_memories[:20],
+                    "current_episode_memory": self.curr_episodic_memory,
+                },
+                indent=2,
+            )
+            + "\n\n"
+        )
 
         state_section = (
-                "--- CURRENT STATE ---\n"
-                "" + json.dumps(self.percept, indent=2) + "\n"
+            "--- CURRENT STATE ---\n" + json.dumps(self.percept, indent=2) + "\n"
         )
 
         final_prompt = (
             "Begin cognitive deliberation. Coordinate through structured, grounded reasoning. "
             "Use prior knowledge when relevant, minimize communication and actions, and confirm task completion explicitly through perceptual feedback."
         )
-        return intro + task_section + constraints_section + memory_section + state_section + final_prompt
+        return (
+            intro
+            + task_section
+            + constraints_section
+            + memory_section
+            + state_section
+            + final_prompt
+        )
 
     def retrieve_memory(self):
         random_episodic_memories = self.prev_episodic_memories
         if len(random_episodic_memories) >= 5:
-            random_episodic_memories = sorted(random.sample(self.prev_episodic_memories, 5),
-                                              key=lambda x: x['episode_number'])
+            random_episodic_memories = sorted(
+                random.sample(self.prev_episodic_memories, 5),
+                key=lambda x: x["episode_number"],
+            )
 
         self.memory = json.dumps(
-            {"knowledge": self.knowledge, "previous_episodic_memories": random_episodic_memories,
-             "current_episode_memory": self.curr_episodic_memory}, indent=2)
+            {
+                "knowledge": self.knowledge,
+                "previous_episodic_memories": random_episodic_memories,
+                "current_episode_memory": self.curr_episodic_memory,
+            },
+            indent=2,
+        )
         return self.memory
-

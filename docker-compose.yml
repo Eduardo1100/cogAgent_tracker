@@ -40,8 +40,6 @@ services:
     container_name: example-db
     env_file: 
       - .env
-    # The environment variables are injected automatically by the env_file, 
-    # so we don't need the explicit environment block here anymore!
     healthcheck:
       # Use the variables here too so the healthcheck doesn't break if you change the username
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -50,6 +48,8 @@ services:
       retries: 10
     volumes:
       - database-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
 
   cache:
     image: redis:7

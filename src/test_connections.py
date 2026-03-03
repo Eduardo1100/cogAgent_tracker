@@ -1,8 +1,10 @@
 import os
-import redis
+
 import boto3
 import psycopg
+import redis
 from botocore.config import Config
+
 
 def test_all():
     print("🧪 Starting Infrastructure Health Check...\n")
@@ -28,17 +30,18 @@ def test_all():
     # 3. Test MinIO (S3)
     try:
         s3 = boto3.client(
-            's3',
+            "s3",
             endpoint_url=os.getenv("S3_ENDPOINT"),
             aws_access_key_id=os.getenv("S3_ACCESS_KEY"),
             aws_secret_access_key=os.getenv("S3_SECRET_KEY"),
-            config=Config(signature_version='s3v4'),
-            region_name='us-east-1'
+            config=Config(signature_version="s3v4"),
+            region_name="us-east-1",
         )
         s3.list_buckets()
         print("✅ MinIO: Connected! (S3 API is live)")
     except Exception as e:
         print(f"❌ MinIO: Failed! {e}")
+
 
 if __name__ == "__main__":
     test_all()

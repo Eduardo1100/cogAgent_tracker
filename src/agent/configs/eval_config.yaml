@@ -154,4 +154,55 @@ vision_dagger:
   resnet_fc_dim: 64
   maskrcnn_top_k_boxes: 10                                  # top k box features
   use_exploration_frame_feats: False                        # append feats from initial exploration (memory intensive!)
-  sequence_aggregation_method: "average"                    # 'sum' or 'average' or 'rnn'
+  sequence_aggregation_method: "average"                # 'sum' or 'average' or 'rnn'
+
+llm_profiles:
+  # Optimized for GWT: Index 0 = Standard Agents, Index 1 = Conscious Agent (Reasoner)
+  - gemini_with_deepseek_reasoner:
+      - model: "gemini-2.0-flash"
+        api_type: "google"
+        api_key: "${GEMINI_API_KEY}"
+        price: [0.0, 0.0] # Gemini Free is 0, but helps stop the warning
+      - model: "deepseek-chat"    # <--- ADDED as the middle-man fallback
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00014, 0.00028]
+      - model: "deepseek-reasoner" # The heavy lifter
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00055, 0.00219] # <--- ADDED to fix your pricing warning
+
+  # Full DeepSeek Stack (Extremely cheap and fast)
+  - deepseek_full_stack:
+    - model: "deepseek-chat"    # Standard Agents (V3)
+      api_type: "openai"
+      api_key: "${DEEPSEEK_API_KEY}"
+      base_url: "https://api.deepseek.com"
+      price: [0.00014, 0.00028]
+    - model: "deepseek-reasoner" # Conscious Agent (R1)
+      api_type: "openai"
+      api_key: "${DEEPSEEK_API_KEY}"
+      base_url: "https://api.deepseek.com"
+      price: [0.00055, 0.00219]
+
+  # High Performance (OpenAI)
+  - openai_pro:
+    - model: "gpt-4o-mini"      # Standard Agents
+      api_type: "openai"
+      api_key: "${OPENAI_API_KEY}"
+    - model: "o1-preview"       # Heavy Reasoning Agent
+      api_type: "openai"
+      api_key: "${OPENAI_API_KEY}"
+
+  # Local Development (Ollama/vLLM)
+  - local_dev:
+    - model: "llama3"
+      api_type: "openai"
+      base_url: "${LOCAL_API_BASE}"
+      api_key: "NULL"
+    - model: "llama3-70b"       # Larger model for reasoning
+      api_type: "openai"
+      base_url: "${LOCAL_API_BASE}"
+      api_key: "NULL"

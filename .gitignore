@@ -74,3 +74,4 @@ htmlcov/
 
 # Windows
 Thumbs.db
+Thumbs.db.cache/

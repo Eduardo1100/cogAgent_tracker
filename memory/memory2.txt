@@ -1,0 +1,1 @@
+Cluster 1; Confidence Score = 1; Concept: - Spatula are often found on countertops and can be taken directly. This is a useful heuristic for finding spatula in kitchen environments.
