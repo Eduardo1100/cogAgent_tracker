@@ -65,7 +65,8 @@ class MessageToolCall:
                 result = func(*args)
                 return f"ECHO: {result}"
             else:
-                # If somehow parsing didn't match the tool_name, break to avoid infinite loop
+                # If somehow parsing didn't match the tool_name,
+                # break to avoid infinite loop
                 raise ValueError(
                     f"Tool name mismatch: {parsed_tool_name} != {tool_name}"
                 )
@@ -150,10 +151,22 @@ def get_echo_agent(name, llm_config, additional_termination_criteria=None):
 
     echo_agent = ConversableAgent(
         name=f"{name}" if name else "echo",
-        system_message=f'You are {name}, if the last message you received begins with the keyword "ECHO: ", then you parrot the contents of the last message you received. Otherwise, do nothing.'
+        system_message=f"You are {name}, if the last message you received begins with"
+        'the keyword "ECHO: ", then you parrot the contents of the last message you'
+        "received. Otherwise, do nothing."
         f"\nExample:"
-        f"\n Last message you received = ECHO: Observation: You arrive at drawer 2. The drawer 2 is closed. Task Status: INCOMPLETE Actions Left: 20 Current Admissible Actions: ['examine drawer 2', 'go to bed 1', 'go to desk 1', 'go to drawer 1', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to dresser 1', 'go to garbagecan 1', 'go to laundryhamper 1', 'go to shelf 1', 'help', 'inventory', 'look', 'open drawer 2']"
-        f"\n Your output = Observation: You arrive at drawer 2. The drawer 2 is closed. Task Status: INCOMPLETE Actions Left: 20 Current Admissible Actions: ['examine drawer 2', 'go to bed 1', 'go to desk 1', 'go to drawer 1', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to dresser 1', 'go to garbagecan 1', 'go to laundryhamper 1', 'go to shelf 1', 'help', 'inventory', 'look', 'open drawer 2']",
+        f"\n Last message you received = ECHO: Observation: You arrive at drawer 2. The"
+        "drawer 2 is closed. Task Status: INCOMPLETE Actions Left: 20 Current"
+        "Admissible Actions: ['examine drawer 2', 'go to bed 1', 'go to desk 1', 'go to"
+        " drawer 1', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to "
+        "dresser 1', 'go to garbagecan 1', 'go to laundryhamper 1', 'go to shelf 1', "
+        "'help', 'inventory', 'look', 'open drawer 2']"
+        f"\n Your output = Observation: You arrive at drawer 2. The drawer 2 is closed."
+        " Task Status: INCOMPLETE Actions Left: 20 Current Admissible Actions:"
+        " ['examine drawer 2', 'go to bed 1', 'go to desk 1', 'go to drawer 1', 'go "
+        "to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to dresser 1', 'go to "
+        "garbagecan 1', 'go to laundryhamper 1', 'go to shelf 1', 'help', 'inventory',"
+        " 'look', 'open drawer 2']",
         llm_config=llm_config,
         human_input_mode="NEVER",
         is_termination_msg=termination_criteria,
@@ -166,7 +179,8 @@ def create_echo_agent():
     """Creates a programmatic relay that turns tool outputs into standard text."""
     echo_agent = ConversableAgent(
         name="Echo_Agent",
-        system_message="I am a relay. I convert environmental tool outputs into standard text.",
+        system_message="I am a relay. I convert environmental tool outputs into "
+        "standard text.",
         llm_config=False,  # No LLM needed
         human_input_mode="NEVER",
     )

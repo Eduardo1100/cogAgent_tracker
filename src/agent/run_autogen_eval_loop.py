@@ -9,20 +9,18 @@ import random
 import time
 from datetime import UTC, datetime
 
-UTC = UTC
-
 import yaml
-from botocore.exceptions import ClientError  # <-- ADD THIS
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
-# ALFWorld & Agents
-# External packages
-import wandb  # Make sure to run `wandb login` beforehand
+import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
 from src.agent.gwt_agent import GWTAutogenAgent
 from src.storage.database import Base, SessionLocal, engine
 from src.storage.models import EpisodeRun, ExperimentRun
-from src.storage.s3 import get_s3_client  # <-- ADD THIS
+from src.storage.s3 import get_s3_client
+
+UTC = UTC
 
 load_dotenv()  # Loads your .env file
 
@@ -48,7 +46,8 @@ def get_llm_profile(config_data):
 
     if not curr_profile:
         print(
-            f"⚠️ Profile '{profile_name}' not found. Falling back to the first available."
+            f"⚠️ Profile '{profile_name}' not found. Falling back to the first "
+            "available."
         )
         # Fall back to the very first profile in the YAML
         if profiles_list and isinstance(profiles_list[0], dict):
@@ -85,7 +84,8 @@ os.makedirs(base_path, exist_ok=True)
 
 def parse_arguments():
     """
-    Parse command-line arguments for evaluating Autogen Agents on the ALFWorld environment.
+    Parse command-line arguments for evaluating Autogen Agents on the ALFWorld
+    environment.
     """
     parser = argparse.ArgumentParser(
         description="Evaluate different Autogen Agents on the ALFWorld environment."
@@ -152,7 +152,9 @@ if __name__ == "__main__":
     )
 
     # Setup API key
-    # llm_config = {"config_list": [{"model": "gpt-4o", "api_key":os.environ.get("OPENAI_API_KEY")}]}
+    # llm_config = {"config_list": [{"model": "gpt-4o",
+    # "api_key":os.environ.get("OPENAI_API_KEY")}]}
+
     llm_profile = get_llm_profile(config)
 
     # Initialize Agent
@@ -198,7 +200,8 @@ if __name__ == "__main__":
                     )
                 except ImportError:
                     print(
-                        "❌ Could not find AlfredTWEnv. Check your alfworld installation."
+                        "❌ Could not find AlfredTWEnv. Check your alfworld "
+                        "installation."
                     )
                     raise
 
@@ -215,7 +218,8 @@ if __name__ == "__main__":
                 selected_games = sorted(
                     random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
                 )
-                # selected_games = [124, 125] #[35, 94, 124, 125] #[35, 52, 57, 69, 77, 79, 86, 93, 94, 107, 109, 121, 123, 124, 125, 139]
+                # selected_games = [124, 125] #[35, 94, 124, 125] #[35, 52, 57, 69, 77,
+                # 79, 86, 93, 94, 107, 109, 121, 123, 124, 125, 139]
                 # num_games_to_evaluate = len(selected_games)
                 print(f"Selected {num_games_to_evaluate} Games: {selected_games}")
 
@@ -322,7 +326,8 @@ if __name__ == "__main__":
                                 retry_count += 1
                                 wait_time = 65 * retry_count
                                 print(
-                                    f"\n🛑 RATE LIMIT: Sleeping {wait_time}s then retrying Game #{i}..."
+                                    f"\n🛑 RATE LIMIT: Sleeping {wait_time}s then "
+                                    "retrying Game #{i}..."
                                 )
                                 time.sleep(wait_time)
                             else:
@@ -520,7 +525,9 @@ if __name__ == "__main__":
                         print(f"✅ Database updated for Run ID: {experiment.id}")
                     except Exception as e:
                         print(f"⚠️ Database logging failed: {e}")
-                        db.rollback()  # Important: undoes the failed transaction so the loop doesn't break
+                        # Important: undoes the failed transaction so the loop
+                        # doesn't break
+                        db.rollback()
 
                     print(f"🚀 FINAL RUN REPORT for ID: {current_experiment_id}")
 
@@ -559,38 +566,56 @@ if __name__ == "__main__":
                     print(f"Success: {success}")
                     print(f"Runtime: {elapsed_minutes:.2f} minutes")
                     print(
-                        f"Rounds Taken: {global_split_rounds_per_game - agent.rounds_left} out of {global_split_rounds_per_game}"
+                        f"Rounds Taken: {
+                            global_split_rounds_per_game - agent.rounds_left
+                        } out of {global_split_rounds_per_game}"
                     )
                     print(
-                        f"Actions Taken: {agent.num_actions_taken} out of {global_max_actions_per_game}"
+                        f"Actions Taken: {agent.num_actions_taken} out of "
+                        f"{global_max_actions_per_game}"
                     )
                     print(f"Chat Rounds Taken: {chat_round_list[-1]}")
                     print(
-                        f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
+                        f"Success Rate: {num_successes}/{num_games_evaluated} = "
+                        f"{100 * success_rate:.2f}%"
                     )
                     print(
-                        f"Average Actions per Successful Game: {avg_actions_taken_per_successful_game:.2f} out of {global_max_actions_per_game}"
+                        f"Average Actions per Successful Game: "
+                        f"{avg_actions_taken_per_successful_game:.2f} out of "
+                        f"{global_max_actions_per_game}"
                     )
                     print(
-                        f"Average Chat Rounds per Successful Game: {avg_chat_rounds_per_successful_game:.2f} out of {global_max_chat_rounds_per_game}"
+                        f"Average Chat Rounds per Successful Game: "
+                        f"{avg_chat_rounds_per_successful_game:.2f} out of "
+                        f"{global_max_chat_rounds_per_game}"
                     )
                     print(
-                        f"Average Runtime per Successful Game: {avg_runtime_per_successful_game:.2f} minutes"
+                        f"Average Runtime per Successful Game: "
+                        f"{avg_runtime_per_successful_game:.2f} minutes"
                     )
                     print(
-                        f"Average Actions per Failing Game: {avg_actions_taken_per_failing_game:.2f} out of {global_max_actions_per_game}"
+                        f"Average Actions per Failing Game: "
+                        f"{avg_actions_taken_per_failing_game:.2f} out of "
+                        f"{global_max_actions_per_game}"
                     )
                     print(
-                        f"Average Chat Rounds per Failing Game: {avg_chat_rounds_per_failing_game:.2f} out of {global_max_chat_rounds_per_game}"
+                        f"Average Chat Rounds per Failing Game: "
+                        f"{avg_chat_rounds_per_failing_game:.2f} out of "
+                        f"{global_max_chat_rounds_per_game}"
                     )
                     print(
-                        f"Average Runtime per Failing Game: {avg_runtime_per_failing_game:.2f} minutes"
+                        f"Average Runtime per Failing Game: "
+                        f"{avg_runtime_per_failing_game:.2f} minutes"
                     )
                     print(f"Successes: {success_list}")
                     print(f"Failures: {failure_list}")
                     print(f"Errors: {error_list}")
                     print(
-                        f"Error-Adjusted Success Rate: {num_successes}/{num_games_no_error} = {100 * error_adjusted_success_rate if num_games_no_error > 0 else 0:.2f}%"
+                        f"Error-Adjusted Success Rate: {num_successes}/"
+                        f"{num_games_no_error} = {
+                            100 * error_adjusted_success_rate
+                            if num_games_no_error > 0
+                            else 0:.2f}%"
                     )
                     print(f"Remaining Games: {selected_games[num_games_evaluated:]}")
 
@@ -614,10 +639,15 @@ if __name__ == "__main__":
 
                 # Final Success Summary
                 print(
-                    f"Final Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
+                    f"Final Success Rate: {num_successes}/{num_games_evaluated} = "
+                    f"{100 * success_rate:.2f}%"
                 )
                 print(
-                    f"Final Error-Adjusted Success Rate: {num_successes}/{num_games_no_error} = {100 * num_successes / num_games_no_error if num_games_no_error > 0 else 0:.2f}%"
+                    f"Final Error-Adjusted Success Rate: {num_successes}/"
+                    f"{num_games_no_error} = {
+                        100 * num_successes / num_games_no_error
+                        if num_games_no_error > 0
+                        else 0:.2f}%"
                 )
 
     wandb.finish()

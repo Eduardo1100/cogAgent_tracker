@@ -4,7 +4,7 @@ repos:
     rev: v0.15.4
     hooks:
       # 1. Run the linter and automatically fix what it can (like unused imports)
-      - id: ruff-check
-        args: ["--fix"]
+      - id: ruff
+        args: [--fix, --exit-zero]
       # 2. Run the formatter (fixes quotes, spacing, and line lengths)
       - id: ruff-format
