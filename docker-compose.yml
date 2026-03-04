@@ -17,6 +17,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - /app/.venv
       - venv_storage:/app/.venv 
     command: sh -c "uv sync --frozen && /app/.venv/bin/python -m src.main"
     depends_on:

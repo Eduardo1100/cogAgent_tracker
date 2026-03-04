@@ -1,57 +1,67 @@
 # ==========================================
 # Stage 1: Build stage (The Heavy Lifter)
 # ==========================================
+FROM mcr.microsoft.com/vscode/devcontainers/python:3.11
 FROM ghcr.io/astral-sh/uv:latest AS uv_bin
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS builder
 
 # 1. Bring the lightning-fast 'uv' tool into our builder
 COPY --from=uv_bin /uv /uvx /bin/
 
+# 2. INSTALL BUILD TOOLS HERE (Crucial for Jericho/ALFWorld)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    gcc \
+    g++ \
+    make \
+    libpq-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# 2. Crucial environment variables for multi-stage Docker + uv
-ENV UV_LINK_MODE=copy
-ENV UV_CONCURRENT_DOWNLOADS=2
-ENV UV_CONCURRENT_INSTALLS=2
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_PYTHON_INSTALL_DIR=/python
+# 3. Environment variables for uv
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_INSTALL_DIR=/python
 
-RUN apt-get update && apt-get install -y build-essential
-
-# 3. Explicitly copy dependency files so uv can see them
-WORKDIR /app
+# 4. Copy dependency files
 COPY pyproject.toml uv.lock ./
 
-# 4. Install Python and sync dependencies into a dedicated .venv
+# 5. Install Python and sync dependencies
+# We use --no-install-project because we haven't copied the src yet
 RUN uv python install 3.11
+ENV UV_PYTHON_PREFERENCE=only-managed
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev --python 3.11
 
 # ==========================================
 # Stage 2: Final Run stage (The Lean Runner)
 # ==========================================
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
-# 5. CUDA images need these to understand the local Python libs we are copying
+# !!! CRUCIAL: Add make and gcc here because 'uv sync' runs at container startup !!!
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-lib2to3 libpython3-dev && \
-    rm -rf /var/lib/apt/lists/*
+    build-essential \
+    make \
+    gcc \
+    g++ \
+    libpq5 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 6. Bring over the 'uv' binary (so we can run 'uv sync' at container runtime)
+# Bring over uv and python toolchain
 COPY --from=uv_bin /uv /uvx /bin/
-
-# 7. Bring over the compiled Python toolchain and our populated virtual environment
 COPY --from=builder /python /python
-COPY --from=builder /app/.venv /app/.venv
 
-# 8. Copy the actual application code
-COPY src/ /app/src/
+# We DON'T copy the .venv from builder because your docker-compose 
+# uses a volume (venv_storage) which will overwrite it anyway.
 
-# 9. Put our virtual environment and Python toolchain at the absolute front of the line
-ENV PATH="/app/.venv/bin:/python/bin:$PATH"
-ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:/python/bin:$PATH" \
+    VIRTUAL_ENV=/app/.venv \
+    PYTHONUNBUFFERED=1
 
-# 10. Run the app as a module to prevent relative import path errors
-CMD ["/app/.venv/bin/python", "-m", "src.main"]
+# The command is handled by docker-compose.yml

@@ -566,9 +566,8 @@ if __name__ == "__main__":
                     print(f"Success: {success}")
                     print(f"Runtime: {elapsed_minutes:.2f} minutes")
                     print(
-                        f"Rounds Taken: {
-                            global_split_rounds_per_game - agent.rounds_left
-                        } out of {global_split_rounds_per_game}"
+                        f"Rounds Taken: {global_split_rounds_per_game - agent.rounds_left}"
+                        f" out of {global_split_rounds_per_game}"
                     )
                     print(
                         f"Actions Taken: {agent.num_actions_taken} out of "
@@ -612,10 +611,7 @@ if __name__ == "__main__":
                     print(f"Errors: {error_list}")
                     print(
                         f"Error-Adjusted Success Rate: {num_successes}/"
-                        f"{num_games_no_error} = {
-                            100 * error_adjusted_success_rate
-                            if num_games_no_error > 0
-                            else 0:.2f}%"
+                        f"{num_games_no_error} = {100 * error_adjusted_success_rate if num_games_no_error > 0 else 0:.2f}%"
                     )
                     print(f"Remaining Games: {selected_games[num_games_evaluated:]}")
 
@@ -644,10 +640,7 @@ if __name__ == "__main__":
                 )
                 print(
                     f"Final Error-Adjusted Success Rate: {num_successes}/"
-                    f"{num_games_no_error} = {
-                        100 * num_successes / num_games_no_error
-                        if num_games_no_error > 0
-                        else 0:.2f}%"
+                    f"{num_games_no_error} = {100 * num_successes / num_games_no_error if num_games_no_error > 0 else 0:.2f}%"
                 )
 
     wandb.finish()
