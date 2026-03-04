@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
+    flatten_tool_messages,
     get_best_candidate,
     is_termination_msg_generic,
 )
@@ -21,7 +22,7 @@ from src.agent.helpers import (
 class GWTAutogenAgent(AutogenAgent):
     def __init__(
         self,
-        llm_config,
+        llm_profile,
         log_path,
         game_no=1,
         max_chat_round=400,
@@ -33,7 +34,7 @@ class GWTAutogenAgent(AutogenAgent):
         info=None,
     ):
         super().__init__(
-            llm_config,
+            llm_profile,
             log_path,
             game_no,
             max_chat_round,
@@ -44,6 +45,7 @@ class GWTAutogenAgent(AutogenAgent):
             info,
         )
 
+        self.echo_agent = None
         self.planning_agent = None
         self.motor_agent = None
         self.idea_agent = None
@@ -145,19 +147,20 @@ class GWTAutogenAgent(AutogenAgent):
     def initialize_agents(self):
 
         # 1. Get the full list of models from your profile
-        full_list = self.llm_profile.get("config_list", [])
+        self.llm_config_list = self.llm_profile.get("config_list", [])
 
         # 2. Define the 'Standard' Priority: Gemini -> Chat -> Reasoner
         # If Gemini is dead (429), it immediately tries DeepSeek Chat.
-        standard_fallback_list = full_list
+        standard_fallback_list = self.llm_config_list
 
         # 3. Define the 'Reasoner' Priority: Reasoner -> Chat -> Gemini
         # We REVERSE it so the Conscious Agent always tries to 'think' first.
-        reasoner_fallback_list = list(reversed(full_list))
+        reasoner_fallback_list = list(reversed(self.llm_config_list))
 
         standard_config = {
             "config_list": standard_fallback_list,
             "temperature": 0.0,
+            "max_tokens": 200,
         }
 
         reasoner_config = {
@@ -170,7 +173,13 @@ class GWTAutogenAgent(AutogenAgent):
         planning_config["max_tokens"] = 1500
 
         # ... (Keep all your agent initializations exactly the same below this!) ...
+        from src.agent.helpers import create_echo_agent
 
+        self.echo_agent = create_echo_agent()
+        self.agents_info[self.echo_agent.name] = {
+            "Prompt": self.echo_agent.system_message,
+            "Description": self.echo_agent.description,
+        }
         # 2. Initialize Infrastructure Agents
         self.focus_agent = ConversableAgent(
             name="Focus_Agent",
@@ -564,20 +573,22 @@ class GWTAutogenAgent(AutogenAgent):
         self.start_agent = self.external_perception_agent
 
         self.allowed_transitions = {
-            self.planning_agent: [self.motor_agent],  # xidea_agent
+            self.planning_agent: [self.motor_agent],
             self.motor_agent: [self.external_perception_agent],
-            self.external_perception_agent: [self.conscious_agent],
+            # CHANGE: Route through Echo_Agent to broadcast tool results
+            self.external_perception_agent: [self.echo_agent],
+            self.echo_agent: [self.conscious_agent],
             self.conscious_agent: [
                 self.planning_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
                 self.learning_agent,
                 self.idea_agent,
-            ],  ##learning_agent #>idea
+            ],
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
             self.internal_perception_agent_3: [self.idea_agent, self.learning_agent],
-            self.idea_agent: [self.planning_agent],  # xlearning_agent #xmotor_agent
-            self.learning_agent: [self.record_long_term_memory_agent],  # xidea_agent
+            self.idea_agent: [self.planning_agent],
+            self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
             self.internal_perception_agent_1: [self.idea_agent],
             self.internal_perception_agent_2: [self.conscious_agent],
@@ -607,143 +618,16 @@ class GWTAutogenAgent(AutogenAgent):
             json.dump(self.agents_info, f, indent=4)
 
     def initialize_groupchat(self):
-        import copy as _copy
+        # 1. Setup the Relay (Echo Agent)
+        # self.llm_config_list = self.llm_profile.get("config_list", [])
+        # self.echo_agent = create_echo_agent(self.llm_config_list[0])
+        # self.echo_agent = create_echo_agent()
 
-        full_list = self.llm_profile.get("config_list", [])
-        manager_config_list = [
-            cfg for cfg in full_list if "reasoner" not in cfg.get("model", "").lower()
-        ]
-        print(manager_config_list)
-
-        if not manager_config_list:
-            manager_config_list = full_list
-
-        self.group_chat = GroupChat(
-            agents=[
-                self.planning_agent,
-                self.motor_agent,
-                self.idea_agent,
-                self.external_perception_agent,
-                self.internal_perception_agent_1,
-                self.internal_perception_agent_2,
-                self.internal_perception_agent_3,
-                self.conscious_agent,
-                self.retrieve_memory_agent,
-                self.learning_agent,
-                self.record_long_term_memory_agent,
-                self.focus_agent,
-            ],
-            messages=[],
-            allowed_or_disallowed_speaker_transitions=self.allowed_transitions,
-            speaker_transitions_type="allowed",
-            max_round=self.max_chat_round,
-            send_introductions=True,
-            speaker_selection_method="auto",
-        )
-
-        self.group_chat_manager = GroupChatManager(
-            groupchat=self.group_chat,
-            llm_config={
-                "config_list": manager_config_list,
-                "temperature": 0.0,
-                "cache_seed": 42,
-            },
-        )
-
-        # --- FIX: Patch append at the source so group_chat.messages is always clean.
-        # This is the only layer that works because _prepare_and_select_agents does
-        # self.messages.copy() directly — before any register_reply hook can fire.
-        original_append = self.group_chat.append
-
-        def clean_append(message, speaker):
-            msg = _copy.deepcopy(message)
-            if msg.get("role") == "tool":
-                msg["role"] = "user"
-                msg["content"] = f"[Observation]: {msg.get('content', '')}"
-                msg.pop("tool_call_id", None)
-            if "tool_calls" in msg:
-                calls = [
-                    f"[Calling {c['function']['name']}]"
-                    for c in msg.get("tool_calls", [])
-                ]
-                msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
-                msg.pop("tool_calls", None)
-            return original_append(msg, speaker)
-
-        self.group_chat.append = clean_append
-
-        # --- THROTTLING BLOCK ---
-        def throttle_and_track(recipient, messages, sender, config):
-            safe_config = config or {}
-            model_name = safe_config.get("config_list", [{}])[0].get("model", "")
-
-            wait_time = 6.0 if "gemini" in model_name.lower() else 0.5
-
-            print(
-                f"⏳ Throttling: {recipient.name} ({model_name or 'System'}) waiting {wait_time}s..."
-            )
-            time.sleep(wait_time)
-            return False, None
-
-        for agent in [
+        # 2. Define Active Agents (Exclude Echo_Agent from selection list)
+        active_agents = [
             self.planning_agent,
             self.motor_agent,
             self.idea_agent,
-            self.conscious_agent,
-            self.retrieve_memory_agent,
-            self.learning_agent,
-            self.record_long_term_memory_agent,
-            self.focus_agent,
-            self.group_chat_manager,
-        ]:
-            agent.register_reply(
-                [ConversableAgent, None],
-                reply_func=throttle_and_track,
-                position=0,
-            )
-
-        import types
-
-        def _make_clean_append_oai(agent):
-            """Patch _append_oai_message on an agent to strip tool role and tool_responses."""
-            original = agent._append_oai_message
-
-            def clean_append_oai(message, conversation_id, role, name=None):
-                if isinstance(message, dict):
-                    message = _copy.deepcopy(message)
-                    # 1. Flatten tool_responses before they get stored
-                    if "tool_responses" in message:
-                        message.pop("tool_responses", None)
-                    # 2. Downgrade tool role to user
-                    if message.get("role") == "tool":
-                        message["role"] = "user"
-                        message.pop("tool_call_id", None)
-                    # 3. Strip tool_calls, embed as text
-                    if "tool_calls" in message:
-                        calls = [
-                            f"[Calling {c['function']['name']}]"
-                            for c in message.get("tool_calls", [])
-                            if isinstance(c, dict)
-                        ]
-                        message["content"] = (
-                            (message.get("content") or "") + "\n" + "\n".join(calls)
-                        )
-                        message.pop("tool_calls", None)
-                return original(message, conversation_id, role, name)
-
-            agent._append_oai_message = types.MethodType(
-                lambda self, message, conversation_id, role, name=None: (
-                    clean_append_oai(message, conversation_id, role, name)
-                ),
-                agent,
-            )
-
-        # Apply to every agent that receives messages (all of them)
-        all_agents = [
-            self.planning_agent,
-            self.motor_agent,
-            self.idea_agent,
-            self.external_perception_agent,
             self.internal_perception_agent_1,
             self.internal_perception_agent_2,
             self.internal_perception_agent_3,
@@ -752,10 +636,95 @@ class GWTAutogenAgent(AutogenAgent):
             self.learning_agent,
             self.record_long_term_memory_agent,
             self.focus_agent,
+            self.external_perception_agent,
+            self.echo_agent,
+        ]
+        active_agents = [a for a in active_agents if a is not None]
+        active_agent_names = [a.name for a in active_agents]
+
+        # 3. Filter Transitions to match active agents
+        filtered_transitions = {}
+        for speaker, next_speakers in self.allowed_transitions.items():
+            if speaker.name in active_agent_names:
+                valid_next = [s for s in next_speakers if s.name in active_agent_names]
+                filtered_transitions[speaker] = valid_next
+
+        # 4. Initialize GroupChat and Manager
+        self.group_chat = GroupChat(
+            agents=active_agents,
+            messages=[],
+            allowed_or_disallowed_speaker_transitions=filtered_transitions,
+            speaker_transitions_type="allowed",
+            max_round=self.max_chat_round,
+            speaker_selection_method=self.custom_speaker_selection,
+        )
+
+        self.group_chat_manager = GroupChatManager(
+            groupchat=self.group_chat,
+            llm_config=self.llm_config_list[0],
+        )
+
+        # 5. THE ECHO HOOK (Prevents 400 Errors)
+        """def echo_tool_hook(recipient, messages, sender, config):
+            if not messages:
+                return False, None
+
+            last_msg = messages[-1]
+
+            if last_msg.get("role") == "tool":
+                content = last_msg.get("content") or "Action completed."
+
+                # 1) DELETE the tool message so it never reaches the LLM API
+                messages.pop()
+
+                # 2) Relay as plain text (safe role)
+                self.echo_agent.send(
+                    recipient=self.group_chat_manager,
+                    message={"role": "user", "content": f"[Observation]: {content}"},
+                    request_reply=False,
+                )
+
+                # Suppress any further handling for this turn
+                return True, None
+
+            return False, None
+
+        self.external_perception_agent.register_reply(
+            [ConversableAgent, None],
+            reply_func=echo_tool_hook,
+            position=0
+        )
+        """
+        # 6. JIT SCRUBBING (Input Protection for LLMs)
+        llm_agents = [
+            self.planning_agent,
+            self.motor_agent,
+            self.idea_agent,
+            self.conscious_agent,
+            self.retrieve_memory_agent,
+            self.learning_agent,
+            self.record_long_term_memory_agent,
+            self.focus_agent,
             self.group_chat_manager,
         ]
-        for agent in all_agents:
-            _make_clean_append_oai(agent)
+
+        for agent in active_agents + [self.group_chat_manager]:
+            agent.register_hook(
+                "process_all_messages_before_reply", flatten_tool_messages
+            )
+
+        # 7. THROTTLING
+        def throttle_reply(recipient, messages, sender, config):
+            wait = 0.5  # Default wait
+            print(f"⏳ Throttling: {recipient.name} waiting {wait}s...")
+            time.sleep(wait)
+            return False, None
+
+        for agent in llm_agents:
+            if agent:
+                agent.register_reply(
+                    [ConversableAgent, None], throttle_reply, position=0
+                )
 
     def register_log_paths(self):
 
@@ -849,7 +818,7 @@ class GWTAutogenAgent(AutogenAgent):
 
     def register_functions(self):
 
-        def execute_action(suggested_action: str) -> str:
+        def execute_action1(suggested_action: str) -> str:
             if self.task_failed and self.rounds_left == 0:
                 self.result_dict[self.game_no] = "FAILURE"
                 with open(self.log_paths["result_path"], "w") as f:
@@ -912,6 +881,57 @@ class GWTAutogenAgent(AutogenAgent):
 
             return json.dumps(self.percept, indent=2) + reflection
 
+        def execute_action2(suggested_action: str) -> list:
+            """
+            Executes an action in ALFWorld and returns the result as a JSON string.
+            """
+            import json
+
+            # 1. Validation & Environment Step
+            if not suggested_action:
+                return json.dumps({"error": "No action provided."})
+
+            obs, reward, done, info = self.env.step(suggested_action)
+
+            # 2. Update state for internal cognition
+            self.percept = {
+                "timestep": self.env.steps,
+                "attempted_action": suggested_action,
+                "resulting_observation": obs,
+                "task_status": "COMPLETED" if (done and reward > 0) else "INCOMPLETE",
+                "action_attempts_left": self.max_actions - self.env.steps,
+                "admissible_actions": info.get("admissible_commands", []),
+            }
+
+            # 3. Handle specific game-ending logic (FLEECE/STRAWBERRY)
+            if self.task_failed and self.rounds_left == 0:
+                return "FLEECE"
+            if self.task_success:
+                return "STRAWBERRY"
+
+            return obs[0]  # json.dumps(self.percept, indent=2)
+
+        def execute_action(suggested_action: str) -> str:
+            """Executes an action in the AlfWorld environment and returns the observation."""
+            # ALFWorld step() expects a list of commands
+            observation, reward, done, info = self.env.step([suggested_action])
+
+            # Update agent state
+            self.obs = observation[0]
+            self.info = info
+            self.num_actions_taken += 1
+
+            return self.obs
+
+        # Register the WRAPPER instead of the method
+        register_function(
+            execute_action,
+            caller=self.motor_agent,
+            executor=self.external_perception_agent,
+            name="execute_action",
+            description="Execute an action in the ALFWorld environment.",
+        )
+
         def record_long_term_memory(concept: str) -> str:
 
             _, score = get_best_candidate(concept, ["NO CONCEPT at this time."])
@@ -939,13 +959,6 @@ class GWTAutogenAgent(AutogenAgent):
 
         def focus() -> str:
             return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept, indent=2)}"
-
-        register_function(
-            execute_action,
-            caller=self.motor_agent,
-            executor=self.external_perception_agent,
-            description="Executes actions in environment",
-        )
 
         register_function(
             focus,
@@ -1157,3 +1170,25 @@ class GWTAutogenAgent(AutogenAgent):
             indent=2,
         )
         return self.memory
+
+    def custom_speaker_selection(self, last_speaker, groupchat):
+        messages = groupchat.messages
+        if not messages:
+            return self.external_perception_agent
+
+        last_msg = messages[-1]
+
+        # FORCE the executor after a tool call
+        """if "tool_calls" in last_msg:
+            return self.external_perception_agent"""
+
+        # FORCE the echo after a tool response
+        if last_msg.get("role") == "tool":
+            return self.echo_agent
+
+        # Standard Graph Transitions
+        possible_speakers = self.allowed_transitions.get(last_speaker, [])
+        if len(possible_speakers) == 1:
+            return possible_speakers[0]
+
+        return "auto"

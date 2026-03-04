@@ -149,7 +149,7 @@ def get_echo_agent(name, llm_config, additional_termination_criteria=None):
         )
 
     echo_agent = ConversableAgent(
-        name=f"{name}",
+        name=f"{name}" if name else "echo",
         system_message=f'You are {name}, if the last message you received begins with the keyword "ECHO: ", then you parrot the contents of the last message you received. Otherwise, do nothing.'
         f"\nExample:"
         f"\n Last message you received = ECHO: Observation: You arrive at drawer 2. The drawer 2 is closed. Task Status: INCOMPLETE Actions Left: 20 Current Admissible Actions: ['examine drawer 2', 'go to bed 1', 'go to desk 1', 'go to drawer 1', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to dresser 1', 'go to garbagecan 1', 'go to laundryhamper 1', 'go to shelf 1', 'help', 'inventory', 'look', 'open drawer 2']"
@@ -162,19 +162,52 @@ def get_echo_agent(name, llm_config, additional_termination_criteria=None):
     return echo_agent
 
 
+def create_echo_agent():
+    """Creates a programmatic relay that turns tool outputs into standard text."""
+    echo_agent = ConversableAgent(
+        name="Echo_Agent",
+        system_message="I am a relay. I convert environmental tool outputs into standard text.",
+        llm_config=False,  # No LLM needed
+        human_input_mode="NEVER",
+    )
+
+    def relay_observation(recipient, messages, sender, config):
+        if not messages:
+            return False, None
+        last_msg = messages[-1]
+
+        # If the last message was a tool result, relay it as text
+        if last_msg.get("role") == "tool":
+            content = last_msg.get("content") or "Action completed."
+            return True, f"[Observation]: {content}"
+
+        # If the last message was a prompt, just acknowledge
+        return True, "[Internal State Synchronized]"
+
+    echo_agent.register_reply([ConversableAgent, None], relay_observation)
+    return echo_agent
+
+
 def flatten_tool_messages(messages):
+    if not messages:
+        return []
+
     scrubbed = []
     for msg in copy.deepcopy(messages):
+        # 1. Convert 'tool' responses to 'user' observations
         if msg.get("role") == "tool":
             msg["role"] = "user"
-            msg["content"] = f"[Observation]: {msg.get('content')}"
-            msg.pop("tool_call_id", None)  # Remove ID
+            content = msg.get("content") or "No observation provided."
+            msg["content"] = f"[Observation]: {content}"
+            msg.pop("tool_call_id", None)
 
+        # 2. Strip 'tool_calls' from assistant messages so Reasoner doesn't 400
         if "tool_calls" in msg:
-            # Transfer call info to text content so logic isn't lost
-            calls = [f"[Calling {c['function']['name']}]" for c in msg["tool_calls"]]
+            calls = [
+                f"[Calling {c['function']['name']}]" for c in msg.get("tool_calls", [])
+            ]
             msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
-            msg.pop("tool_calls", None)  # REMOVE KEY ENTIRELY
+            msg.pop("tool_calls", None)
 
         scrubbed.append(msg)
     return scrubbed

@@ -21,6 +21,7 @@ class AutogenAgent:
         self.game_no = game_no
         self.max_chat_round = max_chat_round
         self.llm_profile = llm_profile
+        self.llm_config_list = []
         self.log_path = log_path
         self.num_actions_taken = 0
         self.max_actions = max_actions
