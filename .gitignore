@@ -74,4 +74,6 @@ htmlcov/
 
 # Windows
 Thumbs.db
+
 .cache/
+.pre-commit-config.yaml

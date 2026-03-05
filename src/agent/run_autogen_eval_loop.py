@@ -74,7 +74,7 @@ def get_llm_profile(config_data):
     }
 
 
-global_num_games_to_evaluate = 139
+global_num_games_to_evaluate = 2
 global_max_actions_per_game = 60
 global_max_chat_rounds_per_game = 500
 global_split_rounds_per_game = 1

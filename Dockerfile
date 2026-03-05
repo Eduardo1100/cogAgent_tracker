@@ -60,8 +60,10 @@ COPY --from=builder /python /python
 # We DON'T copy the .venv from builder because your docker-compose 
 # uses a volume (venv_storage) which will overwrite it anyway.
 
-ENV PATH="/app/.venv/bin:/python/bin:$PATH" \
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:/python:$PATH" \
+    UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1
-
+    
 # The command is handled by docker-compose.yml

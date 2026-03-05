@@ -708,10 +708,19 @@ class GWTAutogenAgent(AutogenAgent):
             self.group_chat_manager,
         ]
 
-        for agent in active_agents + [self.group_chat_manager]:
-            agent.register_hook(
-                "process_all_messages_before_reply", flatten_tool_messages
-            )
+        # NOTE: Use a reply preprocessor instead of `register_hook`.
+        # If any `role=tool` / `tool_calls` messages reach the LLM API, OpenAI will 400.
+        def scrub_tool_protocol(recipient, messages, sender, config):
+            if messages:
+                messages[:] = flatten_tool_messages(messages)  # in-place rewrite
+            return False, None
+
+        # Attach the scrubber ONLY to agents that call an LLM.
+        for agent in llm_agents:
+            if agent is not None:
+                agent.register_reply(
+                    [ConversableAgent, None], scrub_tool_protocol, position=0
+                )
 
         # 7. THROTTLING
         def throttle_reply(recipient, messages, sender, config):
@@ -1179,8 +1188,8 @@ class GWTAutogenAgent(AutogenAgent):
         last_msg = messages[-1]
 
         # FORCE the executor after a tool call
-        """if "tool_calls" in last_msg:
-            return self.external_perception_agent"""
+        if "tool_calls" in last_msg:
+            return self.external_perception_agent
 
         # FORCE the echo after a tool response
         if last_msg.get("role") == "tool":
