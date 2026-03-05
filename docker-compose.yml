@@ -3,7 +3,7 @@ services:
     build: .
     container_name: example-app
     # 1. Tells Docker to load the variables from your new .env file
-    env_file: 
+    env_file:
       - .env
     environment:
       # 2. Dynamically builds the URLs using the secure variables
@@ -13,6 +13,7 @@ services:
       - S3_ACCESS_KEY=${MINIO_ROOT_USER}
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - PATH=/root/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - ALFWORLD_DATA=${ALFWORLD_DATA}
     ports:
       - "8000:8000"
     volumes:
@@ -20,6 +21,7 @@ services:
       - venv_storage:/app/.venv
       - uv_cache:/root/.cache/uv
       - uv_python:/root/.local/share/uv/python
+      - alfworld_data:/app/datasets
     command: sh -c "uv sync --frozen && /app/.venv/bin/python -m src.main"
     depends_on:
       db:
@@ -40,11 +42,11 @@ services:
   db:
     image: postgres:15
     container_name: example-db
-    env_file: 
+    env_file:
       - .env
     healthcheck:
       # Use the variables here too so the healthcheck doesn't break if you change the username
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -57,7 +59,7 @@ services:
     image: redis:7
     container_name: example-redis
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -74,7 +76,7 @@ services:
     volumes:
       - objectstore-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: [ "CMD", "mc", "ready", "local" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -85,3 +87,4 @@ volumes:
   venv_storage:
   uv_cache:
   uv_python:
+  alfworld_data:
