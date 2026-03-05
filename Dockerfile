@@ -10,6 +10,8 @@ COPY --from=uv_bin /uv /uvx /bin/
 
 # 2. INSTALL BUILD TOOLS HERE (Crucial for Jericho/ALFWorld)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    unzip \
     build-essential \
     cmake \
     gcc \
@@ -65,5 +67,5 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:/python:$PATH" \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1
-    
+
 # The command is handled by docker-compose.yml
