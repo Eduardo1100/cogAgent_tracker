@@ -13,7 +13,7 @@ services:
       - S3_ACCESS_KEY=${MINIO_ROOT_USER}
       - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - PATH=/root/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      - ALFWORLD_DATA=/app/datasets/alfworlds
+      - ALFWORLD_DATA=/app/datasets/alfworld
     ports:
       - "8000:8000"
     volumes:
