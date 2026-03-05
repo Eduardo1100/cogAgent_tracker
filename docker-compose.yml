@@ -22,7 +22,7 @@ services:
       - uv_cache:/root/.cache/uv
       - uv_python:/root/.local/share/uv/python
       - alfworld_data:/app/datasets
-    command: sh -c "uv sync --frozen && /app/.venv/bin/python -m src.main"
+    command: sh -c "set -euo pipefail && uv sync --frozen && bash scripts/bootstrap_alfworld.sh && uv run python -m src.main"
     depends_on:
       db:
         condition: service_healthy
