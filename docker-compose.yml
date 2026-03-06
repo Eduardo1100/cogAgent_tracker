@@ -1,29 +1,45 @@
 services:
   app:
-    user: "${UID}:${GID}"
     build: .
-    container_name: example-app
-    # 1. Tells Docker to load the variables from your new .env file
+    container_name: cogagent-app
     env_file:
       - .env
+
     environment:
-      # 2. Dynamically builds the URLs using the secure variables
-      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      - REDIS_URL=redis://cache:6379/0
-      - S3_ENDPOINT=http://objectstore:9000
-      - S3_ACCESS_KEY=${MINIO_ROOT_USER}
-      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
-      - PATH=/root/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      - ALFWORLD_DATA=/app/datasets/alfworld
-    ports:
-      - "8000:8000"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://cache:6379/0
+      S3_ENDPOINT: http://objectstore:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+      ALFWORLD_DATA: /datasets/alfworld
+
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_CACHE_DIR: /opt/uv-cache
+      UV_PYTHON_INSTALL_DIR: /opt/uv-python
+
+      WANDB_DIR: /wandb
+      WANDB_CACHE_DIR: /tmp/wandb-cache
+
     volumes:
       - .:/app
-      - venv_storage:/app/.venv
-      - uv_cache:/root/.cache/uv
-      - uv_python:/root/.local/share/uv/python
-      - alfworld_data:/app/datasets
-    command: sh -c "set -euo pipefail && uv sync --frozen && bash scripts/bootstrap_alfworld.sh && uv run python -m src.main"
+      - venv_storage:/opt/venv
+      - uv_cache:/opt/uv-cache
+      - uv_python:/opt/uv-python
+      - alfworld_data:/datasets/alfworld
+      - wandb_data:/wandb
+
+    ports:
+      - "8000:8000"
+
+    command: >
+      sh -lc "
+      set -euo pipefail &&
+      uv sync --frozen &&
+      bash scripts/bootstrap_alfworld.sh &&
+      uv run python -m src.main
+      "
+
     depends_on:
       db:
         condition: service_healthy
@@ -31,23 +47,14 @@ services:
         condition: service_healthy
       objectstore:
         condition: service_healthy
-    # 3. UNLOCKS THE GPU! Connects the host NVIDIA GPU to the container
-    #deploy:
-    #  resources:
-    #    reservations:
-    #      devices:
-    #        - driver: nvidia
-    #          count: all
-    #          capabilities: [gpu]
 
   db:
     image: postgres:15
-    container_name: example-db
+    container_name: cogagent-db
     env_file:
       - .env
     healthcheck:
-      # Use the variables here too so the healthcheck doesn't break if you change the username
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -58,16 +65,16 @@ services:
 
   cache:
     image: redis:7
-    container_name: example-redis
+    container_name: cogagent-redis
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
 
   objectstore:
     image: minio/minio:RELEASE.2024-02-17T01-15-57Z
-    container_name: example-minio
+    container_name: cogagent-minio
     env_file:
       - .env
     command: server /data --console-address ":9001"
@@ -77,7 +84,7 @@ services:
     volumes:
       - objectstore-data:/data
     healthcheck:
-      test: [ "CMD", "mc", "ready", "local" ]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -89,3 +96,4 @@ volumes:
   uv_cache:
   uv_python:
   alfworld_data:
+  wandb_data:

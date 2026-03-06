@@ -56,6 +56,7 @@ htmlcov/
 
 # uv / pip package manager caches
 .uv/
+.uv-cache/
 
 # =========================
 # 🛠️ IDE & OS FILES

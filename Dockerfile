@@ -1,71 +1,82 @@
 # ==========================================
-# Stage 1: Build stage (The Heavy Lifter)
+# Stage 1: uv binary
 # ==========================================
-FROM mcr.microsoft.com/vscode/devcontainers/python:3.11
 FROM ghcr.io/astral-sh/uv:latest AS uv_bin
+
+# ==========================================
+# Stage 2: Builder
+# ==========================================
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS builder
 
-# 1. Bring the lightning-fast 'uv' tool into our builder
 COPY --from=uv_bin /uv /uvx /bin/
 
-# 2. INSTALL BUILD TOOLS HERE (Crucial for Jericho/ALFWorld)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     wget \
     unzip \
+    git \
     build-essential \
     cmake \
     gcc \
     g++ \
     make \
     libpq-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 3. Environment variables for uv
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_INSTALL_DIR=/python
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_PYTHON_PREFERENCE=only-managed
 
-# 4. Copy dependency files
 COPY pyproject.toml uv.lock ./
 
-# 5. Install Python and sync dependencies
-# We use --no-install-project because we haven't copied the src yet
-RUN uv python install 3.11
-ENV UV_PYTHON_PREFERENCE=only-managed
+RUN uv python install 3.11.15
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --python 3.11
+    uv sync --frozen --no-install-project --no-dev --python 3.11.15
 
 # ==========================================
-# Stage 2: Final Run stage (The Lean Runner)
+# Stage 3: Runtime
 # ==========================================
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
-# !!! CRUCIAL: Add make and gcc here because 'uv sync' runs at container startup !!!
+COPY --from=uv_bin /uv /uvx /bin/
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    unzip \
+    git \
     build-essential \
-    make \
     gcc \
     g++ \
+    make \
     libpq5 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Bring over uv and python toolchain
-COPY --from=uv_bin /uv /uvx /bin/
-COPY --from=builder /python /python
+# bring in uv-managed python installs
+COPY --from=builder /opt/uv-python /opt/uv-python
 
-# We DON'T copy the .venv from builder because your docker-compose 
-# uses a volume (venv_storage) which will overwrite it anyway.
+# make python available on PATH
+RUN mkdir -p /usr/local/bin && \
+    PY="$(find /opt/uv-python -type f -path '*/bin/python3.11' | head -n 1)" && \
+    test -n "$PY" && test -x "$PY" && \
+    ln -sf "$PY" /usr/local/bin/python3.11 && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python
 
-ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
-    VIRTUAL_ENV=/app/.venv \
-    PATH="/app/.venv/bin:/python:$PATH" \
+# writable runtime dirs
+RUN mkdir -p /opt/venv /opt/uv-cache /datasets/alfworld /wandb
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    VIRTUAL_ENV=/opt/venv \
+    UV_CACHE_DIR=/opt/uv-cache \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
     UV_LINK_MODE=copy \
-    PYTHONUNBUFFERED=1
-
-# The command is handled by docker-compose.yml
+    UV_PYTHON_PREFERENCE=only-managed \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:/usr/local/bin:$PATH"
