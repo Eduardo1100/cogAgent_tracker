@@ -1,13 +1,17 @@
 dataset:
-  data_path: '$ALFWORLD_DATA/json_2.1.1/train'
-  eval_id_data_path: '$ALFWORLD_DATA/json_2.1.1/valid_seen'    # null/None to disable
-  eval_ood_data_path: '$ALFWORLD_DATA/json_2.1.1/valid_unseen' # null/None to disable
-  num_train_games: -1                                       # max training games (<=0 indicates full dataset)
-  num_eval_games: -1                                        # max evaluation games (<=0 indicates full dataset)
+  data_path: '/datasets/alfworld/json_2.1.1/train'
+  eval_id_data_path: '/datasets/alfworld/json_2.1.1/valid_seen'
+  eval_ood_data_path: '/datasets/alfworld/json_2.1.1/valid_unseen'
 
 logic:
-  domain: '$ALFWORLD_DATA/logic/alfred.pddl'                # PDDL domain file that defines the world dynamics
-  grammar: '$ALFWORLD_DATA/logic/alfred.twl2'               # Grammar file that defines the text feedbacks
+  domain: '/datasets/alfworld/logic/alfred.pddl'
+  grammar: '/datasets/alfworld/logic/alfred.twl2'
+
+mask_rcnn:
+  pretrained_model_path: '/datasets/alfworld/detectors/mrcnn.pth'
+
+general:
+  save_path: '/datasets/alfworld/agents/pretrained_checkpoints/'
 
 env:
   type: 'AlfredTWEnv'                                       # 'AlfredTWEnv' or 'AlfredThorEnv' or 'AlfredHybrid'
@@ -69,8 +73,9 @@ general:
     env:
       type:
        'AlfredThorEnv'
-    eval_paths:                                             # different splits to evaluate on
-      - '$ALFWORLD_DATA/json_2.1.1/valid_seen'
+    eval_paths:
+        - '/datasets/alfworld/json_2.1.1/valid_seen'                                             # different splits to evaluate on
+#      - '$ALFWORLD_DATA/json_2.1.1/valid_seen'
 #      - '$ALFWORLD_DATA/json_2.1.1/valid_unseen'
     eval_experiment_tag: "eval_run_001"                     # save results json with this prefix
 

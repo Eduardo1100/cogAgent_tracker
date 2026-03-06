@@ -50,8 +50,8 @@ sanity:
 
 bootstrap-alfworld:
 	docker compose run --rm app \
-	sh -lc 'bash scripts/bootstrap_alfworld.sh'
+	sh -lc 'set -eux; bash scripts/bootstrap_alfworld.sh'
 
 eval:
 	docker compose run --rm app \
-	sh -lc 'uv run python -m src.agent.run_autogen_eval_loop src/agent/configs/eval_config.yaml --gwt'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python -m src.agent.run_autogen_eval_loop src/agent/configs/eval_config.yaml --gwt'

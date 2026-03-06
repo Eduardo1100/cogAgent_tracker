@@ -173,6 +173,9 @@ if __name__ == "__main__":
     controllers = config["general"]["evaluate"]["controllers"]
     repeats = config["general"]["evaluate"]["repeats"]
 
+    import os
+    from alfworld.agents.environment.alfred_tw_env import AlfredTWEnv
+
     chat_round_list = []
 
     for eval_env_type in eval_envs:
@@ -180,35 +183,63 @@ if __name__ == "__main__":
             controllers if eval_env_type == "AlfredThorEnv" else ["tw"]
         ):
             for eval_path in eval_paths:
-                print(f"Evaluating: {eval_path}")
+                resolved_eval_path = os.path.expandvars(eval_path)
+                print(f"Evaluating: {resolved_eval_path}")
 
                 # Configure the evaluation environment
                 config["general"]["evaluate"]["env"]["type"] = eval_env_type
-                config["dataset"]["eval_ood_data_path"] = eval_path
                 config["controller"]["type"] = controller_type
 
-                # 1. First, make sure you have the right import at the top of the file
-                from alfworld.agents.environment.alfred_tw_env import AlfredTWEnv
+                # Decide whether this path is ID or OOD
+                eval_id_path = os.path.expandvars(config["dataset"]["eval_id_data_path"])
+                eval_ood_path = os.path.expandvars(config["dataset"]["eval_ood_data_path"]) \
+                    if config["dataset"].get("eval_ood_data_path") else None
 
-                # 2. Then, around line 163, replace the getattr logic:
-                try:
-                    # Instead of: env_class = getattr(environment, eval_env_type)
-                    # Use the direct class for TextWorld:
-                    env_class = AlfredTWEnv
-                    print(
-                        "✅ Successfully loaded AlfredTWEnv for text-based evaluation."
+                if resolved_eval_path == eval_id_path:
+                    config["dataset"]["eval_id_data_path"] = resolved_eval_path
+                    train_eval_mode = "eval_in_distribution"
+                elif eval_ood_path is not None and resolved_eval_path == eval_ood_path:
+                    config["dataset"]["eval_ood_data_path"] = resolved_eval_path
+                    train_eval_mode = "eval_out_of_distribution"
+                else:
+                    raise ValueError(
+                        f"Eval path {resolved_eval_path} does not match either "
+                        f"eval_id_data_path={eval_id_path} or "
+                        f"eval_ood_data_path={eval_ood_path}"
                     )
+
+                try:
+                    env_class = AlfredTWEnv
+                    print("✅ Successfully loaded AlfredTWEnv for text-based evaluation.")
                 except ImportError:
                     print(
-                        "❌ Could not find AlfredTWEnv. Check your alfworld "
-                        "installation."
+                        "❌ Could not find AlfredTWEnv. Check your alfworld installation."
                     )
                     raise
 
-                alfred_env = env_class(config, train_eval="eval_out_of_distribution")
+                from pathlib import Path
+
+                resolved_eval_path = Path(resolved_eval_path)
+                if not resolved_eval_path.exists():
+                    raise FileNotFoundError(f"Eval path does not exist: {resolved_eval_path}")
+
+                config.setdefault("dataset", {})
+                config["dataset"].setdefault("num_train_games", -1)
+                config["dataset"].setdefault("num_eval_games", -1)
+
+                print("dataset config keys:", list(config["dataset"].keys()))
+                print("dataset config:", config.get("dataset", {}))
+                print("resolved eval path:", resolved_eval_path)
+
+                alfred_env = env_class(config, train_eval=train_eval_mode)
                 env = alfred_env.init_env(batch_size=1)
                 total_num_games = alfred_env.num_games
 
+                if total_num_games == 0:
+                    raise RuntimeError(
+                        f"No games found for eval_path={resolved_eval_path} "
+                        f"with train_eval={train_eval_mode}"
+                    )
                 # Random selection of evaluation games
                 if global_num_games_to_evaluate > total_num_games:
                     num_games_to_evaluate = total_num_games
