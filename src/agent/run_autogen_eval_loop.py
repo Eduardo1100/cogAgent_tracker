@@ -168,7 +168,7 @@ if __name__ == "__main__":
     )
 
     # Extract evaluation parameters
-    eval_paths = config["general"]["evaluate"]["eval_paths"]
+    eval_splits = config["general"]["evaluate"]["splits"]
     eval_envs = config["general"]["evaluate"]["envs"]
     controllers = config["general"]["evaluate"]["controllers"]
     repeats = config["general"]["evaluate"]["repeats"]
@@ -180,11 +180,23 @@ if __name__ == "__main__":
 
     chat_round_list = []
 
-    # Normalize dataset reference paths once
+    # Normalize dataset config once
     dataset_cfg = config.setdefault("dataset", {})
     dataset_cfg.setdefault("num_train_games", -1)
     dataset_cfg.setdefault("num_eval_games", -1)
 
+    dataset_root_cfg = dataset_cfg.get("root")
+    if not dataset_root_cfg:
+        raise ValueError("Missing dataset.root in config")
+
+    dataset_root = Path(os.path.expandvars(dataset_root_cfg)).resolve()
+    if not dataset_root.exists():
+        raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
+    expected_splits = {"train", "valid_seen", "valid_unseen", "valid_train"}
+    available_splits = {p.name for p in dataset_root.iterdir() if p.is_dir()}
+    print("Available dataset splits:", sorted(available_splits))
+
+    # Optional reference paths for explicit ID/OOD mapping
     eval_id_path_cfg = dataset_cfg.get("eval_id_data_path")
     eval_ood_path_cfg = dataset_cfg.get("eval_ood_data_path")
 
@@ -203,23 +215,21 @@ if __name__ == "__main__":
         for controller_type in (
             controllers if eval_env_type == "AlfredThorEnv" else ["tw"]
         ):
-            for eval_path in eval_paths:
-                resolved_eval_path = Path(os.path.expandvars(eval_path)).resolve()
-                print(f"Evaluating: {resolved_eval_path}")
+            for split_name in eval_splits:
+                resolved_eval_path = (dataset_root / split_name).resolve()
+                print(f"Evaluating split: {split_name}")
+                print(f"Resolved eval path: {resolved_eval_path}")
 
                 if not resolved_eval_path.exists():
                     raise FileNotFoundError(
-                        f"Eval path does not exist: {resolved_eval_path}"
+                        f"Eval split path does not exist: {resolved_eval_path}"
                     )
 
                 # Configure env/controller
                 config["general"]["evaluate"]["env"]["type"] = eval_env_type
                 config["controller"]["type"] = controller_type
 
-                # Determine split from actual path
-                split_name = resolved_eval_path.name
-
-                # Robust ID/OOD mapping
+                # Determine ID vs OOD
                 if eval_id_path is not None and resolved_eval_path == eval_id_path:
                     train_eval_mode = "eval_in_distribution"
                     dataset_cfg["eval_id_data_path"] = str(resolved_eval_path)
@@ -227,7 +237,7 @@ if __name__ == "__main__":
                     train_eval_mode = "eval_out_of_distribution"
                     dataset_cfg["eval_ood_data_path"] = str(resolved_eval_path)
                 else:
-                    # Fallback based on split folder name
+                    # Fallback based on split name
                     if split_name in {"valid_seen", "test_seen", "valid_train"}:
                         train_eval_mode = "eval_in_distribution"
                         dataset_cfg["eval_id_data_path"] = str(resolved_eval_path)
@@ -236,8 +246,8 @@ if __name__ == "__main__":
                         dataset_cfg["eval_ood_data_path"] = str(resolved_eval_path)
                     else:
                         raise ValueError(
-                            f"Could not infer evaluation mode from path: {resolved_eval_path}. "
-                            f"Expected a split like valid_seen/valid_unseen/test_seen/test_unseen."
+                            f"Could not infer evaluation mode from split={split_name}. "
+                            f"Expected one of valid_seen, valid_unseen, valid_train, test_seen, test_unseen."
                         )
 
                 print(f"Resolved split: {split_name}")
