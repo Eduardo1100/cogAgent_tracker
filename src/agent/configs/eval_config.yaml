@@ -11,7 +11,40 @@ mask_rcnn:
   pretrained_model_path: '/datasets/alfworld/detectors/mrcnn.pth'
 
 general:
-  save_path: '/datasets/alfworld/agents/pretrained_checkpoints/'
+  random_seed: 42
+  use_cuda: True                                            # disable this when running on machine without cuda
+  visdom: False                                             # plot training/eval curves, run with visdom server
+  task: 'alfred'
+  training_method: 'dagger'                                 # 'dqn' or 'dagger'
+  save_path: '/datasets/alfworld/agents/pretrained_checkpoints/'   # path to save pytorch models
+  observation_pool_capacity: 3                              # k-size queue, 0 indicates no observation
+  hide_init_receptacles: False                              # remove initial observation containing navigable receptacles
+
+  training:
+    batch_size: 10
+    max_episode: 50000
+    smoothing_eps: 0.1
+    optimizer:
+      learning_rate: 0.001
+      clip_grad_norm: 5
+
+  evaluate:
+    run_eval: True
+    batch_size: 3                                           # number of parallel eval threads
+    repeats: 1                                              # number of times to loop over eval games (we used 3 in paper experiments)
+    controllers:                                            # different controllers to evaluate with
+      - 'oracle'
+      - 'mrcnn_astar'
+    envs:                                                   # different environments to evaluate in
+      - 'AlfredTWEnv'
+      # - 'AlfredThorEnv'
+    env:
+      type:
+       'AlfredThorEnv'
+    eval_paths:
+      - '/datasets/alfworld/json_2.1.1/valid_seen'
+      - '/datasets/alfworld/json_2.1.1/valid_unseen'                                             # different splits to evaluate on
+    eval_experiment_tag: "eval_run_001"                     # save results json with this prefix
 
 env:
   type: 'AlfredTWEnv'                                       # 'AlfredTWEnv' or 'AlfredThorEnv' or 'AlfredHybrid'
@@ -41,43 +74,6 @@ controller:
 
 mask_rcnn:
   pretrained_model_path: '$ALFWORLD_DATA/detectors/mrcnn.pth'
-
-general:
-  random_seed: 42
-  use_cuda: True                                            # disable this when running on machine without cuda
-  visdom: False                                             # plot training/eval curves, run with visdom server
-  task: 'alfred'
-  training_method: 'dagger'                                 # 'dqn' or 'dagger'
-  save_path: '$ALFWORLD_DATA/agents/pretrained_checkpoints/'   # path to save pytorch models
-  observation_pool_capacity: 3                              # k-size queue, 0 indicates no observation
-  hide_init_receptacles: False                              # remove initial observation containing navigable receptacles
-
-  training:
-    batch_size: 10
-    max_episode: 50000
-    smoothing_eps: 0.1
-    optimizer:
-      learning_rate: 0.001
-      clip_grad_norm: 5
-
-  evaluate:
-    run_eval: True
-    batch_size: 3                                           # number of parallel eval threads
-    repeats: 1                                              # number of times to loop over eval games (we used 3 in paper experiments)
-    controllers:                                            # different controllers to evaluate with
-      - 'oracle'
-      - 'mrcnn_astar'
-    envs:                                                   # different environments to evaluate in
-      - 'AlfredTWEnv'
-      # - 'AlfredThorEnv'
-    env:
-      type:
-       'AlfredThorEnv'
-    eval_paths:
-        - '/datasets/alfworld/json_2.1.1/valid_seen'                                             # different splits to evaluate on
-#      - '$ALFWORLD_DATA/json_2.1.1/valid_seen'
-#      - '$ALFWORLD_DATA/json_2.1.1/valid_unseen'
-    eval_experiment_tag: "eval_run_001"                     # save results json with this prefix
 
   checkpoint:
     report_frequency: 10                                    # report every N episode

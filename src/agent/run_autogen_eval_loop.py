@@ -174,62 +174,87 @@ if __name__ == "__main__":
     repeats = config["general"]["evaluate"]["repeats"]
 
     import os
+    from pathlib import Path
+
     from alfworld.agents.environment.alfred_tw_env import AlfredTWEnv
 
     chat_round_list = []
+
+    # Normalize dataset reference paths once
+    dataset_cfg = config.setdefault("dataset", {})
+    dataset_cfg.setdefault("num_train_games", -1)
+    dataset_cfg.setdefault("num_eval_games", -1)
+
+    eval_id_path_cfg = dataset_cfg.get("eval_id_data_path")
+    eval_ood_path_cfg = dataset_cfg.get("eval_ood_data_path")
+
+    eval_id_path = (
+        Path(os.path.expandvars(eval_id_path_cfg)).resolve()
+        if eval_id_path_cfg
+        else None
+    )
+    eval_ood_path = (
+        Path(os.path.expandvars(eval_ood_path_cfg)).resolve()
+        if eval_ood_path_cfg
+        else None
+    )
 
     for eval_env_type in eval_envs:
         for controller_type in (
             controllers if eval_env_type == "AlfredThorEnv" else ["tw"]
         ):
             for eval_path in eval_paths:
-                resolved_eval_path = os.path.expandvars(eval_path)
+                resolved_eval_path = Path(os.path.expandvars(eval_path)).resolve()
                 print(f"Evaluating: {resolved_eval_path}")
 
-                # Configure the evaluation environment
+                if not resolved_eval_path.exists():
+                    raise FileNotFoundError(
+                        f"Eval path does not exist: {resolved_eval_path}"
+                    )
+
+                # Configure env/controller
                 config["general"]["evaluate"]["env"]["type"] = eval_env_type
                 config["controller"]["type"] = controller_type
 
-                # Decide whether this path is ID or OOD
-                eval_id_path = os.path.expandvars(config["dataset"]["eval_id_data_path"])
-                eval_ood_path = os.path.expandvars(config["dataset"]["eval_ood_data_path"]) \
-                    if config["dataset"].get("eval_ood_data_path") else None
+                # Determine split from actual path
+                split_name = resolved_eval_path.name
 
-                if resolved_eval_path == eval_id_path:
-                    config["dataset"]["eval_id_data_path"] = resolved_eval_path
+                # Robust ID/OOD mapping
+                if eval_id_path is not None and resolved_eval_path == eval_id_path:
                     train_eval_mode = "eval_in_distribution"
+                    dataset_cfg["eval_id_data_path"] = str(resolved_eval_path)
                 elif eval_ood_path is not None and resolved_eval_path == eval_ood_path:
-                    config["dataset"]["eval_ood_data_path"] = resolved_eval_path
                     train_eval_mode = "eval_out_of_distribution"
+                    dataset_cfg["eval_ood_data_path"] = str(resolved_eval_path)
                 else:
-                    raise ValueError(
-                        f"Eval path {resolved_eval_path} does not match either "
-                        f"eval_id_data_path={eval_id_path} or "
-                        f"eval_ood_data_path={eval_ood_path}"
-                    )
+                    # Fallback based on split folder name
+                    if split_name in {"valid_seen", "test_seen", "valid_train"}:
+                        train_eval_mode = "eval_in_distribution"
+                        dataset_cfg["eval_id_data_path"] = str(resolved_eval_path)
+                    elif split_name in {"valid_unseen", "test_unseen"}:
+                        train_eval_mode = "eval_out_of_distribution"
+                        dataset_cfg["eval_ood_data_path"] = str(resolved_eval_path)
+                    else:
+                        raise ValueError(
+                            f"Could not infer evaluation mode from path: {resolved_eval_path}. "
+                            f"Expected a split like valid_seen/valid_unseen/test_seen/test_unseen."
+                        )
+
+                print(f"Resolved split: {split_name}")
+                print(f"train_eval_mode: {train_eval_mode}")
+                print("dataset config keys:", list(dataset_cfg.keys()))
+                print("dataset config:", dataset_cfg)
 
                 try:
                     env_class = AlfredTWEnv
-                    print("✅ Successfully loaded AlfredTWEnv for text-based evaluation.")
+                    print(
+                        "✅ Successfully loaded AlfredTWEnv for text-based evaluation."
+                    )
                 except ImportError:
                     print(
                         "❌ Could not find AlfredTWEnv. Check your alfworld installation."
                     )
                     raise
-
-                from pathlib import Path
-
-                resolved_eval_path = Path(resolved_eval_path)
-                if not resolved_eval_path.exists():
-                    raise FileNotFoundError(f"Eval path does not exist: {resolved_eval_path}")
-
-                config.setdefault("dataset", {})
-                config["dataset"].setdefault("num_train_games", -1)
-                config["dataset"].setdefault("num_eval_games", -1)
-
-                print("dataset config keys:", list(config["dataset"].keys()))
-                print("dataset config:", config.get("dataset", {}))
-                print("resolved eval path:", resolved_eval_path)
 
                 alfred_env = env_class(config, train_eval=train_eval_mode)
                 env = alfred_env.init_env(batch_size=1)
@@ -237,8 +262,8 @@ if __name__ == "__main__":
 
                 if total_num_games == 0:
                     raise RuntimeError(
-                        f"No games found for eval_path={resolved_eval_path} "
-                        f"with train_eval={train_eval_mode}"
+                        f"No ALFWorld games found for split={split_name} "
+                        f"at path={resolved_eval_path} with train_eval_mode={train_eval_mode}"
                     )
                 # Random selection of evaluation games
                 if global_num_games_to_evaluate > total_num_games:

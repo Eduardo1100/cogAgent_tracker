@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     libpq-dev \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -54,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     libpq5 \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
