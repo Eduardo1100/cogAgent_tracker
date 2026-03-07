@@ -10,13 +10,31 @@ from src.agent.helpers import (
 
 class BaselineAutogenAgent(AutogenAgent):
     def __init__(
-        self, env, obs, info, llm_config, log_path, game_no, max_actions=50, args=None
+        self,
+        llm_profile,
+        log_path,
+        game_no=1,
+        max_chat_round=2000,
+        max_actions=50,
+        rounds_per_game=1,
+        args=None,
+        env=None,
+        obs="",
+        info=None,
     ):
         super().__init__(
-            env, obs, info, llm_config, log_path, game_no, max_actions, args
+            llm_profile, log_path, game_no, max_chat_round, max_actions, args, env, obs, info
         )
 
         self.initialize_autogen()
+
+    def set_environment(self, env, obs, info, game_no):
+        self.env = env
+        self.obs = obs
+        self.info = info
+        self.game_no = game_no
+        self.register_log_paths()
+        self.initial_message = obs[0] if obs else ""
 
     def initialize_agents(self):
         self.assistant_agent = ConversableAgent(
@@ -56,6 +74,7 @@ class BaselineAutogenAgent(AutogenAgent):
             )
 
         self.echo_agent = get_echo_agent(
+            "Echo_Agent",
             self.llm_config,
             additional_termination_criteria=[executor_agent_termination_msg],
         )
@@ -111,7 +130,7 @@ class BaselineAutogenAgent(AutogenAgent):
             admissible_commands = list(self.info["admissible_commands"][0])
             assert len(admissible_commands) > 0
 
-            self.num_actions += 1
+            self.num_actions_taken += 1
 
             action, action_score = get_best_candidate(
                 suggested_action, admissible_commands
@@ -126,11 +145,11 @@ class BaselineAutogenAgent(AutogenAgent):
 
             # time.sleep(1)
             if self.success:
-                return f"Observation: {self.obs[0]}\nTask Status: SUCCESS\nActions Left: {self.max_actions - self.num_actions}"
-            elif self.num_actions >= self.max_actions:
-                return f"Observation: {self.obs[0]}\nTask Status: FAILURE\nActions Left: {self.max_actions - self.num_actions}"
+                return f"Observation: {self.obs[0]}\nTask Status: SUCCESS\nActions Left: {self.max_actions - self.num_actions_taken}"
+            elif self.num_actions_taken >= self.max_actions:
+                return f"Observation: {self.obs[0]}\nTask Status: FAILURE\nActions Left: {self.max_actions - self.num_actions_taken}"
             else:
-                return f"Observation: {self.obs[0]}\nTask Status: INCOMPLETE\nActions Left: {self.max_actions - self.num_actions}"
+                return f"Observation: {self.obs[0]}\nTask Status: INCOMPLETE\nActions Left: {self.max_actions - self.num_actions_taken}"
 
         register_function_lambda({r"execute_action": execute_action}, [self.echo_agent])
 

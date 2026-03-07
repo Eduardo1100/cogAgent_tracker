@@ -11,17 +11,18 @@ def test_all():
 
     # 1. Test PostgreSQL
     try:
-        conn_str = os.getenv("DATABASE_URL")
+        conn_str = os.getenv("DATABASE_URL", "")
         with psycopg.connect(conn_str) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT version();")
-                print(f"✅ Postgres: Connected! ({cur.fetchone()[0][:25]}...)")
+                row = cur.fetchone()
+                print(f"✅ Postgres: Connected! ({row[0][:25] if row else 'unknown'}...)")
     except Exception as e:
         print(f"❌ Postgres: Failed! {e}")
 
     # 2. Test Redis
     try:
-        r = redis.from_url(os.getenv("REDIS_URL"))
+        r = redis.from_url(os.getenv("REDIS_URL", ""))
         r.ping()
         print("✅ Redis: Connected! (PONG)")
     except Exception as e:

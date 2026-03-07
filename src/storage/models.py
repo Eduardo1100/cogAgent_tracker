@@ -1,7 +1,5 @@
 from datetime import UTC, datetime
 
-UTC = UTC
-
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -37,6 +35,8 @@ class ExperimentRun(Base):
         DateTime(timezone=True), nullable=True
     )
     total_runtime_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Relationship: One Experiment has Many Episodes
     episodes: Mapped[list["EpisodeRun"]] = relationship(

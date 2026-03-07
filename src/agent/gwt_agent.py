@@ -763,8 +763,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         with (
             open(self.log_paths["memory1_path"]) as src,
@@ -807,8 +806,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         if self.task_status != "INCOMPLETE":
             with (
@@ -890,7 +888,7 @@ class GWTAutogenAgent(AutogenAgent):
 
             return json.dumps(self.percept, indent=2) + reflection
 
-        def execute_action2(suggested_action: str) -> list:
+        def execute_action2(suggested_action: str) -> str:
             """
             Executes an action in ALFWorld and returns the result as a JSON string.
             """
@@ -933,6 +931,8 @@ class GWTAutogenAgent(AutogenAgent):
             return self.obs
 
         # Register the WRAPPER instead of the method
+        assert self.motor_agent is not None
+        assert self.external_perception_agent is not None
         register_function(
             execute_action,
             caller=self.motor_agent,
@@ -969,6 +969,8 @@ class GWTAutogenAgent(AutogenAgent):
         def focus() -> str:
             return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept, indent=2)}"
 
+        assert self.focus_agent is not None
+        assert self.internal_perception_agent_2 is not None
         register_function(
             focus,
             caller=self.focus_agent,
@@ -976,6 +978,8 @@ class GWTAutogenAgent(AutogenAgent):
             description="Resets focus.",
         )
 
+        assert self.record_long_term_memory_agent is not None
+        assert self.internal_perception_agent_1 is not None
         register_function(
             record_long_term_memory,
             caller=self.record_long_term_memory_agent,
@@ -983,6 +987,8 @@ class GWTAutogenAgent(AutogenAgent):
             description="Records new concept in long-term memory.",
         )
 
+        assert self.retrieve_memory_agent is not None
+        assert self.internal_perception_agent_3 is not None
         register_function(
             retrieve_memory,
             caller=self.retrieve_memory_agent,
