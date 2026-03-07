@@ -1,7 +1,5 @@
 from datetime import UTC, datetime
 
-UTC = UTC
-
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 

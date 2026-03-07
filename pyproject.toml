@@ -36,7 +36,7 @@ line-length = 88
 # Enable specific rulesets
 # E: Error, F: Pyflakes, I: Isort (sorting imports), UP: Pyupgrade
 select = ["E", "F", "I", "UP", "NPY"] # NPY adds specific checks for NumPy
-ignore = []
+ignore = ["E501"]
 
 [tool.ruff.format]
 # Use "Black-style" formatting

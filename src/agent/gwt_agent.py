@@ -763,8 +763,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         with (
             open(self.log_paths["memory1_path"]) as src,
@@ -807,8 +806,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         if self.task_status != "INCOMPLETE":
             with (
