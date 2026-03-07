@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 
 # This is a template class for the Autogen Agent
@@ -15,24 +16,40 @@ class AutogenAgent:
         obs="",
         info=None,
     ):
-        self.env = env
-        self.obs = obs
-        self.info = info
+        self.env: Any = env
+        self.obs: Any = obs
+        self.info: Any = info
         self.game_no = game_no
         self.max_chat_round = max_chat_round
         self.llm_profile = llm_profile
+        self.llm_config = llm_profile
         self.llm_config_list = []
         self.log_path = log_path
         self.num_actions_taken = 0
         self.max_actions = max_actions
         self.success = False
         self.args = args
-        self.start_agent = None
-        self.log_paths = {}
+        self.start_agent: Any = None
+        self.log_paths: dict[str, Any] = {}
         self.result_dict = {}
+        self.allowed_transitions: Any = None
 
-        self.group_chat = None
-        self.group_chat_manager = None
+        self.group_chat: Any = None
+        self.group_chat_manager: Any = None
+
+        # Shared attributes used by the eval loop
+        self.task_status: str = "INCOMPLETE"
+        self.rounds_left: int = 1
+        self.initial_message: str = ""
+        self.curr_episodic_memory: list = []
+        self.prev_episodic_memories: list = []
+
+    def set_environment(self, env, obs, info, game_no):
+        self.env = env
+        self.obs = obs
+        self.info = info
+        self.game_no = game_no
+        self.register_log_paths()
 
     def initialize_autogen(self):
         self.register_log_paths()
@@ -78,6 +95,7 @@ class AutogenAgent:
         chat_result = None
         error_message = None
         try:
+            assert self.group_chat_manager is not None
             last_agent, last_message = self.group_chat_manager.resume(
                 messages=last_message
             )

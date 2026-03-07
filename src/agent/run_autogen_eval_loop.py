@@ -346,7 +346,7 @@ if __name__ == "__main__":
                 num_games_no_error = 0
 
                 # Initialize global usage tracking
-                total_run_usage = {
+                total_run_usage: dict[str, float] = {
                     "total_tokens": 0,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
