@@ -10,10 +10,14 @@ logic:
   domain: "$ALFWORLD_DATA/logic/alfred.pddl"
   grammar: "$ALFWORLD_DATA/logic/alfred.twl2"
 
-
 mask_rcnn:
-  pretrained_model_path: "$ALFWORLD_DATA/detectors/mrcnn.pth"
+  pretrained_model_path: '$ALFWORLD_DATA/detectors/mrcnn.pth'
 
+  checkpoint:
+    report_frequency: 10                                    # report every N episode
+    experiment_tag: 'test'                                  # name of experiment
+    load_pretrained: True                                   # during test, enable this so that the agent load your pretrained model
+    load_from_tag: 'pretrained_checkpoint_id' # name of pre-trained model to load in save_path
 
 general:
   random_seed: 42
