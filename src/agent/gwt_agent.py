@@ -10,7 +10,6 @@ import umap
 from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
 from autogen.agentchat.contrib.capabilities import transform_messages
 from autogen.agentchat.contrib.capabilities.transforms import MessageHistoryLimiter
-from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
@@ -18,6 +17,7 @@ from src.agent.helpers import (
     FlattenToolMessages,
     get_best_candidate,
     is_termination_msg_generic,
+    sentence_transformer_model,
 )
 
 
@@ -1025,8 +1025,11 @@ class GWTAutogenAgent(AutogenAgent):
         if getattr(self, "_cluster_cache", (None, None))[0] == content_hash:
             return self._cluster_cache[1]
 
-        model = SentenceTransformer(model_name)
-        embeddings = model.encode(concept_lines, convert_to_tensor=True).cpu().numpy()
+        embeddings = (
+            sentence_transformer_model.encode(concept_lines, convert_to_tensor=True)
+            .cpu()
+            .numpy()
+        )
 
         # Calculate k (clusters) using capped growth function to prevent over-clustering
         max_concepts = num_concepts
