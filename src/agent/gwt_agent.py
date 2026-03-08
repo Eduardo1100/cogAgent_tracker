@@ -1187,12 +1187,24 @@ class GWTAutogenAgent(AutogenAgent):
 
         last_msg = messages[-1]
 
-        # FORCE the executor after a tool call
+        # Route tool calls to the executor defined in the transition graph.
+        # Using allowed_transitions instead of hardcoding external_perception_agent
+        # ensures retrieve_memory/focus/record_long_term_memory are sent to the
+        # correct Internal_Perception_Agent, not to external_perception_agent which
+        # only knows about execute_action.
         if "tool_calls" in last_msg:
+            executors = self.allowed_transitions.get(last_speaker, [])
+            if executors:
+                return executors[0]
             return self.external_perception_agent
 
-        # FORCE the echo after a tool response
+        # Route tool responses via the transition graph (e.g. Internal_Perception_Agent_1
+        # → Idea_Agent, Internal_Perception_Agent_2 → Conscious_Agent, etc.).
+        # Only fall back to echo_agent for external_perception_agent responses.
         if last_msg.get("role") == "tool":
+            executors = self.allowed_transitions.get(last_speaker, [])
+            if executors:
+                return executors[0]
             return self.echo_agent
 
         # Standard Graph Transitions
