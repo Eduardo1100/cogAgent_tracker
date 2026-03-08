@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
 from src.agent.gwt_agent import GWTAutogenAgent
-from src.storage.database import Base, SessionLocal, engine
-from src.storage.models import EpisodeRun, ExperimentRun
+from src.storage.database import SessionLocal, engine
+from src.storage.models import Base, EpisodeRun, ExperimentRun
 from src.storage.s3 import get_s3_client
 
 load_dotenv()
@@ -165,10 +165,10 @@ def parse_arguments():
         "--long_term_guidance", action="store_true", help="Enable long-term guidance"
     )
     parser.add_argument(
-        "--num_games", type=int, default=2, help="Games to evaluate per split"
+        "--num_games", type=int, default=1, help="Games to evaluate per split"
     )
     parser.add_argument(
-        "--max_actions", type=int, default=60, help="Max environment actions per game"
+        "--max_actions", type=int, default=30, help="Max environment actions per game"
     )
     parser.add_argument(
         "--max_chat_rounds", type=int, default=500, help="Max chat rounds per game"

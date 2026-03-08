@@ -1,15 +1,15 @@
 import copy
+import hashlib
 import json
 import os
 import random
-import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 import umap
 from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
 from autogen.agentchat.contrib.capabilities import transform_messages
-from sentence_transformers import SentenceTransformer
+from autogen.agentchat.contrib.capabilities.transforms import MessageHistoryLimiter
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
@@ -17,6 +17,7 @@ from src.agent.helpers import (
     FlattenToolMessages,
     get_best_candidate,
     is_termination_msg_generic,
+    sentence_transformer_model,
 )
 
 
@@ -132,9 +133,11 @@ class GWTAutogenAgent(AutogenAgent):
             "task_status": self.task_status,
             "action_attempts_left": self.max_actions - self.num_actions_taken,
             "admissible_actions": self.admissible_actions,
-            "newly_admissible_actions": newly_added,
-            "no_longer_admissible_actions": no_longer,
         }
+        if newly_added:
+            self.percept["newly_admissible_actions"] = newly_added
+        if no_longer:
+            self.percept["no_longer_admissible_actions"] = no_longer
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
         summary_json = json.dumps(
@@ -712,23 +715,15 @@ class GWTAutogenAgent(AutogenAgent):
             self.group_chat_manager,
         ]
 
-        scrubber = transform_messages.TransformMessages(transforms=[FlattenToolMessages()])
+        scrubber = transform_messages.TransformMessages(
+            transforms=[
+                MessageHistoryLimiter(max_messages=30),
+                FlattenToolMessages(),
+            ]
+        )
         for agent in llm_agents:
             if agent is not None:
                 scrubber.add_to_agent(agent)
-
-        # 7. THROTTLING
-        def throttle_reply(recipient, messages, sender, config):
-            wait = 0.5  # Default wait
-            print(f"⏳ Throttling: {recipient.name} waiting {wait}s...")
-            time.sleep(wait)
-            return False, None
-
-        for agent in llm_agents:
-            if agent:
-                agent.register_reply(
-                    [ConversableAgent, None], throttle_reply, position=0
-                )
 
     def register_log_paths(self):
 
@@ -881,7 +876,7 @@ class GWTAutogenAgent(AutogenAgent):
             with open(self.log_paths["history_path"], "a+") as f:
                 f.write(f"action: '{suggested_action}'. observation: '{self.obs[0]}'\n")
 
-            return json.dumps(self.percept, indent=2) + reflection
+            return json.dumps(self.percept) + reflection
 
         def execute_action2(suggested_action: str) -> str:
             """
@@ -962,7 +957,7 @@ class GWTAutogenAgent(AutogenAgent):
             return self.retrieve_memory()
 
         def focus() -> str:
-            return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept, indent=2)}"
+            return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept)}"
 
         assert self.focus_agent is not None
         assert self.internal_perception_agent_2 is not None
@@ -1016,16 +1011,25 @@ class GWTAutogenAgent(AutogenAgent):
         ]
         num_concepts = len(concept_lines)
 
+        empty_result = {
+            "representative_concepts": [],
+            "cluster_sizes": {},
+            "cluster_members": {},
+            "chosen_k": 0,
+        }
         if num_concepts == 0:
-            return {
-                "representative_concepts": [],
-                "cluster_sizes": {},
-                "cluster_members": {},
-                "chosen_k": 0,
-            }
+            self._cluster_cache = ("", empty_result)
+            return empty_result
 
-        model = SentenceTransformer(model_name)
-        embeddings = model.encode(concept_lines, convert_to_tensor=True).cpu().numpy()
+        content_hash = hashlib.md5(concept_text.encode()).hexdigest()
+        if getattr(self, "_cluster_cache", (None, None))[0] == content_hash:
+            return self._cluster_cache[1]
+
+        embeddings = (
+            sentence_transformer_model.encode(concept_lines, convert_to_tensor=True)
+            .cpu()
+            .numpy()
+        )
 
         # Calculate k (clusters) using capped growth function to prevent over-clustering
         max_concepts = num_concepts
@@ -1107,12 +1111,14 @@ class GWTAutogenAgent(AutogenAgent):
             plt.savefig(cluster_path)
             plt.close()
 
-        return {
+        result = {
             "representative_concepts": representative_concepts,
             "cluster_sizes": cluster_sizes,
             "cluster_members": cluster_members,
             "chosen_k": chosen_k,
         }
+        self._cluster_cache = (content_hash, result)
+        return result
 
     def generate_initial_message(self):
         """
@@ -1141,14 +1147,11 @@ class GWTAutogenAgent(AutogenAgent):
                     "recent_episodic_memories": self.prev_episodic_memories[:20],
                     "current_episode_memory": self.curr_episodic_memory,
                 },
-                indent=2,
             )
             + "\n\n"
         )
 
-        state_section = (
-            "--- CURRENT STATE ---\n" + json.dumps(self.percept, indent=2) + "\n"
-        )
+        state_section = "--- CURRENT STATE ---\n" + json.dumps(self.percept) + "\n"
 
         final_prompt = (
             "Begin cognitive deliberation. Coordinate through structured, grounded reasoning. "
@@ -1177,7 +1180,6 @@ class GWTAutogenAgent(AutogenAgent):
                 "previous_episodic_memories": random_episodic_memories,
                 "current_episode_memory": self.curr_episodic_memory,
             },
-            indent=2,
         )
         return self.memory
 
@@ -1188,12 +1190,24 @@ class GWTAutogenAgent(AutogenAgent):
 
         last_msg = messages[-1]
 
-        # FORCE the executor after a tool call
+        # Route tool calls to the executor defined in the transition graph.
+        # Using allowed_transitions instead of hardcoding external_perception_agent
+        # ensures retrieve_memory/focus/record_long_term_memory are sent to the
+        # correct Internal_Perception_Agent, not to external_perception_agent which
+        # only knows about execute_action.
         if "tool_calls" in last_msg:
+            executors = self.allowed_transitions.get(last_speaker, [])
+            if executors:
+                return executors[0]
             return self.external_perception_agent
 
-        # FORCE the echo after a tool response
+        # Route tool responses via the transition graph (e.g. Internal_Perception_Agent_1
+        # → Idea_Agent, Internal_Perception_Agent_2 → Conscious_Agent, etc.).
+        # Only fall back to echo_agent for external_perception_agent responses.
         if last_msg.get("role") == "tool":
+            executors = self.allowed_transitions.get(last_speaker, [])
+            if executors:
+                return executors[0]
             return self.echo_agent
 
         # Standard Graph Transitions
