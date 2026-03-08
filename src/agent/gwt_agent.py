@@ -934,11 +934,11 @@ class GWTAutogenAgent(AutogenAgent):
         assert self.motor_agent is not None
         assert self.external_perception_agent is not None
         register_function(
-            execute_action,
+            execute_action1,
             caller=self.motor_agent,
             executor=self.external_perception_agent,
             name="execute_action",
-            description="Execute an action in the ALFWorld environment.",
+            description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
         )
 
         def record_long_term_memory(concept: str) -> str:
@@ -951,7 +951,7 @@ class GWTAutogenAgent(AutogenAgent):
             ):
                 return "I attempted to learn something, but I couldn't formulate any concept."
 
-            concept.replace("\n", " ").replace("\r", " ").strip()
+            concept = concept.replace("\n", " ").replace("\r", " ").strip()
 
             with open(self.log_paths["concept_path"], "a+") as f:
                 f.write(f"- {concept}\n")
