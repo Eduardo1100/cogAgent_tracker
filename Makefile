@@ -16,7 +16,7 @@ setup:
 dev: ## Start the development environment (notebooks + local API)
 	@echo "🛠️ Starting dev services..."
 	uv run marimo edit notebooks/exploration.py &
-	uv run fastapi dev src/api.py
+	uv run fastapi dev src/main.py
 
 train: ## Run the model training pipeline
 	@echo "🧠 Starting training..."
