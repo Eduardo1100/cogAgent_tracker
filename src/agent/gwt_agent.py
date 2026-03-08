@@ -172,9 +172,16 @@ class GWTAutogenAgent(AutogenAgent):
             "temperature": 1.0,  # Reasoners need higher temp for R1/o1
         }
 
-        # Planning config needs higher token limits for long horizon planning
-        planning_config = copy.deepcopy(reasoner_config)
+        # Planning: deterministic (temp=0.0) with a larger token budget.
+        # Uses the standard fallback list (fast model first) rather than the
+        # reasoner-first list — planning benefits from speed and consistency.
+        planning_config = copy.deepcopy(standard_config)
         planning_config["max_tokens"] = 1500
+
+        # Function-calling agents need slightly more headroom than 200 tokens
+        # to format the call + brief reasoning without truncation.
+        tool_call_config = copy.deepcopy(standard_config)
+        tool_call_config["max_tokens"] = 400
 
         # ... (Keep all your agent initializations exactly the same below this!) ...
         from src.agent.helpers import create_echo_agent
@@ -224,7 +231,7 @@ class GWTAutogenAgent(AutogenAgent):
 
                 IMPORTANT: It is necessary that you output a single call to the 'execute_action' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
             description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
-            llm_config=standard_config,
+            llm_config=tool_call_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -565,7 +572,7 @@ class GWTAutogenAgent(AutogenAgent):
             Example 2 (Context: If the provided concept = CONCEPT DISCOVERED: [NO CONCEPT at this time.]):
                 Your output must = record_long_term_memory(\'NO CONCEPT at this time.\')""",
             description="Record_Long_Term_Memory_Agent calls the 'record_long_term_memory' function with the concept given by 'Learning_Agent' as the argument.",
-            llm_config=standard_config,
+            llm_config=tool_call_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -586,15 +593,22 @@ class GWTAutogenAgent(AutogenAgent):
                 self.planning_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
-                self.learning_agent,
                 self.idea_agent,
+                # learning_agent removed: Learning needs memory context supplied by
+                # Internal_Perception_Agent_3; routing directly from Conscious_Agent
+                # skips that and leaves Learning_Agent without structured memory input.
             ],
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
-            self.internal_perception_agent_3: [self.idea_agent, self.learning_agent],
+            # Single choice: after memory retrieval always go to Idea_Agent.
+            # Learning_Agent here is wrong — it needs a belief state + successful
+            # action, not just raw memory output.
+            self.internal_perception_agent_3: [self.idea_agent],
             self.idea_agent: [self.planning_agent],
             self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
-            self.internal_perception_agent_1: [self.idea_agent],
+            # Go straight to Planning after writing a concept — skipping the extra
+            # Idea_Agent call saves one LLM round-trip per memory write.
+            self.internal_perception_agent_1: [self.planning_agent],
             self.internal_perception_agent_2: [self.conscious_agent],
             self.focus_agent: [self.internal_perception_agent_2],
         }
@@ -663,9 +677,16 @@ class GWTAutogenAgent(AutogenAgent):
             speaker_selection_method=self.custom_speaker_selection,
         )
 
+        # The GCM's LLM is called when custom_speaker_selection returns "auto"
+        # (i.e. for multi-choice transitions). Use standard_config so it gets
+        # a proper fallback list, deterministic temperature, and a token cap.
         self.group_chat_manager = GroupChatManager(
             groupchat=self.group_chat,
-            llm_config=self.llm_config_list[0],
+            llm_config={
+                "config_list": self.llm_config_list,
+                "temperature": 0.0,
+                "max_tokens": 50,  # Only needs to name an agent
+            },
         )
 
         # 5. THE ECHO HOOK (Prevents 400 Errors)
