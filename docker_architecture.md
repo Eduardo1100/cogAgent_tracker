@@ -1,63 +1,92 @@
-The following code-block will be rendered as a Mermaid diagram:
+Architecture Diagram
 
-```mermaid 
-graph TD
-    %% Define Styles and Colors
-    classDef host fill:#455a64,stroke:#263238,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef interface fill:#eceff1,stroke:#cfd8dc,stroke-width:1px,color:#37474f,stroke-dasharray: 5 5;
-    
-    classDef containerApp fill:#009688,stroke:#00796b,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef containerDB fill:#1976d2,stroke:#1565c0,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef containerRedis fill:#d32f2f,stroke:#b71c1c,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef containerMinio fill:#ffa000,stroke:#ff8f00,stroke-width:2px,color:#263238,font-weight:bold;
-    
-    classDef volume fill:#eceff1,stroke:#cfd8dc,stroke-width:1px,color:#37474f;
+```mermaid
+flowchart TB
+  %% External actor
+  user["Researcher / Developer"]
 
-    %% Diagram Structure
-    subgraph Host_System [Host Machine]
-        Host[.env File]:::host
-        P8000((Port 8000)):::interface
-        P5432((Port 5432)):::interface
-        P9000((Port 9000)):::interface
-        P9001((Port 9001)):::interface
+  %% System boundary
+  subgraph system["Cognitive Agent System"]
+    direction TB
+
+    subgraph app_layer["Application Layer"]
+      app["app<br/>cogagent-app<br/><br/>Runs:<br/>uv sync --frozen<br/>bootstrap_alfworld.sh<br/>python -m src.main"]
     end
 
-    subgraph Compose_Stack [Docker Compose Stack]
-        App[app: cogagent-app]:::containerApp
-        DB[(db: PostgreSQL 15)]:::containerDB
-        Cache[(cache: Redis 7)]:::containerRedis
-        Minio[objectstore: MinIO]:::containerMinio
+    subgraph data_layer["Data & Infrastructure Layer"]
+      db["Postgres 15<br/>cogagent-db<br/><br/>Structured persistent state"]
+      cache["Redis 7<br/>cogagent-redis<br/><br/>Fast cache / transient state"]
+      objectstore["MinIO Object Store<br/>cogagent-minio<br/><br/>Artifacts, datasets, model outputs"]
     end
 
-    subgraph Persistent_Volumes [Named Docker Volumes]
-        VolVenv[venv_storage]:::volume
-        VolUV[uv_cache]:::volume
-        VolUVPy[uv_python]:::volume
-        VolAlf[alfworld_data]:::volume
-        VolWandb[wandb_data]:::volume
-        VolDB[database-data]:::volume
-        VolS3[objectstore-data]:::volume
+    subgraph storage_layer["Mounted Storage"]
+      source["Bind Mount<br/>.:/app"]
+      venv["venv_storage<br/>/opt/venv"]
+      uvcache["uv_cache<br/>/opt/uv-cache"]
+      uvpython["uv_python<br/>/opt/uv-python"]
+      alfworld["alfworld_data<br/>/datasets/alfworld"]
+      wandb["wandb_data<br/>/wandb"]
+      pgdata["database-data<br/>/var/lib/postgresql/data"]
+      miniodata["objectstore-data<br/>/data"]
     end
+  end
 
-    %% Connections
-    App -->|DB URL| DB
-    App -->|Redis URL| Cache
-    App -->|S3 URL| Minio
+  %% User interaction
+  user -->|"HTTP :8000"| app
 
-    App --- VolVenv
-    App --- VolUV
-    App --- VolUVPy
-    App --- VolAlf
-    App --- VolWandb
-    DB --- VolDB
-    Minio --- VolS3
+  %% App dependencies
+  app -->|"DATABASE_URL"| db
+  app -->|"REDIS_URL"| cache
+  app -->|"S3_ENDPOINT"| objectstore
 
-    Host -.-> App
-    Host -.-> DB
-    Host -.-> Minio
-    
-    P8000 --- App
-    P5432 --- DB
-    P9000 --- Minio
-    P9001 --- Minio
+  %% Health-gated startup
+  db -.->|"healthy before app starts"| app
+  cache -.->|"healthy before app starts"| app
+  objectstore -.->|"healthy before app starts"| app
+
+  %% Volume relationships
+  source --> app
+  venv --> app
+  uvcache --> app
+  uvpython --> app
+  alfworld --> app
+  wandb --> app
+  pgdata --> db
+  miniodata --> objectstore
+```
+Startup Lifecycle 
+```mermaid
+sequenceDiagram
+    participant Docker
+    participant DB as db (Postgres)
+    participant Cache as cache (Redis)
+    participant ObjectStore as objectstore (MinIO)
+    participant App as app (cogagent-app)
+
+    Docker->>DB: Start container
+    Docker->>Cache: Start container
+    Docker->>ObjectStore: Start container
+
+    Note over DB: Healthcheck<br/>pg_isready -U POSTGRES_USER -d POSTGRES_DB
+    Note over Cache: Healthcheck<br/>redis-cli ping
+    Note over ObjectStore: Healthcheck<br/>mc ready local
+
+    DB-->>Docker: healthy
+    Cache-->>Docker: healthy
+    ObjectStore-->>Docker: healthy
+
+    Docker->>App: Start container (depends_on healthy)
+
+    Note over App: Startup sequence
+    App->>App: uv sync --frozen
+    App->>App: bootstrap_alfworld.sh
+    App->>App: uv run python -m src.main
+
+    App->>DB: Connect via DATABASE_URL
+    App->>Cache: Connect via REDIS_URL
+    App->>ObjectStore: Connect via S3_ENDPOINT
+
+    DB-->>App: Postgres responses
+    Cache-->>App: Redis responses
+    ObjectStore-->>App: Object storage responses
 ```

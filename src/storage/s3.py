@@ -16,3 +16,10 @@ def get_s3_client():
         # Region is required by boto3, even for local MinIO
         region_name="us-east-1",
     )
+
+
+def upload_file(data: bytes, bucket: str, key: str) -> str:
+    """Upload bytes to MinIO/S3 and return an s3:// URI."""
+    client = get_s3_client()
+    client.put_object(Body=data, Bucket=bucket, Key=key)
+    return f"s3://{bucket}/{key}"

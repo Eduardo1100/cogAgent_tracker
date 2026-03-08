@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import umap
 from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
+from autogen.agentchat.contrib.capabilities import transform_messages
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
-    flatten_tool_messages,
+    FlattenToolMessages,
     get_best_candidate,
     is_termination_msg_generic,
 )
@@ -696,6 +697,9 @@ class GWTAutogenAgent(AutogenAgent):
         )
         """
         # 6. JIT SCRUBBING (Input Protection for LLMs)
+        # Use TransformMessages (applied just before the API call, on the correct
+        # _oai_messages data) instead of a register_reply hook (which only modifies
+        # groupchat.messages and is ignored by _generate_oai_reply).
         llm_agents = [
             self.planning_agent,
             self.motor_agent,
@@ -708,19 +712,10 @@ class GWTAutogenAgent(AutogenAgent):
             self.group_chat_manager,
         ]
 
-        # NOTE: Use a reply preprocessor instead of `register_hook`.
-        # If any `role=tool` / `tool_calls` messages reach the LLM API, OpenAI will 400.
-        def scrub_tool_protocol(recipient, messages, sender, config):
-            if messages:
-                messages[:] = flatten_tool_messages(messages)  # in-place rewrite
-            return False, None
-
-        # Attach the scrubber ONLY to agents that call an LLM.
+        scrubber = transform_messages.TransformMessages(transforms=[FlattenToolMessages()])
         for agent in llm_agents:
             if agent is not None:
-                agent.register_reply(
-                    [ConversableAgent, None], scrub_tool_protocol, position=0
-                )
+                scrubber.add_to_agent(agent)
 
         # 7. THROTTLING
         def throttle_reply(recipient, messages, sender, config):
@@ -763,8 +758,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         with (
             open(self.log_paths["memory1_path"]) as src,
@@ -807,8 +801,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         for path in self.log_paths.values():
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    pass  # Create an empty file
+                open(path, "w").close()  # Create an empty file
 
         if self.task_status != "INCOMPLETE":
             with (
@@ -890,7 +883,7 @@ class GWTAutogenAgent(AutogenAgent):
 
             return json.dumps(self.percept, indent=2) + reflection
 
-        def execute_action2(suggested_action: str) -> list:
+        def execute_action2(suggested_action: str) -> str:
             """
             Executes an action in ALFWorld and returns the result as a JSON string.
             """
@@ -933,12 +926,14 @@ class GWTAutogenAgent(AutogenAgent):
             return self.obs
 
         # Register the WRAPPER instead of the method
+        assert self.motor_agent is not None
+        assert self.external_perception_agent is not None
         register_function(
-            execute_action,
+            execute_action1,
             caller=self.motor_agent,
             executor=self.external_perception_agent,
             name="execute_action",
-            description="Execute an action in the ALFWorld environment.",
+            description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
         )
 
         def record_long_term_memory(concept: str) -> str:
@@ -951,7 +946,7 @@ class GWTAutogenAgent(AutogenAgent):
             ):
                 return "I attempted to learn something, but I couldn't formulate any concept."
 
-            concept.replace("\n", " ").replace("\r", " ").strip()
+            concept = concept.replace("\n", " ").replace("\r", " ").strip()
 
             with open(self.log_paths["concept_path"], "a+") as f:
                 f.write(f"- {concept}\n")
@@ -969,6 +964,8 @@ class GWTAutogenAgent(AutogenAgent):
         def focus() -> str:
             return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept, indent=2)}"
 
+        assert self.focus_agent is not None
+        assert self.internal_perception_agent_2 is not None
         register_function(
             focus,
             caller=self.focus_agent,
@@ -976,6 +973,8 @@ class GWTAutogenAgent(AutogenAgent):
             description="Resets focus.",
         )
 
+        assert self.record_long_term_memory_agent is not None
+        assert self.internal_perception_agent_1 is not None
         register_function(
             record_long_term_memory,
             caller=self.record_long_term_memory_agent,
@@ -983,6 +982,8 @@ class GWTAutogenAgent(AutogenAgent):
             description="Records new concept in long-term memory.",
         )
 
+        assert self.retrieve_memory_agent is not None
+        assert self.internal_perception_agent_3 is not None
         register_function(
             retrieve_memory,
             caller=self.retrieve_memory_agent,
