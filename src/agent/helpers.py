@@ -229,12 +229,15 @@ def flatten_tool_messages(messages):
 
     scrubbed = []
     for msg in copy.deepcopy(messages):
-        # 1. Convert 'tool' responses to 'user' observations
+        # 1. Convert 'tool' responses to 'user' observations.
+        # Also strip 'tool_responses' — ag2's _generate_oai_reply_from_client
+        # unrolls that key back into role='tool' entries, re-triggering the 400.
         if msg.get("role") == "tool":
             msg["role"] = "user"
             content = msg.get("content") or "No observation provided."
             msg["content"] = f"[Observation]: {content}"
             msg.pop("tool_call_id", None)
+            msg.pop("tool_responses", None)
 
         # 2. Strip 'tool_calls' from assistant messages so Reasoner doesn't 400
         if "tool_calls" in msg:
