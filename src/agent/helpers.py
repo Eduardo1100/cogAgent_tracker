@@ -202,6 +202,27 @@ def create_echo_agent():
     return echo_agent
 
 
+class FlattenToolMessages:
+    """TransformMessages-compatible transform that strips AutoGen's tool protocol.
+
+    Converts ``role='tool'`` messages to ``role='user'`` observations and removes
+    ``tool_calls`` keys from assistant messages so DeepSeek Reasoner (and other
+    strict OpenAI-compat APIs) don't reject the conversation history with a 400.
+    """
+
+    def apply_transform(self, messages: list[dict]) -> list[dict]:
+        return flatten_tool_messages(messages)
+
+    def get_logs(
+        self, pre_transform_messages: list[dict], post_transform_messages: list[dict]
+    ) -> tuple[str, bool]:
+        changed = any(
+            pre != post
+            for pre, post in zip(pre_transform_messages, post_transform_messages)
+        )
+        return ("Tool protocol flattened" if changed else ""), changed
+
+
 def flatten_tool_messages(messages):
     if not messages:
         return []

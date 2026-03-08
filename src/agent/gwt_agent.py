@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import umap
 from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
+from autogen.agentchat.contrib.capabilities import transform_messages
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
-    flatten_tool_messages,
+    FlattenToolMessages,
     get_best_candidate,
     is_termination_msg_generic,
 )
@@ -696,6 +697,9 @@ class GWTAutogenAgent(AutogenAgent):
         )
         """
         # 6. JIT SCRUBBING (Input Protection for LLMs)
+        # Use TransformMessages (applied just before the API call, on the correct
+        # _oai_messages data) instead of a register_reply hook (which only modifies
+        # groupchat.messages and is ignored by _generate_oai_reply).
         llm_agents = [
             self.planning_agent,
             self.motor_agent,
@@ -708,19 +712,10 @@ class GWTAutogenAgent(AutogenAgent):
             self.group_chat_manager,
         ]
 
-        # NOTE: Use a reply preprocessor instead of `register_hook`.
-        # If any `role=tool` / `tool_calls` messages reach the LLM API, OpenAI will 400.
-        def scrub_tool_protocol(recipient, messages, sender, config):
-            if messages:
-                messages[:] = flatten_tool_messages(messages)  # in-place rewrite
-            return False, None
-
-        # Attach the scrubber ONLY to agents that call an LLM.
+        scrubber = transform_messages.TransformMessages(transforms=[FlattenToolMessages()])
         for agent in llm_agents:
             if agent is not None:
-                agent.register_reply(
-                    [ConversableAgent, None], scrub_tool_protocol, position=0
-                )
+                scrubber.add_to_agent(agent)
 
         # 7. THROTTLING
         def throttle_reply(recipient, messages, sender, config):
