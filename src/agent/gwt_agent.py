@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import random
 
 import matplotlib.pyplot as plt
@@ -260,9 +261,6 @@ class GWTAutogenAgent(AutogenAgent):
             "Description": self.motor_agent.description,
         }
 
-        # llm_config = copy.deepcopy(self.llm_config)
-        # llm_config["max_tokens"] = 1500
-
         # Planning agent's prompt is the main limiting factor when it comes to improving success rate.
         self.planning_agent = ConversableAgent(
             name="Planning_Agent",
@@ -403,7 +401,9 @@ class GWTAutogenAgent(AutogenAgent):
         }
 
         for fromAgent, toAgents in self.allowed_transitions.items():
-            self.agents_info[fromAgent.name]["Allowed Transitions"] = [a.name for a in toAgents]
+            self.agents_info[fromAgent.name]["Allowed Transitions"] = [
+                a.name for a in toAgents
+            ]
 
         with open(self.log_paths["agents_info_path"], "w") as f:
             json.dump(self.agents_info, f, indent=4)
@@ -473,7 +473,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(max_messages=30),
+                MessageHistoryLimiter(max_messages=50),
                 FlattenToolMessages(),
             ]
         )
@@ -572,6 +572,14 @@ class GWTAutogenAgent(AutogenAgent):
     def register_functions(self):
 
         def execute_action1(suggested_action: str) -> str:
+            # Check terminal states first — before any early return — so that
+            # empty/text calls after task completion still emit the stop signal.
+            if self.task_success:
+                self.result_dict[self.game_no] = "SUCCESS"
+                with open(self.log_paths["result_path"], "w") as f:
+                    f.write(f"Success: {self.success}\n")
+                return "STRAWBERRY"
+
             if self.task_failed and self.rounds_left == 0:
                 self.result_dict[self.game_no] = "FAILURE"
                 with open(self.log_paths["result_path"], "w") as f:
@@ -585,12 +593,6 @@ class GWTAutogenAgent(AutogenAgent):
                 self.max_actions += self.max_round_actions
                 self.task_failed = False
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
-
-            if self.task_success:
-                self.result_dict[self.game_no] = "SUCCESS"
-                with open(self.log_paths["result_path"], "w") as f:
-                    f.write(f"Success: {self.success}\n")
-                return "STRAWBERRY"
 
             admissible_commands = list(self.info["admissible_commands"][0])
             assert admissible_commands, "No admissible commands found."
@@ -633,48 +635,6 @@ class GWTAutogenAgent(AutogenAgent):
                 f.write(f"action: '{suggested_action}'. observation: '{self.obs[0]}'\n")
 
             return json.dumps(self.percept) + reflection
-
-        def execute_action2(suggested_action: str) -> str:
-            """
-            Executes an action in ALFWorld and returns the result as a JSON string.
-            """
-            import json
-
-            # 1. Validation & Environment Step
-            if not suggested_action:
-                return json.dumps({"error": "No action provided."})
-
-            obs, reward, done, info = self.env.step(suggested_action)
-
-            # 2. Update state for internal cognition
-            self.percept = {
-                "timestep": self.env.steps,
-                "attempted_action": suggested_action,
-                "resulting_observation": obs,
-                "task_status": "COMPLETED" if (done and reward > 0) else "INCOMPLETE",
-                "action_attempts_left": self.max_actions - self.env.steps,
-                "admissible_actions": info.get("admissible_commands", []),
-            }
-
-            # 3. Handle specific game-ending logic (FLEECE/STRAWBERRY)
-            if self.task_failed and self.rounds_left == 0:
-                return "FLEECE"
-            if self.task_success:
-                return "STRAWBERRY"
-
-            return obs[0]  # json.dumps(self.percept, indent=2)
-
-        def execute_action(suggested_action: str) -> str:
-            """Executes an action in the AlfWorld environment and returns the observation."""
-            # ALFWorld step() expects a list of commands
-            observation, reward, done, info = self.env.step([suggested_action])
-
-            # Update agent state
-            self.obs = observation[0]
-            self.info = info
-            self.num_actions_taken += 1
-
-            return self.obs
 
         # Register the WRAPPER instead of the method
         assert self.motor_agent is not None
@@ -981,19 +941,29 @@ class GWTAutogenAgent(AutogenAgent):
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
 
         # Gate Learning_Agent: only invoke it after a task outcome (success/failure).
-        # During normal gameplay it produces empty/boilerplate output and wastes tokens.
-        # Skip it and proceed directly to Idea_Agent instead.
+        if self.learning_agent in possible_speakers and not self.task_success and not self.task_failed:
+            possible_speakers = [s for s in possible_speakers if s is not self.learning_agent]
+
+        # Gate Idea_Agent: only invoke when Conscious_Agent signals uncertainty.
+        # When the belief state is confident, route directly to Planning_Agent to
+        # avoid an expensive extra LLM call every cycle.
         if (
-            self.learning_agent in possible_speakers
+            last_speaker is self.conscious_agent
+            and self.idea_agent in possible_speakers
             and not self.task_success
             and not self.task_failed
         ):
-            possible_speakers = [
-                s for s in possible_speakers if s is not self.learning_agent
-            ]
-            # If Idea_Agent is a valid next step use it, otherwise fall through to auto
-            if self.idea_agent in possible_speakers:
+            last_content = (last_msg.get("content") or "").lower()
+            # Use word boundaries so "uncertainties" (negated context) does not
+            # match the marker "uncertain".  "no observation" is a phrase so it
+            # uses a simple substring check deliberately.
+            _uncertainty_re = re.compile(
+                r"\b(uncertain|unclear|unsure|unknown|conflicting|"
+                r"contradictory|ambiguous|stalled)\b"
+            )
+            if _uncertainty_re.search(last_content) or "no observation" in last_content:
                 return self.idea_agent
+            return self.planning_agent
 
         # Safety valve: if the task is done and the conversation is still
         # running (e.g. Motor_Agent stuck outputting text instead of calling

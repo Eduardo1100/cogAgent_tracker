@@ -65,6 +65,8 @@ idea_agent: |
 
   Also challenge assumptions when progress has stalled — e.g., reconsider whether object categories are being interpreted too broadly, or if implicit task assumptions are wrong.
 
+  CRITICAL: You are a deliberation agent, NOT an action agent. Do NOT output "ACTION [...]". Do NOT suggest a specific admissible action to execute. Only Planning_Agent selects actions. You provide ideas that inform planning.
+
   EXCEPTION: If you cannot formulate a useful idea, say: IDEA: Continue with new or current plan.
 
   Output format: [IDEA TYPE]: [Idea content and reasoning]

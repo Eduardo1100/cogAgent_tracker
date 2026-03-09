@@ -188,14 +188,15 @@ def create_echo_agent():
     def relay_observation(recipient, messages, sender, config):
         if not messages:
             return False, None
-        last_msg = messages[-1]
 
-        # If the last message was a tool result, relay it as text
-        if last_msg.get("role") == "tool":
-            content = last_msg.get("content") or "Action completed."
-            return True, f"[Observation]: {content}"
+        # AutoGen appends an empty text reply from External_Perception_Agent AFTER
+        # the tool result, so messages[-1] is never role='tool'. Search backwards.
+        for msg in reversed(messages[-3:]):
+            if msg.get("role") == "tool":
+                content = msg.get("content") or "Action completed."
+                return True, f"[Observation]: {content}"
 
-        # If the last message was a prompt, just acknowledge
+        # No tool message found — acknowledge without relaying
         return True, "[Internal State Synchronized]"
 
     echo_agent.register_reply([ConversableAgent, None], relay_observation)

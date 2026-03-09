@@ -101,7 +101,9 @@ def get_llm_profile(config_data):
                 env_var = value[2:-1]
                 model_config[key] = os.getenv(env_var, "")
 
-    return {"config_list": curr_profile, "cache_seed": 42, "temperature": 0.0}
+    _cache_seed_env = os.getenv("CACHE_SEED", "42")
+    _cache_seed = None if _cache_seed_env.lower() == "null" else int(_cache_seed_env)
+    return {"config_list": curr_profile, "cache_seed": _cache_seed, "temperature": 0.0}
 
 
 def ensure_s3_bucket(s3, bucket_name: str) -> None:
