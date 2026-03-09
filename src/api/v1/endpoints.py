@@ -3,10 +3,9 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from src.models.db import Prediction
 from src.storage import cache, s3
 from src.storage.database import get_db
-from src.storage.models import EpisodeRun, ExperimentRun
+from src.storage.models import EpisodeRun, ExperimentRun, Prediction
 
 router = APIRouter()
 
