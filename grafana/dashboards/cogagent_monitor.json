@@ -29,7 +29,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 1},
       "id": 1,
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
       "title": "Success Rate",
@@ -46,7 +46,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 1},
       "id": 2,
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
       "title": "Error-Adjusted Rate",
@@ -56,7 +56,7 @@
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 8, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 1},
       "id": 3,
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
       "title": "Total Cost",
@@ -66,7 +66,7 @@
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 11, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 1},
       "id": 4,
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
       "title": "Total Tokens",
@@ -76,7 +76,27 @@
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 4, "x": 14, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 12, "y": 1},
+      "id": 7,
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
+      "title": "Dataset Split",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(split, ''), 'unknown') as split FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 4, "w": 3, "x": 15, "y": 1},
+      "id": 8,
+      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
+      "title": "Started At",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC' as started_at FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 1},
       "id": 6,
       "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
       "title": "Agent",
@@ -86,7 +106,7 @@
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 1},
       "id": 5,
       "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
       "title": "Git Commit",
@@ -345,5 +365,5 @@
   "timezone": "browser",
   "title": "cogAgent Monitor",
   "uid": "cogagent-monitor",
-  "version": 5
+  "version": 6
 }

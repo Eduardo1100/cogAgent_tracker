@@ -18,9 +18,9 @@ dev: ## Start the development environment (notebooks + local API)
 	uv run marimo edit notebooks/exploration.py &
 	uv run fastapi dev src/main.py
 
-train: ## Run the model training pipeline
-	@echo "🧠 Starting training..."
-	uv run python src/train.py
+train: ## Run eval loop on the valid_seen split
+	docker compose run --rm app \
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python -m src.agent.run_autogen_eval_loop src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
 
 test: ## Run tests with pytest
 	uv run pytest tests/

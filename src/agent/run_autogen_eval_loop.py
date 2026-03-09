@@ -212,6 +212,12 @@ def parse_arguments():
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for game selection"
     )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        default=None,
+        help="Dataset splits to evaluate (overrides config). E.g. --splits valid_seen",
+    )
     return parser.parse_args()
 
 
@@ -254,7 +260,7 @@ def main():
         args=args,
     )
 
-    eval_splits = config["general"]["evaluate"]["splits"]
+    eval_splits = args.splits or config["general"]["evaluate"]["splits"]
     eval_envs = config["general"]["evaluate"]["envs"]
     controllers = config["general"]["evaluate"]["controllers"]
 
@@ -308,7 +314,18 @@ def main():
                     eval_ood_path,
                     dataset_cfg,
                 )
+                split_start_time = datetime.now(UTC)
                 print(f"Evaluating split: {split_name} ({train_eval_mode})")
+                print(f"Split start time: {split_start_time.isoformat()}")
+                wandb.config.update(
+                    {
+                        "split": split_name,
+                        "split_start_time": split_start_time.isoformat(),
+                    },
+                    allow_val_change=True,
+                )
+                if hasattr(agent, "read_only_memory"):
+                    agent.read_only_memory = split_name == "valid_unseen"
 
                 alfred_env = AlfredTWEnv(config, train_eval=train_eval_mode)
                 env = alfred_env.init_env(batch_size=1)
@@ -419,7 +436,8 @@ def main():
                                 {
                                     "game/total_tokens": game_total_tokens,
                                     "game/cost": game_total_cost,
-                                }
+                                },
+                                step=num_games_evaluated,
                             )
 
                         # Log errors
@@ -477,14 +495,19 @@ def main():
                         )
 
                         # Upload to S3
-                        s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
-                        s3.put_object(
-                            Bucket=BUCKET_NAME,
-                            Key=s3_key,
-                            Body=chat_text.encode("utf-8"),
-                            ContentType="text/plain",
-                        )
-                        print(f"☁️ Uploaded chat history to S3: {s3_key}")
+                        s3_key = None
+                        try:
+                            _s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
+                            s3.put_object(
+                                Bucket=BUCKET_NAME,
+                                Key=_s3_key,
+                                Body=chat_text.encode("utf-8"),
+                                ContentType="text/plain",
+                            )
+                            s3_key = _s3_key
+                            print(f"☁️ Uploaded chat history to S3: {s3_key}")
+                        except Exception as e:
+                            print(f"⚠️ S3 upload failed: {e}")
 
                         # Update running metrics
                         success = agent.success
@@ -535,6 +558,7 @@ def main():
 
                         wandb.log(
                             {
+                                "split": split_name,
                                 "game_no": i,
                                 "success": int(success),
                                 "actions_taken": agent.num_actions_taken,
@@ -598,6 +622,7 @@ def main():
                             episode_cost=game_total_cost if game_usage else None,
                             success_rate=success_rate,
                             error_adjusted_success_rate=error_adjusted_success_rate,
+                            chat_history_s3_key=s3_key,
                         )
                         db.add(episode)
                         db.commit()
