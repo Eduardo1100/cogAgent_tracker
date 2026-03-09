@@ -225,6 +225,22 @@ def parse_arguments():
         "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
     )
     parser.add_argument(
+        "--rag_episode_k", type=int, default=5,
+        help="Episodes retrieved by retrieve_memory() (mid-game RAG call)",
+    )
+    parser.add_argument(
+        "--rag_concept_k", type=int, default=5,
+        help="Knowledge concepts retrieved by retrieve_memory() (mid-game RAG call)",
+    )
+    parser.add_argument(
+        "--rag_episode_k_initial", type=int, default=10,
+        help="Episodes injected in the initial message (start-of-game RAG)",
+    )
+    parser.add_argument(
+        "--rag_concept_k_initial", type=int, default=5,
+        help="Knowledge concepts injected in the initial message (start-of-game RAG)",
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
         help="Random seed for game selection (default: None = truly random).",
     )
@@ -308,6 +324,10 @@ def main():
         max_chat_round=args.max_chat_rounds,
         max_actions=args.max_actions,
         rounds_per_game=1,
+        rag_episode_k=args.rag_episode_k,
+        rag_concept_k=args.rag_concept_k,
+        rag_episode_k_initial=args.rag_episode_k_initial,
+        rag_concept_k_initial=args.rag_concept_k_initial,
         args=args,
     )
 

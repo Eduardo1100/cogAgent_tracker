@@ -158,7 +158,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(\n  ROUND(\n    COUNT(*) FILTER (WHERE success = true)::float8\n    / NULLIF(\n        COUNT(*) FILTER (WHERE success = true OR error_message IS NULL),\n        0\n      )::float8 * 100,\n    1\n  ),\n  0\n) AS error_adjusted_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  ROUND(\n    (\n      COUNT(*) FILTER (WHERE success = true)::float8\n      / NULLIF(\n          COUNT(*) FILTER (WHERE success = true OR error_message IS NULL),\n          0\n        )::float8 * 100\n    )::numeric,\n    1\n  ),\n  0\n) AS error_adjusted_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }

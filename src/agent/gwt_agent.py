@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import random
 import re
 
 import matplotlib.pyplot as plt
@@ -14,12 +13,14 @@ from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
+    ConvertOrphanedToolMessages,
     FlattenToolMessages,
     create_echo_agent,
     get_best_candidate,
     is_termination_msg_generic,
     sentence_transformer_model,
 )
+from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_episodes
 
 
 class GWTAutogenAgent(AutogenAgent):
@@ -31,6 +32,10 @@ class GWTAutogenAgent(AutogenAgent):
         max_chat_round=400,
         max_actions=30,
         rounds_per_game=1,
+        rag_episode_k=5,
+        rag_concept_k=5,
+        rag_episode_k_initial=10,
+        rag_concept_k_initial=5,
         args=None,
         env=None,
         obs="",
@@ -47,6 +52,11 @@ class GWTAutogenAgent(AutogenAgent):
             obs,
             info,
         )
+
+        self.rag_episode_k = rag_episode_k
+        self.rag_concept_k = rag_concept_k
+        self.rag_episode_k_initial = rag_episode_k_initial
+        self.rag_concept_k_initial = rag_concept_k_initial
 
         self.read_only_memory = False
 
@@ -87,6 +97,8 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_status = "INCOMPLETE"
         self.initial_message = ""
         self.memory = ""
+        self._episodic_rag_cache: dict = {}
+        self._concept_rag_cache: dict = {}
 
     def _make_belief_state_termination_fn(self):
         """Returns a termination predicate for Belief_State_Agent.
@@ -476,8 +488,14 @@ class GWTAutogenAgent(AutogenAgent):
                 full_scrubber.add_to_agent(agent)
 
         # Motor_Agent only gets history limiting — tool_call format must be preserved.
+        # ConvertOrphanedToolMessages handles the edge case where MessageHistoryLimiter
+        # trims the window such that the first message is role='tool' without a
+        # preceding role='assistant'+tool_calls, which causes a 400 from the API.
         motor_scrubber = transform_messages.TransformMessages(
-            transforms=[MessageHistoryLimiter(max_messages=50)]
+            transforms=[
+                MessageHistoryLimiter(max_messages=50),
+                ConvertOrphanedToolMessages(),
+            ]
         )
         if self.motor_agent is not None:
             motor_scrubber.add_to_agent(self.motor_agent)
@@ -742,6 +760,7 @@ class GWTAutogenAgent(AutogenAgent):
             line.strip() for line in concept_text.split("\n") if line.strip()
         ]
         num_concepts = len(concept_lines)
+        print(f"🧠 Clustering {num_concepts} concept(s)...")
 
         empty_result = {
             "representative_concepts": [],
@@ -871,12 +890,18 @@ class GWTAutogenAgent(AutogenAgent):
             f"- Max environment actions allowed: {self.max_actions} (physical interactions only).\n\n"
         )
 
+        relevant_knowledge = retrieve_relevant_concepts(
+            self.knowledge, self.task, k=self.rag_concept_k_initial, cache=self._concept_rag_cache
+        )
+        relevant_episodes = retrieve_relevant_episodes(
+            self.prev_episodic_memories, self.task, k=self.rag_episode_k_initial, cache=self._episodic_rag_cache
+        )
         memory_section = "--- PRIOR KNOWLEDGE & EPISODIC MEMORY ---\n"
         memory_section += (
             json.dumps(
                 {
-                    "knowledge": self.knowledge,
-                    "recent_episodic_memories": self.prev_episodic_memories[:20],
+                    "knowledge": relevant_knowledge,
+                    "recent_episodic_memories": relevant_episodes,
                     "current_episode_memory": self.curr_episodic_memory,
                 },
             )
@@ -899,17 +924,28 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
     def retrieve_memory(self):
-        random_episodic_memories = self.prev_episodic_memories
-        if len(random_episodic_memories) >= 5:
-            random_episodic_memories = sorted(
-                random.sample(self.prev_episodic_memories, 5),
-                key=lambda x: x["episode_number"],
-            )
+        query = self.task
+        if self.curr_episodic_memory:
+            last = self.curr_episodic_memory[-1]
+            query += " " + (last if isinstance(last, str) else json.dumps(last))
+
+        print(
+            f"🔍 Retrieving memory: {len(self.prev_episodic_memories)} episode(s), "
+            f"{len(self.knowledge)} concept(s) → top-{self.rag_episode_k} episodes, "
+            f"top-{self.rag_concept_k} concepts"
+        )
+
+        relevant_episodes = retrieve_relevant_episodes(
+            self.prev_episodic_memories, query, k=self.rag_episode_k, cache=self._episodic_rag_cache
+        )
+        relevant_knowledge = retrieve_relevant_concepts(
+            self.knowledge, query, k=self.rag_concept_k, cache=self._concept_rag_cache
+        )
 
         self.memory = json.dumps(
             {
-                "knowledge": self.knowledge,
-                "previous_episodic_memories": random_episodic_memories,
+                "knowledge": relevant_knowledge,
+                "previous_episodic_memories": relevant_episodes,
                 "current_episode_memory": self.curr_episodic_memory,
             },
         )
