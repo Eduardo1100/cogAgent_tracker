@@ -152,6 +152,15 @@ class GWTAutogenAgent(AutogenAgent):
         if self.echo_agent is not None and hasattr(self.echo_agent, "_relay_state"):
             self.echo_agent._relay_state["stale_count"] = 0
             self.echo_agent._relay_state["last_obs"] = None
+        # Clear GroupChat message history and all agent chat histories so game 1
+        # context doesn't bleed into subsequent games.
+        if self.group_chat is not None:
+            self.group_chat.messages.clear()
+            for agent in self.group_chat.agents:
+                agent.clear_history()
+        # Clear per-game RAG caches so stale embeddings don't pollute retrieval.
+        self._episodic_rag_cache.clear()
+        self._concept_rag_cache.clear()
         self.task = obs[0].split("Your task is to: ")[1]
         self.admissible_actions = list(self.info["admissible_commands"][0])
         self.task_status = "INCOMPLETE"
