@@ -1,0 +1,1 @@
+Cluster 1; Confidence Score = 1; Concept: - When searching for objects in this environment, prioritize checking closed containers as they often contain the target items.
