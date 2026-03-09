@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 import os
@@ -16,6 +15,7 @@ from sklearn.cluster import KMeans
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
     FlattenToolMessages,
+    create_echo_agent,
     get_best_candidate,
     is_termination_msg_generic,
     sentence_transformer_model,
@@ -53,12 +53,12 @@ class GWTAutogenAgent(AutogenAgent):
         self.echo_agent = None
         self.planning_agent = None
         self.motor_agent = None
-        self.idea_agent = None
+        self.thinking_agent = None
         self.external_perception_agent = None
         self.internal_perception_agent_1 = None
         self.internal_perception_agent_2 = None
         self.internal_perception_agent_3 = None
-        self.conscious_agent = None
+        self.belief_state_agent = None
         self.retrieve_memory_agent = None
         self.learning_agent = None
         self.record_long_term_memory_agent = None
@@ -88,20 +88,20 @@ class GWTAutogenAgent(AutogenAgent):
         self.initial_message = ""
         self.memory = ""
 
-    def _make_conscious_termination_fn(self):
-        """Returns a termination predicate for Conscious_Agent.
+    def _make_belief_state_termination_fn(self):
+        """Returns a termination predicate for Belief_State_Agent.
         Terminates on STRAWBERRY/FLEECE OR after task_success is True
-        and Conscious_Agent has been visited twice (grace period for
+        and Belief_State_Agent has been visited twice (grace period for
         Learning_Agent to run one cycle).
         """
-        self._conscious_post_success_visits = 0
+        self._belief_state_post_success_visits = 0
 
         def _check(msg):
             if is_termination_msg_generic(msg):
                 return True
             if self.task_success or (self.task_failed and self.rounds_left == 0):
-                self._conscious_post_success_visits += 1
-                return self._conscious_post_success_visits >= 2
+                self._belief_state_post_success_visits += 1
+                return self._belief_state_post_success_visits >= 2
             return False
 
         return _check
@@ -121,7 +121,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_failed = False
         self.task_success = False
         self.success = False
-        self._conscious_post_success_visits = 0
+        self._belief_state_post_success_visits = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         self.task = obs[0].split("Your task is to: ")[1]
@@ -188,34 +188,20 @@ class GWTAutogenAgent(AutogenAgent):
         with _prompts_path.open() as _f:
             _PROMPTS = yaml.safe_load(_f)
 
-        # 1. Get the full list of models from your profile
         self.llm_config_list = self.llm_profile.get("config_list", [])
 
-        # 2. Define the 'Standard' Priority: Gemini -> Chat -> Reasoner
-        # If Gemini is dead (429), it immediately tries DeepSeek Chat.
-        standard_fallback_list = self.llm_config_list
-
-        # 3. Define the 'Reasoner' Priority: Reasoner -> Chat -> Gemini
-        # We REVERSE it so the Conscious Agent always tries to 'think' first.
-        reasoner_fallback_list = list(reversed(self.llm_config_list))
-
+        # Standard priority: Gemini -> Chat -> Reasoner
         standard_config = {
-            "config_list": standard_fallback_list,
+            "config_list": self.llm_config_list,
             "temperature": 0.0,
             "max_tokens": 200,
         }
 
+        # Reasoner priority: Reasoner -> Chat -> Gemini (reversed)
         reasoner_config = {
-            "config_list": reasoner_fallback_list,
+            "config_list": list(reversed(self.llm_config_list)),
             "temperature": 1.0,  # Reasoners need higher temp for R1/o1
         }
-
-        # Planning config needs higher token limits for long horizon planning
-        planning_config = copy.deepcopy(reasoner_config)
-        planning_config["max_tokens"] = 1500
-
-        # ... (Keep all your agent initializations exactly the same below this!) ...
-        from src.agent.helpers import create_echo_agent
 
         self.echo_agent = create_echo_agent()
         self.agents_info[self.echo_agent.name] = {
@@ -226,7 +212,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.focus_agent = ConversableAgent(
             name="Focus_Agent",
             system_message=_PROMPTS["focus_agent"],
-            description="Focus_Agent calls the 'focus' function whenever Conscious_Agent fails to state a BELIEF STATE until Conscious_Agent outputs a BELIEF STATE.",
+            description="Focus_Agent calls the 'focus' function whenever Belief_State_Agent fails to state a BELIEF STATE until Belief_State_Agent outputs a BELIEF STATE.",
             llm_config=standard_config,
             is_termination_msg=lambda msg: False,
             human_input_mode="NEVER",
@@ -267,7 +253,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Planning_Agent",
             system_message=_PROMPTS["planning_agent"],
             description="Planning_Agent proposes a high-level plan to solve the current task.",
-            llm_config=planning_config,
+            llm_config=standard_config,
             is_termination_msg=lambda msg: False,
             human_input_mode="NEVER",
         )
@@ -276,30 +262,30 @@ class GWTAutogenAgent(AutogenAgent):
             "Description": self.planning_agent.description,
         }
 
-        self.idea_agent = ConversableAgent(
-            name="Idea_Agent",
-            system_message=_PROMPTS["idea_agent"],
-            description="Idea_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
+        self.thinking_agent = ConversableAgent(
+            name="Thinking_Agent",
+            system_message=_PROMPTS["thinking_agent"],
+            description="Thinking_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.idea_agent.name] = {
-            "Prompt": self.idea_agent.system_message,
-            "Description": self.idea_agent.description,
+        self.agents_info[self.thinking_agent.name] = {
+            "Prompt": self.thinking_agent.system_message,
+            "Description": self.thinking_agent.description,
         }
 
-        self.conscious_agent = ConversableAgent(
-            name="Conscious_Agent",
-            system_message=_PROMPTS["conscious_agent"],
-            description="Conscious_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
-            llm_config=reasoner_config,
+        self.belief_state_agent = ConversableAgent(
+            name="Belief_State_Agent",
+            system_message=_PROMPTS["belief_state_agent"],
+            description="Belief_State_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
+            llm_config=standard_config,
             human_input_mode="NEVER",
-            is_termination_msg=self._make_conscious_termination_fn(),
+            is_termination_msg=self._make_belief_state_termination_fn(),
         )
-        self.agents_info[self.conscious_agent.name] = {
-            "Prompt": self.conscious_agent.system_message,
-            "Description": self.conscious_agent.description,
+        self.agents_info[self.belief_state_agent.name] = {
+            "Prompt": self.belief_state_agent.system_message,
+            "Description": self.belief_state_agent.description,
         }
 
         self.external_perception_agent = ConversableAgent(
@@ -354,7 +340,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Learning_Agent",
             system_message=_PROMPTS["learning_agent"],
             description="Learning_Agent forms or reinforces generalizable concepts only after successful, observed actions or contrastive outcomes. Prioritizes novel discovery and integrates belief state-based abstraction.",
-            llm_config=reasoner_config,
+            llm_config=standard_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -383,21 +369,21 @@ class GWTAutogenAgent(AutogenAgent):
             self.motor_agent: [self.external_perception_agent],
             # CHANGE: Route through Echo_Agent to broadcast tool results
             self.external_perception_agent: [self.echo_agent],
-            self.echo_agent: [self.conscious_agent],
-            self.conscious_agent: [
+            self.echo_agent: [self.belief_state_agent],
+            self.belief_state_agent: [
                 self.planning_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
                 self.learning_agent,
-                self.idea_agent,
+                self.thinking_agent,
             ],
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
-            self.internal_perception_agent_3: [self.idea_agent, self.learning_agent],
-            self.idea_agent: [self.planning_agent],
+            self.internal_perception_agent_3: [self.thinking_agent, self.learning_agent],
+            self.thinking_agent: [self.planning_agent],
             self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
-            self.internal_perception_agent_1: [self.idea_agent],
-            self.internal_perception_agent_2: [self.conscious_agent],
+            self.internal_perception_agent_1: [self.thinking_agent],
+            self.internal_perception_agent_2: [self.belief_state_agent],
             self.focus_agent: [self.internal_perception_agent_2],
         }
 
@@ -419,11 +405,11 @@ class GWTAutogenAgent(AutogenAgent):
         active_agents = [
             self.planning_agent,
             self.motor_agent,
-            self.idea_agent,
+            self.thinking_agent,
             self.internal_perception_agent_1,
             self.internal_perception_agent_2,
             self.internal_perception_agent_3,
-            self.conscious_agent,
+            self.belief_state_agent,
             self.retrieve_memory_agent,
             self.learning_agent,
             self.record_long_term_memory_agent,
@@ -468,10 +454,10 @@ class GWTAutogenAgent(AutogenAgent):
         # execute_action() — breaking the observation relay for the rest of the game.
         # Motor_Agent only needs the history limiter; it uses a standard
         # OpenAI-compatible model that handles tool_calls natively.
-        reasoner_agents = [
+        scrubbed_agents = [
             self.planning_agent,
-            self.idea_agent,
-            self.conscious_agent,
+            self.thinking_agent,
+            self.belief_state_agent,
             self.retrieve_memory_agent,
             self.learning_agent,
             self.record_long_term_memory_agent,
@@ -485,7 +471,7 @@ class GWTAutogenAgent(AutogenAgent):
                 FlattenToolMessages(),
             ]
         )
-        for agent in reasoner_agents:
+        for agent in scrubbed_agents:
             if agent is not None:
                 full_scrubber.add_to_agent(agent)
 
@@ -948,7 +934,7 @@ class GWTAutogenAgent(AutogenAgent):
             return self.external_perception_agent
 
         # Route tool responses via the transition graph (e.g. Internal_Perception_Agent_1
-        # → Idea_Agent, Internal_Perception_Agent_2 → Conscious_Agent, etc.).
+        # → Thinking_Agent, Internal_Perception_Agent_2 → Belief_State_Agent, etc.).
         # Only fall back to echo_agent for external_perception_agent responses.
         if last_msg.get("role") == "tool":
             executors = self.allowed_transitions.get(last_speaker, [])
@@ -960,15 +946,21 @@ class GWTAutogenAgent(AutogenAgent):
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
 
         # Gate Learning_Agent: only invoke it after a task outcome (success/failure).
-        if self.learning_agent in possible_speakers and not self.task_success and not self.task_failed:
-            possible_speakers = [s for s in possible_speakers if s is not self.learning_agent]
+        if (
+            self.learning_agent in possible_speakers
+            and not self.task_success
+            and not self.task_failed
+        ):
+            possible_speakers = [
+                s for s in possible_speakers if s is not self.learning_agent
+            ]
 
-        # Gate Idea_Agent: only invoke when Conscious_Agent signals uncertainty.
+        # Gate Thinking_Agent: only invoke when Belief_State_Agent signals uncertainty.
         # When the belief state is confident, route directly to Planning_Agent to
         # avoid an expensive extra LLM call every cycle.
         if (
-            last_speaker is self.conscious_agent
-            and self.idea_agent in possible_speakers
+            last_speaker is self.belief_state_agent
+            and self.thinking_agent in possible_speakers
             and not self.task_success
             and not self.task_failed
         ):
@@ -981,7 +973,7 @@ class GWTAutogenAgent(AutogenAgent):
                 r"contradictory|ambiguous|stalled)\b"
             )
             if _uncertainty_re.search(last_content) or "no observation" in last_content:
-                return self.idea_agent
+                return self.thinking_agent
             return self.planning_agent
 
         # Safety valve: if the task is done and the conversation is still
