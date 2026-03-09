@@ -38,6 +38,13 @@ def get_git_commit() -> str | None:
         return None
 
 
+def get_git_branch() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+
 def infer_task_type(task: str) -> int | None:
     """Infer ALFWorld task type (1–6) from the task description string."""
     t = task.lower()
@@ -210,7 +217,7 @@ def parse_arguments():
         "--max_actions", type=int, default=30, help="Max environment actions per game"
     )
     parser.add_argument(
-        "--max_chat_rounds", type=int, default=500, help="Max chat rounds per game"
+        "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for game selection"
@@ -459,6 +466,7 @@ def main():
                     # Persist agent prompts, transition graph, and git commit
                     experiment.agents_config = agent.agents_info
                     experiment.git_commit = get_git_commit()
+                    experiment.git_branch = get_git_branch()
                     db.commit()
                     cache.set_cache(
                         f"agents_config:{experiment.id}",

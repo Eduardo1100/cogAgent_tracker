@@ -1,6 +1,15 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -51,8 +60,9 @@ class ExperimentRun(Base):
     # Agent graph: prompts, descriptions, and allowed transitions per agent
     agents_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    # Git commit SHA of the codebase at eval time (for reproducibility)
+    # Git info at eval time (for reproducibility)
     git_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    git_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Dataset split evaluated (e.g. "valid_seen", "valid_unseen")
     split: Mapped[str | None] = mapped_column(String(50), nullable=True)

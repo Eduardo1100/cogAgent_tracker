@@ -2,8 +2,8 @@ import copy
 import hashlib
 import json
 import os
-import re
 import random
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -181,6 +181,7 @@ class GWTAutogenAgent(AutogenAgent):
 
     def initialize_agents(self):
         from pathlib import Path
+
         import yaml
 
         _prompts_path = Path(__file__).parent / "configs" / "prompts.yaml"
@@ -459,9 +460,16 @@ class GWTAutogenAgent(AutogenAgent):
         # Use TransformMessages (applied just before the API call, on the correct
         # _oai_messages data) instead of a register_reply hook (which only modifies
         # groupchat.messages and is ignored by _generate_oai_reply).
-        llm_agents = [
+        #
+        # IMPORTANT: Motor_Agent must NOT have FlattenToolMessages applied.
+        # FlattenToolMessages strips 'tool_calls' keys from all prior messages,
+        # so after a few rounds Motor_Agent's LLM context contains no tool_call
+        # examples and the model switches to plain-text output instead of calling
+        # execute_action() — breaking the observation relay for the rest of the game.
+        # Motor_Agent only needs the history limiter; it uses a standard
+        # OpenAI-compatible model that handles tool_calls natively.
+        reasoner_agents = [
             self.planning_agent,
-            self.motor_agent,
             self.idea_agent,
             self.conscious_agent,
             self.retrieve_memory_agent,
@@ -471,15 +479,22 @@ class GWTAutogenAgent(AutogenAgent):
             self.group_chat_manager,
         ]
 
-        scrubber = transform_messages.TransformMessages(
+        full_scrubber = transform_messages.TransformMessages(
             transforms=[
                 MessageHistoryLimiter(max_messages=50),
                 FlattenToolMessages(),
             ]
         )
-        for agent in llm_agents:
+        for agent in reasoner_agents:
             if agent is not None:
-                scrubber.add_to_agent(agent)
+                full_scrubber.add_to_agent(agent)
+
+        # Motor_Agent only gets history limiting — tool_call format must be preserved.
+        motor_scrubber = transform_messages.TransformMessages(
+            transforms=[MessageHistoryLimiter(max_messages=50)]
+        )
+        if self.motor_agent is not None:
+            motor_scrubber.add_to_agent(self.motor_agent)
 
     def register_log_paths(self):
 
@@ -687,7 +702,11 @@ class GWTAutogenAgent(AutogenAgent):
             return self.retrieve_memory()
 
         def focus() -> str:
-            return f"TASK: {self.task}\nREPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept)}"
+            return (
+                f"TASK: {self.task}\n"
+                f"REPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept)}\n"
+                f"CURRENT ADMISSIBLE ACTIONS: {json.dumps(sorted(self.admissible_actions))}"
+            )
 
         assert self.focus_agent is not None
         assert self.internal_perception_agent_2 is not None

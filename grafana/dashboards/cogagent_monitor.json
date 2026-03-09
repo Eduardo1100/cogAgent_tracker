@@ -95,8 +95,33 @@
     },
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "RUNNING":   {"color": "orange", "index": 0},
+                "CONCLUDED": {"color": "green",  "index": 1}
+              }
+            }
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 2, "x": 18, "y": 1},
+      "id": 110,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "Status",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT CASE WHEN end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END AS status FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 1},
+      "gridPos": {"h": 4, "w": 2, "x": 20, "y": 1},
       "id": 6,
       "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
       "title": "Agent",
@@ -106,12 +131,12 @@
     {
       "datasource": {"type": "postgres", "uid": "cogagent-pg"},
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 1},
+      "gridPos": {"h": 4, "w": 2, "x": 22, "y": 1},
       "id": 5,
       "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
-      "title": "Git Commit",
+      "title": "Git Branch",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(git_commit, ''), 'not set') as git_commit FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(git_branch, ''), 'not set') as git_branch FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
     },
 
     {

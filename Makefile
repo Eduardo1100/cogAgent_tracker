@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug test lint clean build-docker benchmark up down sanity bootstrap-alfworld
+.PHONY: help setup dev train eval debug test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -28,7 +28,7 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 
 debug: ## Debug on valid_unseen. GAMES=1,2,3 | TASK=1-6 | default: 1 random game
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games 1))'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games 1))'
 
 test: ## Run tests with pytest
 	uv run pytest tests/
@@ -49,7 +49,10 @@ build-docker: ## Build the production Docker image locally
 up: ## Start the full stack (App + DB + Redis)
 	docker compose up -d
 
-down: ## Stop everything and remove containers
+down: ## Stop containers and remove them (preserves volumes)
+	docker compose down
+
+nuke: ## Stop everything and destroy all volumes (use sparingly — wipes venv + dataset caches)
 	docker compose down -v
 
 sanity:
