@@ -1,10 +1,22 @@
 {
   "__inputs": [],
   "__requires": [
-    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "11.4.0"},
-    {"type": "datasource", "id": "postgres", "name": "PostgreSQL", "version": "1.0.0"}
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.4.0"
+    },
+    {
+      "type": "datasource",
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "version": "1.0.0"
+    }
   ],
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "description": "cogAgent evaluation run monitor",
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -14,364 +26,1266 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
       "title": "Run Summary",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "thresholds"},
+          "color": {
+            "mode": "thresholds"
+          },
           "unit": "percentunit",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "green", "value": 0.8}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 1},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
       "title": "Success Rate",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT success_rate FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric * 100, 1),\n  0\n) AS success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "thresholds"},
+          "color": {
+            "mode": "thresholds"
+          },
           "unit": "percentunit",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "green", "value": 0.8}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 1},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
       "id": 2,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
       "title": "Error-Adjusted Rate",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT error_adjusted_success_rate FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(\n  ROUND(\n    COUNT(*) FILTER (WHERE success = true)::float8\n    / NULLIF(\n        COUNT(*) FILTER (WHERE success = true OR error_message IS NULL),\n        0\n      )::float8 * 100,\n    1\n  ),\n  0\n) AS error_adjusted_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 1},
-      "id": 3,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
-      "title": "Total Cost",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(ROUND(SUM(episode_cost)::numeric, 4), 0) as total_cost FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 1},
-      "id": 4,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
-      "title": "Total Tokens",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total_tokens FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 12, "y": 1},
-      "id": 7,
-      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
-      "title": "Dataset Split",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(split, ''), 'unknown') as split FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 15, "y": 1},
-      "id": 8,
-      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
-      "title": "Started At",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC' as started_at FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "thresholds"},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "title": "Total Cost",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(ROUND(SUM(episode_cost)::numeric, 4), 0) as total_cost FROM episode_runs WHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "title": "Total Tokens",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total_tokens FROM episode_runs WHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
+      "id": 7,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
+      "title": "Dataset Split",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(NULLIF(split, ''), 'unknown') as split FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "id": 8,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
+      "title": "Started At",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC' as started_at FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [
             {
               "type": "value",
               "options": {
-                "RUNNING":   {"color": "orange", "index": 0},
-                "CONCLUDED": {"color": "green",  "index": 1}
+                "RUNNING": {
+                  "color": "orange",
+                  "index": 0
+                },
+                "CONCLUDED": {
+                  "color": "green",
+                  "index": 1
+                }
               }
             }
           ],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 2, "x": 18, "y": 1},
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 18,
+        "y": 1
+      },
       "id": 110,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
       "title": "Status",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT CASE WHEN end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END AS status FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE WHEN end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END AS status FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 2, "x": 20, "y": 1},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 20,
+        "y": 1
+      },
       "id": 6,
-      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
       "title": "Agent",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(agent_name, ''), 'unknown') as agent_name FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(NULLIF(agent_name, ''), 'unknown') as agent_name FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 4, "w": 2, "x": 22, "y": 1},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 22,
+        "y": 1
+      },
       "id": 5,
-      "options": {"reduceOptions": {"calcs": ["last"], "fields": "/.*/"}, "orientation": "auto", "textMode": "value", "colorMode": "none"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
       "title": "Git Branch",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COALESCE(NULLIF(git_branch, ''), 'not set') as git_branch FROM experiment_runs WHERE id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(NULLIF(git_branch, ''), 'not set') as git_branch FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
-
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
       "id": 105,
       "title": "Live Progress",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 6},
-      "id": 50,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
-      "title": "Episodes Completed",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COUNT(*) as episodes_completed FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 6},
-      "id": 51,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
-      "title": "Games Won",
-      "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT COUNT(*) as games_won FROM episode_runs WHERE experiment_id = ${experiment_id} AND success = true", "format": "table", "refId": "A"}]
-    },
-    {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "color": {"mode": "thresholds"},
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "green", "value": 0.8}]}
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 6},
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 6
+      },
+      "id": 50,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "title": "Episodes Completed",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) as episodes_completed FROM episode_runs WHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 6
+      },
+      "id": 51,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "title": "Games Won",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) as games_won FROM episode_runs WHERE experiment_id = ${experiment_id} AND success = true",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 6
+      },
       "id": 52,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
       "title": "Live Success %",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT AVG(success::int::float8) as live_success_rate FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric * 100, 1),\n  0\n) AS live_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "m", "decimals": 1}, "overrides": []},
-      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 6},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 6
+      },
       "id": 53,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
       "title": "Total Runtime",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT ROUND(SUM(runtime_minutes)::numeric, 1) as total_runtime_min FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(ROUND(SUM(runtime_minutes)::numeric, 1), 0) AS total_runtime_min\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
-        "defaults": {"unit": "short", "decimals": 1},
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        },
         "overrides": [
-          {"matcher": {"id": "byName", "options": "avg_actions"}, "properties": [{"id": "displayName", "value": "Avg Actions"}]},
-          {"matcher": {"id": "byName", "options": "max_actions"}, "properties": [{"id": "displayName", "value": "Max Allowed"}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "avg_actions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Avg Actions"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_actions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Max Allowed"
+              }
+            ]
+          }
         ]
       },
-      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 6},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 6
+      },
       "id": 54,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "horizontal", "textMode": "auto", "colorMode": "value"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
       "title": "Actions Taken / Max",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT ROUND(AVG(ep.actions_taken)::numeric, 1) as avg_actions, MAX(e.max_actions_per_game) as max_actions FROM episode_runs ep JOIN experiment_runs e ON ep.experiment_id = e.id WHERE ep.experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  COALESCE(ROUND(AVG(ep.actions_taken)::numeric, 1), 0) AS avg_actions,\n  MAX(e.max_actions_per_game) AS max_actions\nFROM experiment_runs e\nLEFT JOIN episode_runs ep ON ep.experiment_id = e.id\nWHERE e.id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 6},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 6
+      },
       "id": 55,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
       "title": "Live Token Usage",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT SUM(prompt_tokens + completion_tokens) as total_tokens_so_far FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS total_tokens_so_far\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short", "decimals": 1}, "overrides": []},
-      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 6},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 6
+      },
       "id": 56,
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
       "title": "Avg Chat Rounds",
       "type": "stat",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT ROUND(AVG(chat_rounds)::numeric, 1) as avg_chat_rounds FROM episode_runs WHERE experiment_id = ${experiment_id}", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(ROUND(AVG(chat_rounds)::numeric, 1), 0) AS avg_chat_rounds\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
-
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 10},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
       "id": 101,
       "title": "Per-Game Trends",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "success"}, "properties": [
-            {"id": "custom.width", "value": 80},
-            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}},
-            {"id": "custom.displayMode", "value": "color-background"}
-          ]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
         ]
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 11},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
       "id": 10,
       "options": {
         "xField": "game_number",
         "barWidth": 0.8,
         "groupWidth": 0.7,
-        "legend": {"displayMode": "list", "placement": "bottom"},
-        "tooltip": {"mode": "single"}
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "title": "Success & Actions per Game",
       "type": "barchart",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT game_number, CAST(success AS INT) as success, actions_taken FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT game_number, CAST(success AS INT) as success, actions_taken FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 11},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
       "id": 11,
       "options": {
         "xField": "game_number",
         "barWidth": 0.8,
         "groupWidth": 0.7,
-        "legend": {"displayMode": "list", "placement": "bottom"},
-        "tooltip": {"mode": "single"}
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "title": "Inadmissible Actions per Game",
       "type": "barchart",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT game_number, inadmissible_action_count FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT game_number, inadmissible_action_count FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
-
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 19},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
       "id": 102,
       "title": "Task Analysis",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
-      "fieldConfig": {"defaults": {"unit": "short", "decimals": 1}, "overrides": []},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
       "id": 20,
       "options": {
         "xField": "task_type",
         "barWidth": 0.6,
         "groupWidth": 0.7,
         "orientation": "horizontal",
-        "legend": {"displayMode": "list", "placement": "bottom"},
-        "tooltip": {"mode": "single"}
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "title": "Success % by Task Type",
       "type": "barchart",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT CASE task_type WHEN 1 THEN 'pick_place' WHEN 2 THEN 'look_light' WHEN 3 THEN 'clean_place' WHEN 4 THEN 'heat_place' WHEN 5 THEN 'cool_place' WHEN 6 THEN 'two_object' END as task_type, ROUND(AVG(success::int::float8)::numeric * 100, 1) as success_pct FROM episode_runs WHERE experiment_id = ${experiment_id} GROUP BY task_type ORDER BY task_type", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE task_type WHEN 1 THEN 'pick_place' WHEN 2 THEN 'look_light' WHEN 3 THEN 'clean_place' WHEN 4 THEN 'heat_place' WHEN 5 THEN 'cool_place' WHEN 6 THEN 'two_object' END as task_type, ROUND(AVG(success::int::float8)::numeric * 100, 1) as success_pct FROM episode_runs WHERE experiment_id = ${experiment_id} GROUP BY task_type ORDER BY task_type",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
-
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
       "id": 103,
       "title": "Token Usage",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "prompt_tokens"}, "properties": [{"id": "displayName", "value": "Prompt"}]},
-          {"matcher": {"id": "byName", "options": "completion_tokens"}, "properties": [{"id": "displayName", "value": "Completion"}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prompt_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Prompt"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "completion_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Completion"
+              }
+            ]
+          }
         ]
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 29},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
       "id": 30,
       "options": {
         "xField": "game_number",
         "barWidth": 0.8,
         "groupWidth": 0.7,
         "stacking": "normal",
-        "legend": {"displayMode": "list", "placement": "bottom"},
-        "tooltip": {"mode": "single"}
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "title": "Tokens per Game (stacked)",
       "type": "barchart",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT game_number, prompt_tokens, completion_tokens FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT game_number, prompt_tokens, completion_tokens FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     },
-
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 37},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
       "id": 104,
       "title": "Episode Table",
       "type": "row"
     },
     {
-      "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          {"matcher": {"id": "byName", "options": "success"}, "properties": [
-            {"id": "custom.width", "value": 80},
-            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}},
-            {"id": "custom.displayMode", "value": "color-background"}
-          ]},
-          {"matcher": {"id": "byName", "options": "episode_cost"}, "properties": [{"id": "unit", "value": "currencyUSD"}]},
-          {"matcher": {"id": "byName", "options": "runtime_minutes"}, "properties": [{"id": "unit", "value": "m"}, {"id": "decimals", "value": 2}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "episode_cost"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime_minutes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
         ]
       },
-      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 38},
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
       "id": 40,
-      "options": {"showHeader": true, "footer": {"show": false}},
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
       "title": "Episode Details",
       "type": "table",
-      "targets": [{"datasource": {"type": "postgres", "uid": "cogagent-pg"}, "editorMode": "code", "rawQuery": true, "rawSql": "SELECT game_number, task, CAST(success AS INT) as success, actions_taken, inadmissible_action_count, chat_rounds, ROUND(runtime_minutes::numeric, 2) as runtime_minutes, prompt_tokens, completion_tokens, ROUND(episode_cost::numeric, 4) as episode_cost FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number", "format": "table", "refId": "A"}]
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT game_number, task, CAST(success AS INT) as success, actions_taken, inadmissible_action_count, chat_rounds, ROUND(runtime_minutes::numeric, 2) as runtime_minutes, prompt_tokens, completion_tokens, ROUND(episode_cost::numeric, 4) as episode_cost FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["cogagent"],
+  "tags": [
+    "cogagent"
+  ],
   "templating": {
     "list": [
       {
         "current": {},
-        "datasource": {"type": "postgres", "uid": "cogagent-pg"},
+        "datasource": {
+          "type": "postgres",
+          "uid": "cogagent-pg"
+        },
         "definition": "SELECT id FROM experiment_runs ORDER BY id DESC",
         "hide": 0,
         "includeAll": false,
@@ -385,7 +1299,10 @@
       }
     ]
   },
-  "time": {"from": "now-24h", "to": "now"},
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "cogAgent Monitor",

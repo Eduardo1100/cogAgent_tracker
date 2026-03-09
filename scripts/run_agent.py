@@ -46,15 +46,20 @@ def get_git_branch() -> str | None:
 
 
 def infer_task_type(task: str) -> int | None:
-    """Infer ALFWorld task type (1–6) from the task description string."""
+    """Infer ALFWorld task type (1–6) from the task description string.
+
+    ALFWorld task strings are like "clean some apple and put it in the sink"
+    — no "with" keyword, so we match on the primary action verb only.
+    Order matters: check specific verbs before the generic "put/place".
+    """
     t = task.lower()
     if "look at" in t:
         return 2
-    if "clean" in t and "with" in t:
+    if "clean" in t:
         return 3
-    if "heat" in t and "with" in t:
+    if "heat" in t:
         return 4
-    if "cool" in t and "with" in t:
+    if "cool" in t:
         return 5
     if "two" in t:
         return 6
@@ -220,7 +225,8 @@ def parse_arguments():
         "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
     )
     parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for game selection"
+        "--seed", type=int, default=None,
+        help="Random seed for game selection (default: None = truly random).",
     )
     parser.add_argument(
         "--splits",
@@ -258,7 +264,7 @@ def _scan_task_types(env, total_num_games: int) -> dict[int | None, list[int]]:
     index: dict[int | None, list[int]] = {}
     for i in range(1, total_num_games + 1):
         obs, _ = env.reset()
-        raw_obs = obs[0] if isinstance(obs, list) else obs
+        raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
         m = _task_re.search(raw_obs)
         task_desc = m.group(1).strip() if m else raw_obs
         tt = infer_task_type(task_desc)
