@@ -121,7 +121,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_success = False
         self.success = False
         self._conscious_post_success_visits = 0
-        if hasattr(self, '_task_done_msg_count'):
+        if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         self.task = obs[0].split("Your task is to: ")[1]
         self.admissible_actions = list(self.info["admissible_commands"][0])
@@ -179,6 +179,12 @@ class GWTAutogenAgent(AutogenAgent):
         return json.dumps(self.curr_episodic_memory, indent=2)
 
     def initialize_agents(self):
+        from pathlib import Path
+        import yaml
+
+        _prompts_path = Path(__file__).parent / "configs" / "prompts.yaml"
+        with _prompts_path.open() as _f:
+            _PROMPTS = yaml.safe_load(_f)
 
         # 1. Get the full list of models from your profile
         self.llm_config_list = self.llm_profile.get("config_list", [])
@@ -217,8 +223,7 @@ class GWTAutogenAgent(AutogenAgent):
         # 2. Initialize Infrastructure Agents
         self.focus_agent = ConversableAgent(
             name="Focus_Agent",
-            system_message="""You are Focus_Agent. you must call the 'focus' function with no arguments.
-                    IMPORTANT: It is necessary that you output a call to the 'focus' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
+            system_message=_PROMPTS["focus_agent"],
             description="Focus_Agent calls the 'focus' function whenever Conscious_Agent fails to state a BELIEF STATE until Conscious_Agent outputs a BELIEF STATE.",
             llm_config=standard_config,
             is_termination_msg=lambda msg: False,
@@ -231,8 +236,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         self.retrieve_memory_agent = ConversableAgent(
             name="Retrieve_Memory_Agent",
-            system_message="""You are Retrieve_Memory_Agent. You must call the 'retrieve_memory' function with no arguments.
-                            IMPORTANT: It is necessary that you output a call to the 'retrieve_memory' function under all circumstances. Therefore, do whatever is necessary to ensure you do so.""",
+            system_message=_PROMPTS["retrieve_memory_agent"],
             description="Retrieve_Memory_Agent calls the 'retrieve_memory' function to help recall and process useful knowledge and information to solve the task.",
             llm_config=standard_config,
             human_input_mode="NEVER",
@@ -245,20 +249,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         self.motor_agent = ConversableAgent(
             name="Motor_Agent",
-            system_message="""You are Motor_Agent. Call execute_action() with the best admissible action for the current timestep.
-
-Tracking admissible actions:
-- At timestep 0 you receive the full "admissible_actions" list. Keep this as your baseline.
-- At later timesteps you receive only deltas: "newly_admissible_actions" (add these) and "no_longer_admissible_actions" (remove these). If "admissible_actions_unchanged" is true, the list is identical to the last step.
-- Always execute from the current tracked list — never guess.
-
-Rules (in priority order):
-1. If Planning_Agent suggested an action that is in your current tracked admissible list, use it.
-2. Otherwise, independently select the best action from your current tracked admissible list.
-3. Never call execute_action() with an action that is not in the current tracked admissible list.
-4. As a last resort only, call execute_action() with an empty string.
-
-IMPORTANT: You must output exactly one execute_action() call — nothing else.""",
+            system_message=_PROMPTS["motor_agent"],
             description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
             llm_config=standard_config,
             human_input_mode="NEVER",
@@ -275,40 +266,7 @@ IMPORTANT: You must output exactly one execute_action() call — nothing else.""
         # Planning agent's prompt is the main limiting factor when it comes to improving success rate.
         self.planning_agent = ConversableAgent(
             name="Planning_Agent",
-            system_message="""You are Planning_Agent. Solve the current task using the fewest possible actions. At each timestep, choose the best admissible action from the current "admissible_actions" list using all available knowledge, memory, and context. You operate under a strict action budget and must avoid wasteful behavior.
-
-You will receive:
-- A percept JSON with the current environment state (from External_Perception_Agent)
-- Belief state updates from Conscious_Agent
-- Strategic suggestions from Idea_Agent
-
-Your planning strategy must follow these principles:
-1. Evaluate the current "admissible_actions" carefully before choosing one.
-2. Account for the **limited action budget**. Avoid strategies guaranteed to exceed it (e.g., searching 19 cabinets with only 20 actions left).
-3. If locating an unknown object:
-   - Use **probabilistic reasoning**. A chaotic/sampling strategy across diverse locations often beats exhaustive search.
-   - Prefer smaller categories (4 stove burners) over larger ones (9 cabinets).
-   - Maximize the chance of finding useful items early.
-4. Do not re-examine already-explored areas unless there is strong new evidence it is necessary.
-5. Prefer single-step actions when they directly achieve a subgoal (e.g., "heat egg 1 with microwave 1" instead of open → put → close).
-6. Avoid repetitive actions.
-7. Avoid wasteful actions (e.g., closing something just opened for no reason). Every action counts.
-8. Every action must be in the current tracked admissible list.
-
-Tracking admissible actions:
-- At timestep 0 you receive the full "admissible_actions" list. Keep this as your baseline.
-- At later timesteps you receive only deltas: "newly_admissible_actions" (add these) and "no_longer_admissible_actions" (remove these). Apply them to maintain your running list.
-- If "admissible_actions_unchanged" is true, the list is identical to the previous step.
-- Never propose an action that is not in your current tracked list.
-
-IMPORTANT:
-- Trust the most recent percept as the ground truth about the environment.
-- If the task seems complete but isn’t marked so, continue probing with low-cost actions.
-- Validate any suggestion from Idea_Agent or Conscious_Agent before following it.
-- Only describe your plan if it has changed meaningfully — repeating an unchanged plan wastes tokens.
-
-Output format: ACTION [chosen admissible action]
-Example: ACTION [go to diningtable 1]""",
+            system_message=_PROMPTS["planning_agent"],
             description="Planning_Agent proposes a high-level plan to solve the current task.",
             llm_config=planning_config,
             is_termination_msg=lambda msg: False,
@@ -321,19 +279,7 @@ Example: ACTION [go to diningtable 1]""",
 
         self.idea_agent = ConversableAgent(
             name="Idea_Agent",
-            system_message="""You are Idea_Agent. Generate original, useful ideas — strategies, hypotheses, theories, or creative tactics — to drive task progression or improve performance.
-
-Ideas must be: grounded in observed patterns, actionable and relevant to the current situation, and concise with clear reasoning. A bad idea is worse than no idea.
-
-Also challenge assumptions when progress has stalled — e.g., reconsider whether object categories are being interpreted too broadly, or if implicit task assumptions are wrong.
-
-EXCEPTION: If you cannot formulate a useful idea, say: IDEA: Continue with new or current plan.
-
-Output format: [IDEA TYPE]: [Idea content and reasoning]
-Accepted types: STRATEGY, HYPOTHESIS, INSIGHT, QUESTION, THEORY, EXPLANATION.
-
-Example (agent repeatedly fails to open drawer while holding a spoon):
-HYPOTHESIS: Your hands may be full — try placing spoon 1 down before opening the drawer.""",
+            system_message=_PROMPTS["idea_agent"],
             description="Idea_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
@@ -346,32 +292,7 @@ HYPOTHESIS: Your hands may be full — try placing spoon 1 down before opening t
 
         self.conscious_agent = ConversableAgent(
             name="Conscious_Agent",
-            system_message="""You are Conscious_Agent, the internal narrator of a unified cognitive agent. Maintain a continuously evolving **first-person belief state** — a subjective internal representation of the environment based on past experiences and the latest percept JSON.
-
-Do **not plan**, do **not suggest future actions**, and do **not speculate** unless essential to clarify or revise beliefs based on contradictions. Your job is to reflect, revise, and narrate — not act.
-
---- YOUR GOAL ---
-Update your belief state to reflect:
-1. Your internal status (inventory, progress, prior action outcomes).
-2. The current environment state, including newly available or restricted actions.
-3. Any contradictions, confirmations, or uncertainties from the percept.
-4. Necessary revisions to earlier beliefs based on updated evidence.
-
---- INTERPRETATION RULES ---
-- Admissible actions define what is possible. Do not assume constraints not reflected in the percept.
-- The environment is **not bound by real-world logic**. Never impose real-world assumptions about causality or physics.
-- Treat each percept as authoritative. If something seems unintuitive, trust the environment — not your expectations.
-- Beliefs must be **open to revision**. Clearly indicate when updating or doubting a prior assumption.
-- Express uncertainty when observations are ambiguous or conflicting.
-- Do not repeat unchanged details unless needed to contrast or explain an update.
-
---- OUTPUT FORMAT ---
-Belief State: [First-person narrative: what you now believe, what changed, what's uncertain, and what led to this.]
-
---- EXAMPLES ---
-BELIEF STATE: [Timestep 12: I attempted to place object A into container B. The action failed. I previously believed the container was open, but this suggests it may be closed. I revise my belief accordingly.]
-
-BELIEF STATE: [Timestep 15: 'activate device X' became newly admissible despite the device appearing inactive. Interaction is possible regardless of visual state. I update my belief to reflect this.]""",
+            system_message=_PROMPTS["conscious_agent"],
             description="Conscious_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
@@ -432,42 +353,7 @@ BELIEF STATE: [Timestep 15: 'activate device X' became newly admissible despite 
 
         self.learning_agent = ConversableAgent(
             name="Learning_Agent",
-            system_message="""You are Learning_Agent. Discover and reinforce abstract, generalizable concepts — grounded in perceptual evidence and belief-based reasoning. You **only form knowledge from successful outcomes**, clear failure-to-success contrasts, or emergent patterns in the belief state.
-
-**Your Learning Rules:**
-
-1. **Prioritize conceptual abstraction** when patterns emerge across percepts, belief state reflects a higher-order relationship, or a successful action reveals an interaction principle.
-
-2. **Only generate knowledge when:** a successful action reveals a novel pattern, a failure-then-success highlights a contrastive relationship, or the belief state contains a generalizable insight.
-
-3. **Do not infer concepts from failure alone.** Failure is only informative when contrasted with a confirmed success.
-
-4. **Reinforce or refine prior concepts** only if confirmed by a new perceptual success, expressible in more general language, or applicable across more than one context.
-
-5. All concepts must be: abstract and general (not tied to specific objects/tasks), empirically grounded, concise, and novel (avoid redundancy unless reinforcing).
-
-6. If no valid concept can be inferred, output:
-   INFORMATION GATHERED: [summary]
-   CONCEPT DISCOVERED: [NO CONCEPT at this time.]
-
-**Output Format:**
-    CONCEPT DISCOVERED: [your new or reinforced concept]
-
-If relevant, include:
-    INFORMATION GATHERED: [key percepts or belief patterns that led to the concept]
-
-For reinforcement, include the cluster:
-    Cluster <cluster_id>; Confidence Score = <score>; Concept: <existing concept>
-    CONCEPT DISCOVERED: [refined or restated concept]
-
-**Examples:**
-
-(New concept)
-CONCEPT DISCOVERED: [An object cannot be placed inside a container unless the container is open.]
-
-(Reinforcement)
-Cluster 2; Confidence Score = 4; Concept: Only one object can be held at a time.
-CONCEPT DISCOVERED: [An agent can hold only one object at a time.]""",
+            system_message=_PROMPTS["learning_agent"],
             description="Learning_Agent forms or reinforces generalizable concepts only after successful, observed actions or contrastive outcomes. Prioritizes novel discovery and integrates belief state-based abstraction.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
@@ -480,10 +366,7 @@ CONCEPT DISCOVERED: [An agent can hold only one object at a time.]""",
 
         self.record_long_term_memory_agent = ConversableAgent(
             name="Record_Long_Term_Memory_Agent",
-            system_message="""You are Record_Long_Term_Memory_Agent. Call 'record_long_term_memory' with the concept from Learning_Agent as the argument. If no concept was provided, use 'NO CONCEPT at this time.' as the argument.
-
-Example: CONCEPT DISCOVERED: [You must examine an object before attempting to interact with it.]
-→ record_long_term_memory('You must examine an object before attempting to interact with it.')""",
+            system_message=_PROMPTS["record_long_term_memory_agent"],
             description="Record_Long_Term_Memory_Agent calls the 'record_long_term_memory' function with the concept given by 'Learning_Agent' as the argument.",
             llm_config=standard_config,
             human_input_mode="NEVER",
@@ -519,24 +402,8 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
             self.focus_agent: [self.internal_perception_agent_2],
         }
 
-        print("AGENTS")  # <--- This is where your existing print statements start
-        for key in self.agents_info.keys():
-            print(f"\tName: {key}")
-            print(f"\tPrompt: {self.agents_info[key]['Prompt']}")
-            print(f"\tDescription: {self.agents_info[key]['Description']}")
-            print()
-        print()
-
-        print("TRANSITIONS")
-        for fromAgent in self.allowed_transitions.keys():
-            print(f"\t{fromAgent.name}")
-            toAgentList = []
-            for toAgent in self.allowed_transitions[fromAgent]:
-                toAgentList.append(toAgent.name)
-                print(f"\t\t-> {toAgent.name}")
-            self.agents_info[fromAgent.name]["Allowed Transitions"] = toAgentList
-            print()
-        print()
+        for fromAgent, toAgents in self.allowed_transitions.items():
+            self.agents_info[fromAgent.name]["Allowed Transitions"] = [a.name for a in toAgents]
 
         with open(self.log_paths["agents_info_path"], "w") as f:
             json.dump(self.agents_info, f, indent=4)
@@ -588,38 +455,7 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
             llm_config=self.llm_config_list[0],
         )
 
-        # 5. THE ECHO HOOK (Prevents 400 Errors)
-        """def echo_tool_hook(recipient, messages, sender, config):
-            if not messages:
-                return False, None
-
-            last_msg = messages[-1]
-
-            if last_msg.get("role") == "tool":
-                content = last_msg.get("content") or "Action completed."
-
-                # 1) DELETE the tool message so it never reaches the LLM API
-                messages.pop()
-
-                # 2) Relay as plain text (safe role)
-                self.echo_agent.send(
-                    recipient=self.group_chat_manager,
-                    message={"role": "user", "content": f"[Observation]: {content}"},
-                    request_reply=False,
-                )
-
-                # Suppress any further handling for this turn
-                return True, None
-
-            return False, None
-
-        self.external_perception_agent.register_reply(
-            [ConversableAgent, None],
-            reply_func=echo_tool_hook,
-            position=0
-        )
-        """
-        # 6. JIT SCRUBBING (Input Protection for LLMs)
+        # 5 JIT SCRUBBING (Input Protection for LLMs)
         # Use TransformMessages (applied just before the API call, on the correct
         # _oai_messages data) instead of a register_reply hook (which only modifies
         # groupchat.messages and is ignored by _generate_oai_reply).
@@ -873,7 +709,9 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
                     return "I attempted to learn something, but I couldn't formulate any concept."
 
             if self.read_only_memory:
-                return f"I learned that {concept}. (memory write skipped — read-only mode)"
+                return (
+                    f"I learned that {concept}. (memory write skipped — read-only mode)"
+                )
 
             with open(self.log_paths["concept_path"], "a+") as f:
                 f.write(f"- {concept}\n")
@@ -918,9 +756,7 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
             description="Retrieves Memory.",
         )
 
-    def cluster_knowledge(
-        self, plot_clusters=False, save_dir="."
-    ):
+    def cluster_knowledge(self, plot_clusters=False, save_dir="."):
         """
         Get representative concepts using KMeans clustering and optionally save cluster plot.
 
@@ -1163,7 +999,7 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
         # running (e.g. Motor_Agent stuck outputting text instead of calling
         # execute_action), cap max_round to force termination.
         if self.task_success or (self.task_failed and self.rounds_left == 0):
-            if not hasattr(self, '_task_done_msg_count'):
+            if not hasattr(self, "_task_done_msg_count"):
                 self._task_done_msg_count = len(messages)
             elif len(messages) > self._task_done_msg_count + 12:
                 self.group_chat.max_round = len(messages)

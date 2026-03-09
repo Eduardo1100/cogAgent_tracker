@@ -20,7 +20,7 @@ dev: ## Start the development environment (notebooks + local API)
 
 train: ## Run eval loop on the valid_seen split
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
 
 test: ## Run tests with pytest
 	uv run pytest tests/
@@ -54,4 +54,4 @@ bootstrap-alfworld:
 
 benchmark: ## Run the full benchmark on valid_unseen
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen'
