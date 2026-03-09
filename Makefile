@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train test lint clean build-docker
+.PHONY: help setup dev train test lint clean build-docker benchmark
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -20,7 +20,7 @@ dev: ## Start the development environment (notebooks + local API)
 
 train: ## Run eval loop on the valid_seen split
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python -m src.agent.run_autogen_eval_loop src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
 
 test: ## Run tests with pytest
 	uv run pytest tests/
@@ -52,6 +52,6 @@ bootstrap-alfworld:
 	docker compose run --rm app \
 	sh -lc 'set -eux; bash scripts/bootstrap_alfworld.sh'
 
-eval:
+benchmark: ## Run the full benchmark on valid_unseen
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python -m src.agent.run_autogen_eval_loop src/agent/configs/eval_config.yaml --gwt'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen'

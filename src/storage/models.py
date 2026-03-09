@@ -1,12 +1,22 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 # 1. Base class for all models
 class Base(DeclarativeBase):
     pass
+
+
+class Prediction(Base):
+    __tablename__ = "predictions"
+
+    id = mapped_column(Integer, primary_key=True, index=True)
+    filename = mapped_column(String)
+    result = mapped_column(String)
+    confidence = mapped_column(Integer)
+    created_at = mapped_column(DateTime(timezone=True), server_default="now()")
 
 
 # 2. The overarching Experiment

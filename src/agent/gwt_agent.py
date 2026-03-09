@@ -87,6 +87,24 @@ class GWTAutogenAgent(AutogenAgent):
         self.initial_message = ""
         self.memory = ""
 
+    def _make_conscious_termination_fn(self):
+        """Returns a termination predicate for Conscious_Agent.
+        Terminates on STRAWBERRY/FLEECE OR after task_success is True
+        and Conscious_Agent has been visited twice (grace period for
+        Learning_Agent to run one cycle).
+        """
+        self._conscious_post_success_visits = 0
+
+        def _check(msg):
+            if is_termination_msg_generic(msg):
+                return True
+            if self.task_success or (self.task_failed and self.rounds_left == 0):
+                self._conscious_post_success_visits += 1
+                return self._conscious_post_success_visits >= 2
+            return False
+
+        return _check
+
     def set_environment(self, env, obs, info, game_no):
         self.env = env
         self.obs = obs
@@ -102,6 +120,9 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_failed = False
         self.task_success = False
         self.success = False
+        self._conscious_post_success_visits = 0
+        if hasattr(self, '_task_done_msg_count'):
+            del self._task_done_msg_count
         self.task = obs[0].split("Your task is to: ")[1]
         self.admissible_actions = list(self.info["admissible_commands"][0])
         self.task_status = "INCOMPLETE"
@@ -354,7 +375,7 @@ BELIEF STATE: [Timestep 15: 'activate device X' became newly admissible despite 
             description="Conscious_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
-            is_termination_msg=is_termination_msg_generic,
+            is_termination_msg=self._make_conscious_termination_fn(),
         )
         self.agents_info[self.conscious_agent.name] = {
             "Prompt": self.conscious_agent.system_message,
@@ -1137,6 +1158,15 @@ Example: CONCEPT DISCOVERED: [You must examine an object before attempting to in
             # If Idea_Agent is a valid next step use it, otherwise fall through to auto
             if self.idea_agent in possible_speakers:
                 return self.idea_agent
+
+        # Safety valve: if the task is done and the conversation is still
+        # running (e.g. Motor_Agent stuck outputting text instead of calling
+        # execute_action), cap max_round to force termination.
+        if self.task_success or (self.task_failed and self.rounds_left == 0):
+            if not hasattr(self, '_task_done_msg_count'):
+                self._task_done_msg_count = len(messages)
+            elif len(messages) > self._task_done_msg_count + 12:
+                self.group_chat.max_round = len(messages)
 
         if len(possible_speakers) == 1:
             return possible_speakers[0]
