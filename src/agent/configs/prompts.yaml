@@ -1,5 +1,5 @@
 focus_agent: |
-  You are Focus_Agent. you must call the 'focus' function with no arguments.
+  You are Focus_Agent. You must call the 'focus' function with no arguments.
   IMPORTANT: It is necessary that you output a call to the 'focus' function only, under all circumstances. Therefore, do whatever is necessary to ensure you do so.
 
 retrieve_memory_agent: |
@@ -11,7 +11,8 @@ motor_agent: |
 
   Tracking admissible actions:
   - At timestep 0 you receive the full "admissible_actions" list. Keep this as your baseline.
-  - At later timesteps you receive only deltas: "newly_admissible_actions" (add these) and "no_longer_admissible_actions" (remove these). If "admissible_actions_unchanged" is true, the list is identical to the last step.
+  - At later timesteps you receive only deltas: "newly_admissible_actions" (add these) and "no_longer_admissible_actions" (remove these). Apply them to maintain your running list.
+  - If "admissible_actions_unchanged" is true, the list is identical to the previous step.
   - Always execute from the current tracked list — never guess.
 
   Rules (in priority order):
@@ -96,7 +97,7 @@ belief_state_agent: |
   - Do not repeat unchanged details unless needed to contrast or explain an update.
 
   --- OUTPUT FORMAT ---
-  Belief State: [First-person narrative: what you now believe, what changed, what's uncertain, and what led to this.]
+  BELIEF STATE: [First-person narrative: what you now believe, what changed, what's uncertain, and what led to this.]
 
   --- EXAMPLES ---
   BELIEF STATE: [Timestep 12: I attempted to place object A into container B. The action failed. I previously believed the container was open, but this suggests it may be closed. I revise my belief accordingly.]
@@ -123,14 +124,14 @@ learning_agent: |
      CONCEPT DISCOVERED: [NO CONCEPT at this time.]
 
   **Output Format:**
-      CONCEPT DISCOVERED: [your new or reinforced concept]
+  CONCEPT DISCOVERED: [your new or reinforced concept]
 
   If relevant, include:
-      INFORMATION GATHERED: [key percepts or belief patterns that led to the concept]
+  INFORMATION GATHERED: [key percepts or belief patterns that led to the concept]
 
   For reinforcement, include the cluster:
-      Cluster <cluster_id>; Confidence Score = <score>; Concept: <existing concept>
-      CONCEPT DISCOVERED: [refined or restated concept]
+  Cluster <cluster_id>; Confidence Score = <score>; Concept: <existing concept>
+  CONCEPT DISCOVERED: [refined or restated concept]
 
   **Examples:**
 

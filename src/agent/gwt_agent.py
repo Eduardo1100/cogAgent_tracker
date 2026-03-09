@@ -24,6 +24,10 @@ from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_e
 
 
 class GWTAutogenAgent(AutogenAgent):
+    _UNCERTAINTY_RE = re.compile(
+        r"\b(uncertain|unclear|unsure|unknown|conflicting|"
+        r"contradictory|ambiguous|stalled)\b"
+    )
     def __init__(
         self,
         llm_profile,
@@ -75,7 +79,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.focus_agent = None
         self.agents_info = {}
 
-        self._ = self.max_actions
+        self._initial_max_actions = self.max_actions
         self.rounds = rounds_per_game
         self.max_round_actions = self.max_actions // self.rounds
         self.max_actions = self.max_actions - self.max_round_actions * (self.rounds - 1)
@@ -128,7 +132,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.cluster_knowledge()
 
         self.num_actions_taken = 0
-        self.max_actions = self._ - self.max_round_actions * (self.rounds - 1)
+        self.max_actions = self._initial_max_actions - self.max_round_actions * (self.rounds - 1)
         self.rounds_left = self.rounds
         self.task_failed = False
         self.task_success = False
@@ -380,6 +384,7 @@ class GWTAutogenAgent(AutogenAgent):
             self.planning_agent: [self.motor_agent],
             self.motor_agent: [self.external_perception_agent],
             # CHANGE: Route through Echo_Agent to broadcast tool results
+            # Route through Echo_Agent to broadcast tool results as plain text
             self.external_perception_agent: [self.echo_agent],
             self.echo_agent: [self.belief_state_agent],
             self.belief_state_agent: [
@@ -408,12 +413,7 @@ class GWTAutogenAgent(AutogenAgent):
             json.dump(self.agents_info, f, indent=4)
 
     def initialize_groupchat(self):
-        # 1. Setup the Relay (Echo Agent)
-        # self.llm_config_list = self.llm_profile.get("config_list", [])
-        # self.echo_agent = create_echo_agent(self.llm_config_list[0])
-        # self.echo_agent = create_echo_agent()
-
-        # 2. Define Active Agents (Exclude Echo_Agent from selection list)
+        # Define Active Agents (Exclude Echo_Agent from selection list)
         active_agents = [
             self.planning_agent,
             self.motor_agent,
@@ -625,7 +625,7 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
                 # Inadmissible actions don't consume the action budget
             else:
-                self.obs, scores, dones, self.info = self.env.step([action])
+                self.obs, _, __, self.info = self.env.step([action])
                 self.success = self.info["won"][0]
                 self.num_actions_taken += 1
 
@@ -783,8 +783,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         # Calculate k (clusters) using capped growth function to prevent over-clustering
-        max_concepts = num_concepts
-        chosen_k = max(1, min(max_concepts, int(num_concepts ** (1 / 2))))
+        chosen_k = max(1, min(num_concepts, int(num_concepts ** (1 / 2))))
 
         kmeans = KMeans(n_clusters=chosen_k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(embeddings)
@@ -1001,14 +1000,7 @@ class GWTAutogenAgent(AutogenAgent):
             and not self.task_failed
         ):
             last_content = (last_msg.get("content") or "").lower()
-            # Use word boundaries so "uncertainties" (negated context) does not
-            # match the marker "uncertain".  "no observation" is a phrase so it
-            # uses a simple substring check deliberately.
-            _uncertainty_re = re.compile(
-                r"\b(uncertain|unclear|unsure|unknown|conflicting|"
-                r"contradictory|ambiguous|stalled)\b"
-            )
-            if _uncertainty_re.search(last_content) or "no observation" in last_content:
+            if self._UNCERTAINTY_RE.search(last_content) or "no observation" in last_content:
                 return self.thinking_agent
             return self.planning_agent
 
