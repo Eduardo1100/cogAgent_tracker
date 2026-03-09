@@ -38,6 +38,35 @@ class ExperimentRun(Base):
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Agent graph: prompts, descriptions, and allowed transitions per agent
+    agents_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Git commit SHA of the codebase at eval time (for reproducibility)
+    git_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    # Dataset split evaluated (e.g. "valid_seen", "valid_unseen")
+    split: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Number of games selected for this run
+    num_games: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Final outcome metrics (mirrors W&B logs)
+    success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_adjusted_success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    num_errors: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Token breakdown (total_tokens already exists)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Per-outcome averages (mirrors W&B logs)
+    avg_actions_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_chat_rounds_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_runtime_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_actions_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_chat_rounds_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_runtime_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Relationship: One Experiment has Many Episodes
     episodes: Mapped[list["EpisodeRun"]] = relationship(
         "EpisodeRun", back_populates="experiment", cascade="all, delete-orphan"
@@ -73,6 +102,23 @@ class EpisodeRun(Base):
     belief_state: Mapped[dict | None] = mapped_column(
         JSON, nullable=True
     )  # Stores episodic memory matches
+
+    # Task description and type
+    task: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_type: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ALFWorld types 1–6
+
+    # Planning quality metrics
+    inadmissible_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    concepts_learned: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Per-game token usage and cost (mirrors W&B game/*)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Running success rates at time of game completion (mirrors W&B logs)
+    success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_adjusted_success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # S3 Artifact Link (The Vault)
     chat_history_s3_key: Mapped[str | None] = mapped_column(

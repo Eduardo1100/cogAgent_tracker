@@ -6,7 +6,6 @@ uv = "latest"
 
 [env]
 PYTHONUNBUFFERED = "1" # Make logs show up immediately.
-DATABASE_URL = "postgres://app:app@localhost:9999/app" # Local dev default.
 _.python.venv = { path = ".venv", create = false }
 
 [tasks.install]

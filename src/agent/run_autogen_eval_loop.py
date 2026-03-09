@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
 from src.agent.gwt_agent import GWTAutogenAgent
+from src.storage import cache
 from src.storage.database import SessionLocal, engine
 from src.storage.models import Base, EpisodeRun, ExperimentRun
 from src.storage.s3 import get_s3_client
@@ -27,6 +29,40 @@ load_dotenv()
 BUCKET_NAME = "alfworld-experiments"
 WANDB_PROJECT = "cognitive_agents"
 WANDB_ENTITY = "eduardocortes1100-university-of-california-berkeley"
+
+
+def get_git_commit() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+
+def infer_task_type(task: str) -> int | None:
+    """Infer ALFWorld task type (1–6) from the task description string."""
+    t = task.lower()
+    if "look at" in t:
+        return 2
+    if "clean" in t and "with" in t:
+        return 3
+    if "heat" in t and "with" in t:
+        return 4
+    if "cool" in t and "with" in t:
+        return 5
+    if "two" in t:
+        return 6
+    if "put" in t or "place" in t:
+        return 1
+    return None
+
+
+def count_inadmissible_actions(history_path: str) -> int:
+    """Count how many times the agent attempted a non-admissible action."""
+    try:
+        with open(history_path) as f:
+            return sum(1 for line in f if "not in the list of admissible actions" in line)
+    except Exception:
+        return 0
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -176,6 +212,12 @@ def parse_arguments():
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for game selection"
     )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        default=None,
+        help="Dataset splits to evaluate (overrides config). E.g. --splits valid_seen",
+    )
     return parser.parse_args()
 
 
@@ -218,7 +260,7 @@ def main():
         args=args,
     )
 
-    eval_splits = config["general"]["evaluate"]["splits"]
+    eval_splits = args.splits or config["general"]["evaluate"]["splits"]
     eval_envs = config["general"]["evaluate"]["envs"]
     controllers = config["general"]["evaluate"]["controllers"]
 
@@ -272,7 +314,18 @@ def main():
                     eval_ood_path,
                     dataset_cfg,
                 )
+                split_start_time = datetime.now(UTC)
                 print(f"Evaluating split: {split_name} ({train_eval_mode})")
+                print(f"Split start time: {split_start_time.isoformat()}")
+                wandb.config.update(
+                    {
+                        "split": split_name,
+                        "split_start_time": split_start_time.isoformat(),
+                    },
+                    allow_val_change=True,
+                )
+                if hasattr(agent, "read_only_memory"):
+                    agent.read_only_memory = split_name == "valid_unseen"
 
                 alfred_env = AlfredTWEnv(config, train_eval=train_eval_mode)
                 env = alfred_env.init_env(batch_size=1)
@@ -326,11 +379,24 @@ def main():
                         max_actions_per_game=args.max_actions,
                         max_chat_rounds=args.max_chat_rounds,
                         start_time=datetime.now(UTC),
+                        split=split_name,
+                        num_games=num_games_to_evaluate,
                     )
                     db.add(experiment)
                     db.commit()
                     db.refresh(experiment)
                     print(f"✅ Started DB Experiment Run ID: {experiment.id}")
+
+                    # Persist agent prompts, transition graph, and git commit
+                    experiment.agents_config = agent.agents_info
+                    experiment.git_commit = get_git_commit()
+                    db.commit()
+                    cache.set_cache(
+                        f"agents_config:{experiment.id}",
+                        json.dumps(agent.agents_info),
+                        expire=86400,
+                    )
+                    print(f"✅ Logged agents_config for Experiment Run ID: {experiment.id}")
 
                     # ALFWorld cycles games sequentially; env.reset() must be called
                     # for every index to advance the environment state even for skips.
@@ -350,27 +416,28 @@ def main():
                         chat_result, error_message, elapsed_minutes = run_game(agent, i)
                         cumulative_runtime += elapsed_minutes
 
-                        # Token usage
-                        game_usage = autogen.gather_usage_summary(
+                        # Token usage — gather_usage_summary returns a nested dict:
+                        # {"usage_including_cached_inference": {"total_cost": X, "<model>": {"prompt_tokens": ..., ...}}}
+                        raw_usage = autogen.gather_usage_summary(
                             agent.group_chat.agents
                         )
+                        usage_data = (raw_usage or {}).get("usage_including_cached_inference", {})
+                        game_prompt_tokens = sum(v.get("prompt_tokens", 0) for v in usage_data.values() if isinstance(v, dict))
+                        game_completion_tokens = sum(v.get("completion_tokens", 0) for v in usage_data.values() if isinstance(v, dict))
+                        game_total_tokens = game_prompt_tokens + game_completion_tokens
+                        game_total_cost = usage_data.get("total_cost", 0.0)
+                        game_usage = usage_data  # truthy check below
                         if game_usage:
-                            for key in (
-                                "total_tokens",
-                                "prompt_tokens",
-                                "completion_tokens",
-                            ):
-                                total_run_usage[key] += game_usage.get(key, 0)
-                            total_run_usage["total_cost"] += game_usage.get(
-                                "total_cost", 0
-                            )
+                            total_run_usage["prompt_tokens"] += game_prompt_tokens
+                            total_run_usage["completion_tokens"] += game_completion_tokens
+                            total_run_usage["total_tokens"] += game_total_tokens
+                            total_run_usage["total_cost"] += game_total_cost
                             wandb.log(
                                 {
-                                    "game/total_tokens": game_usage.get(
-                                        "total_tokens", 0
-                                    ),
-                                    "game/cost": game_usage.get("total_cost", 0),
-                                }
+                                    "game/total_tokens": game_total_tokens,
+                                    "game/cost": game_total_cost,
+                                },
+                                step=num_games_evaluated,
                             )
 
                         # Log errors
@@ -428,14 +495,19 @@ def main():
                         )
 
                         # Upload to S3
-                        s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
-                        s3.put_object(
-                            Bucket=BUCKET_NAME,
-                            Key=s3_key,
-                            Body=chat_text.encode("utf-8"),
-                            ContentType="text/plain",
-                        )
-                        print(f"☁️ Uploaded chat history to S3: {s3_key}")
+                        s3_key = None
+                        try:
+                            _s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
+                            s3.put_object(
+                                Bucket=BUCKET_NAME,
+                                Key=_s3_key,
+                                Body=chat_text.encode("utf-8"),
+                                ContentType="text/plain",
+                            )
+                            s3_key = _s3_key
+                            print(f"☁️ Uploaded chat history to S3: {s3_key}")
+                        except Exception as e:
+                            print(f"⚠️ S3 upload failed: {e}")
 
                         # Update running metrics
                         success = agent.success
@@ -486,6 +558,7 @@ def main():
 
                         wandb.log(
                             {
+                                "split": split_name,
                                 "game_no": i,
                                 "success": int(success),
                                 "actions_taken": agent.num_actions_taken,
@@ -511,6 +584,8 @@ def main():
                         try:
                             experiment.total_tokens = total_run_usage["total_tokens"]
                             experiment.total_cost = total_run_usage["total_cost"]
+                            experiment.prompt_tokens = int(total_run_usage["prompt_tokens"])
+                            experiment.completion_tokens = int(total_run_usage["completion_tokens"])
                             db.commit()
                             print(
                                 f"✅ Database updated for Run ID: {experiment.id}"
@@ -519,6 +594,9 @@ def main():
                             print(f"⚠️ Database logging failed: {e}")
                             db.rollback()
 
+                        concept_matches = re.findall(
+                            r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text
+                        )
                         episode = EpisodeRun(
                             experiment_id=experiment.id,
                             game_number=i,
@@ -533,6 +611,18 @@ def main():
                                 if belief_matches
                                 else agent.curr_episodic_memory
                             },
+                            task=agent.task,
+                            task_type=infer_task_type(agent.task),
+                            inadmissible_action_count=count_inadmissible_actions(
+                                log_paths["history_path"]
+                            ),
+                            concepts_learned=concept_matches if concept_matches else None,
+                            prompt_tokens=game_prompt_tokens if game_usage else None,
+                            completion_tokens=game_completion_tokens if game_usage else None,
+                            episode_cost=game_total_cost if game_usage else None,
+                            success_rate=success_rate,
+                            error_adjusted_success_rate=error_adjusted_success_rate,
+                            chat_history_s3_key=s3_key,
                         )
                         db.add(episode)
                         db.commit()
@@ -591,6 +681,15 @@ def main():
 
                     experiment.end_time = datetime.now(UTC)
                     experiment.total_runtime_minutes = cumulative_runtime
+                    experiment.success_rate = success_rate
+                    experiment.error_adjusted_success_rate = error_adjusted_success_rate
+                    experiment.num_errors = len(error_list)
+                    experiment.avg_actions_per_successful_game = avg_actions_taken_per_successful_game
+                    experiment.avg_chat_rounds_per_successful_game = avg_chat_rounds_per_successful_game
+                    experiment.avg_runtime_per_successful_game = avg_runtime_per_successful_game
+                    experiment.avg_actions_per_failing_game = avg_actions_taken_per_failing_game
+                    experiment.avg_chat_rounds_per_failing_game = avg_chat_rounds_per_failing_game
+                    experiment.avg_runtime_per_failing_game = avg_runtime_per_failing_game
                     db.commit()
                     print("✅ Experiment securely finalized in the database.")
 

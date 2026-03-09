@@ -12,7 +12,11 @@ from src.storage.s3 import get_s3_client
 Base.metadata.create_all(bind=engine)
 
 # Initialize the app
-app = FastAPI(title="My Awesome AI API")
+app = FastAPI(title="cogAgent Tracker API")
+
+from src.api.v1.endpoints import router as v1_router
+
+app.include_router(v1_router, prefix="/api/v1")
 
 
 @app.get("/")
