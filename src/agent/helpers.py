@@ -185,8 +185,8 @@ def create_echo_agent():
         human_input_mode="NEVER",
     )
 
-    # Track last known observation so we can repeat it if the relay misses
-    _state = {"last_obs": None}
+    # Track last known observation and consecutive stale rounds
+    _state = {"last_obs": None, "stale_count": 0}
 
     def relay_observation(recipient, messages, sender, config):
         if not messages:
@@ -200,10 +200,18 @@ def create_echo_agent():
             if msg.get("role") == "tool":
                 content = msg.get("content") or "Action completed."
                 _state["last_obs"] = content
+                _state["stale_count"] = 0
                 return True, f"[Observation]: {content}"
 
-        # No tool message found — repeat the last known percept so agents never
-        # drift into "awaiting observation" loops after history truncation.
+        # No tool message found — count consecutive stale rounds.
+        # After 2+ stale rounds, emit a loud system error so agents can recover
+        # rather than silently looping on the same observation.
+        _state["stale_count"] += 1
+        if _state["stale_count"] >= 2:
+            return True, (
+                "[SYSTEM ERROR: No tool was executed this round. "
+                "Motor_Agent must output a real execute_action() tool call, not plain text.]"
+            )
         if _state["last_obs"] is not None:
             return True, f"[No new tool result — repeating last observation]: {_state['last_obs']}"
         return True, "[Internal State Synchronized]"

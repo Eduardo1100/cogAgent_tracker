@@ -138,6 +138,10 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_success = False
         self.success = False
         self._belief_state_post_success_visits = 0
+        self._stale_action_count = 0
+        self._last_seen_actions_taken = -1
+        self._last_belief_content = ""
+        self._consecutive_thinking_count = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         self.task = obs[0].split("Your task is to: ")[1]
@@ -479,7 +483,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         full_scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(max_messages=50),
+                MessageHistoryLimiter(max_messages=30),
                 FlattenToolMessages(),
             ]
         )
@@ -487,15 +491,13 @@ class GWTAutogenAgent(AutogenAgent):
             if agent is not None:
                 full_scrubber.add_to_agent(agent)
 
-        # Motor_Agent only gets history limiting — tool_call format must be preserved.
-        # ConvertOrphanedToolMessages handles the edge case where MessageHistoryLimiter
-        # trims the window such that the first message is role='tool' without a
-        # preceding role='assistant'+tool_calls, which causes a 400 from the API.
+        # Motor_Agent must NOT have MessageHistoryLimiter: trimming its context
+        # causes ConvertOrphanedToolMessages to strip the tool_call/response pairs,
+        # leaving only plain-text "[Calling execute_action]" examples — after which
+        # the model outputs text instead of JSON tool calls, stalling the game.
+        # Motor_Agent messages are tiny (one tool call each) so no limiter is needed.
         motor_scrubber = transform_messages.TransformMessages(
-            transforms=[
-                MessageHistoryLimiter(max_messages=50),
-                ConvertOrphanedToolMessages(),
-            ]
+            transforms=[ConvertOrphanedToolMessages()]
         )
         if self.motor_agent is not None:
             motor_scrubber.add_to_agent(self.motor_agent)
@@ -977,6 +979,17 @@ class GWTAutogenAgent(AutogenAgent):
                 return executors[0]
             return self.echo_agent
 
+        # Stuck-state early termination: if num_actions_taken hasn't changed for
+        # 8 consecutive speaker-selection calls, force termination to avoid burning
+        # tokens on a stalled game (e.g. Motor_Agent outputting plain text).
+        if self.num_actions_taken == self._last_seen_actions_taken:
+            self._stale_action_count += 1
+        else:
+            self._stale_action_count = 0
+            self._last_seen_actions_taken = self.num_actions_taken
+        if self._stale_action_count >= 8:
+            self.group_chat.max_round = len(messages)
+
         # Standard Graph Transitions
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
 
@@ -991,17 +1004,26 @@ class GWTAutogenAgent(AutogenAgent):
             ]
 
         # Gate Thinking_Agent: only invoke when Belief_State_Agent signals uncertainty.
-        # When the belief state is confident, route directly to Planning_Agent to
-        # avoid an expensive extra LLM call every cycle.
+        # Also skip if the belief state content is identical to the previous round —
+        # repeating Thinking_Agent on an unchanged belief wastes tokens with no gain.
         if (
             last_speaker is self.belief_state_agent
             and self.thinking_agent in possible_speakers
             and not self.task_success
             and not self.task_failed
         ):
-            last_content = (last_msg.get("content") or "").lower()
-            if self._UNCERTAINTY_RE.search(last_content) or "no observation" in last_content:
+            current_content = last_msg.get("content") or ""
+            if self._UNCERTAINTY_RE.search(current_content.lower()) or "no observation" in current_content.lower():
+                if current_content == self._last_belief_content and self._consecutive_thinking_count >= 1:
+                    # Identical belief state fired again — skip Thinking_Agent
+                    self._consecutive_thinking_count = 0
+                    self._last_belief_content = ""
+                    return self.planning_agent
+                self._last_belief_content = current_content
+                self._consecutive_thinking_count += 1
                 return self.thinking_agent
+            self._last_belief_content = ""
+            self._consecutive_thinking_count = 0
             return self.planning_agent
 
         # Safety valve: if the task is done and the conversation is still
