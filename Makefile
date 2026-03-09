@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train test lint clean build-docker benchmark
+.PHONY: help setup dev train eval debug test lint clean build-docker benchmark up down sanity bootstrap-alfworld
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -18,9 +18,17 @@ dev: ## Start the development environment (notebooks + local API)
 	uv run marimo edit notebooks/exploration.py &
 	uv run fastapi dev src/main.py
 
-train: ## Run eval loop on the valid_seen split
+train: ## Run eval on valid_seen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_seen'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_seen $(if $(GAMES),--num_games $(GAMES),)'
+
+eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
+	docker compose run --rm app \
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
+
+debug: ## Debug on valid_unseen. GAMES=1,2,3 | TASK=1-6 | default: 1 random game
+	docker compose run --rm app \
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games 1))'
 
 test: ## Run tests with pytest
 	uv run pytest tests/
@@ -52,6 +60,4 @@ bootstrap-alfworld:
 	docker compose run --rm app \
 	sh -lc 'set -eux; bash scripts/bootstrap_alfworld.sh'
 
-benchmark: ## Run the full benchmark on valid_unseen
-	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen'
+benchmark: eval ## Alias for eval (backwards compat)

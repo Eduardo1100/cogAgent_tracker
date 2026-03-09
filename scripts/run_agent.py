@@ -203,7 +203,8 @@ def parse_arguments():
         "--long_term_guidance", action="store_true", help="Enable long-term guidance"
     )
     parser.add_argument(
-        "--num_games", type=int, default=1, help="Games to evaluate per split"
+        "--num_games", type=int, default=-1,
+        help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
         "--max_actions", type=int, default=30, help="Max environment actions per game"
@@ -220,7 +221,42 @@ def parse_arguments():
         default=None,
         help="Dataset splits to evaluate (overrides config). E.g. --splits valid_seen",
     )
+    parser.add_argument(
+        "--game_ids",
+        type=str,
+        default=None,
+        help="Comma-separated game indices to run, e.g. '1,5,10' (debug mode).",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=int,
+        default=None,
+        choices=[1, 2, 3, 4, 5, 6],
+        help="Run one random game of this task type (debug mode). "
+             "1=pick&place 2=examine 3=clean 4=heat 5=cool 6=pick-two.",
+    )
     return parser.parse_args()
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _scan_task_types(env, total_num_games: int) -> dict[int | None, list[int]]:
+    """Pre-scan all games to build a task-type -> [game_index] mapping.
+
+    ALFWorld advances env state on every env.reset() call, so we must cycle
+    through all games once to identify task types before the real run loop.
+    """
+    _task_re = re.compile(r"your task is to[:\s]+(.+)", re.IGNORECASE)
+    index: dict[int | None, list[int]] = {}
+    for i in range(1, total_num_games + 1):
+        obs, _ = env.reset()
+        raw_obs = obs[0] if isinstance(obs, list) else obs
+        m = _task_re.search(raw_obs)
+        task_desc = m.group(1).strip() if m else raw_obs
+        tt = infer_task_type(task_desc)
+        index.setdefault(tt, []).append(i)
+    return index
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -339,10 +375,41 @@ def main():
                         f"at path={resolved_eval_path} with train_eval_mode={train_eval_mode}"
                     )
 
-                num_games_to_evaluate = min(args.num_games, total_num_games)
-                selected_games = sorted(
-                    random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
-                )
+                if args.game_ids is not None:
+                    # Debug mode: specific game list
+                    selected_games = sorted(
+                        int(g.strip()) for g in args.game_ids.split(",") if g.strip()
+                    )
+                    invalid = [g for g in selected_games if not (1 <= g <= total_num_games)]
+                    if invalid:
+                        raise ValueError(
+                            f"Game IDs out of range [1, {total_num_games}]: {invalid}"
+                        )
+                    num_games_to_evaluate = len(selected_games)
+                elif args.task_type is not None:
+                    # Debug mode: one random game of the requested task type.
+                    # Requires a pre-scan pass; afterwards reinitialise env from game 1.
+                    task_type_index = _scan_task_types(env, total_num_games)
+                    alfred_env2 = AlfredTWEnv(config, train_eval=train_eval_mode)
+                    env = alfred_env2.init_env(batch_size=1)
+                    matching = task_type_index.get(args.task_type, [])
+                    if not matching:
+                        raise RuntimeError(
+                            f"No games found for task_type={args.task_type} in split={split_name}"
+                        )
+                    selected_games = [random.choice(matching)]
+                    num_games_to_evaluate = 1
+                else:
+                    # Normal mode: all games or a random sample
+                    if args.num_games <= 0:
+                        num_games_to_evaluate = total_num_games
+                        selected_games = list(range(1, total_num_games + 1))
+                    else:
+                        num_games_to_evaluate = min(args.num_games, total_num_games)
+                        selected_games = sorted(
+                            random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
+                        )
+
                 print(f"Selected {num_games_to_evaluate} Games: {selected_games}")
 
                 # Per-split metrics (reset each split) (#9 / #11)
