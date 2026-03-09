@@ -144,6 +144,14 @@ class GWTAutogenAgent(AutogenAgent):
         self._consecutive_thinking_count = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
+        # Reset GroupChat max_round in case stale-termination capped it last game.
+        if self.group_chat is not None:
+            self.group_chat.max_round = self.max_chat_round
+        # Reset echo agent relay state so stale_count from the previous game
+        # doesn't fire false system errors at the start of a new game.
+        if self.echo_agent is not None and hasattr(self.echo_agent, "_relay_state"):
+            self.echo_agent._relay_state["stale_count"] = 0
+            self.echo_agent._relay_state["last_obs"] = None
         self.task = obs[0].split("Your task is to: ")[1]
         self.admissible_actions = list(self.info["admissible_commands"][0])
         self.task_status = "INCOMPLETE"

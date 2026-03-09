@@ -217,6 +217,8 @@ def create_echo_agent():
         return True, "[Internal State Synchronized]"
 
     echo_agent.register_reply([ConversableAgent, None], relay_observation)
+    # Expose _state so callers can reset it between games without recreating the agent.
+    echo_agent._relay_state = _state
     return echo_agent
 
 
