@@ -500,7 +500,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         full_scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(max_messages=30),
+                MessageHistoryLimiter(max_messages=60),  # was 30 — doubled to prevent cliff-pruning
                 FlattenToolMessages(),
             ]
         )
@@ -1004,8 +1004,13 @@ class GWTAutogenAgent(AutogenAgent):
         else:
             self._stale_action_count = 0
             self._last_seen_actions_taken = self.num_actions_taken
+        print(f"[STALE_DBG] actions={self.num_actions_taken} last_seen={self._last_seen_actions_taken} stale_count={self._stale_action_count} max_round={self.group_chat.max_round} msgs={len(messages)} last_speaker={last_speaker.name} role={last_msg.get('role')} has_tc={'tool_calls' in last_msg}", flush=True)
         if self._stale_action_count >= 8:
-            self.group_chat.max_round = len(messages)
+            # +1 so the termination check (i == max_round - 1) fires on the NEXT
+            # AutoGen iteration. Setting len(messages) would target the current i
+            # which has already passed the check point in the loop.
+            self.group_chat.max_round = len(messages) + 1
+            print(f"[STALE_DBG] TERMINATING: set max_round={self.group_chat.max_round}", flush=True)
 
         # Standard Graph Transitions
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
@@ -1050,7 +1055,7 @@ class GWTAutogenAgent(AutogenAgent):
             if not hasattr(self, "_task_done_msg_count"):
                 self._task_done_msg_count = len(messages)
             elif len(messages) > self._task_done_msg_count + 12:
-                self.group_chat.max_round = len(messages)
+                self.group_chat.max_round = len(messages) + 1
 
         if len(possible_speakers) == 1:
             return possible_speakers[0]

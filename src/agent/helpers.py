@@ -204,13 +204,20 @@ def create_echo_agent():
                 return True, f"[Observation]: {content}"
 
         # No tool message found — count consecutive stale rounds.
-        # After 2+ stale rounds, emit a loud system error so agents can recover
-        # rather than silently looping on the same observation.
         _state["stale_count"] += 1
+
+        if _state["stale_count"] >= 6:
+            return True, (
+                "[SYSTEM ERROR: Motor_Agent has failed to execute a tool call for "
+                f"{_state['stale_count']} consecutive rounds. "
+                "The session is being terminated. STRAWBERRY]"
+            )
         if _state["stale_count"] >= 2:
             return True, (
                 "[SYSTEM ERROR: No tool was executed this round. "
-                "Motor_Agent must output a real execute_action() tool call, not plain text.]"
+                "Motor_Agent must output a real execute_action() tool call — "
+                "for example: execute_action('go to desk 1'). "
+                "Plain text responses are not valid.]"
             )
         if _state["last_obs"] is not None:
             return True, f"[No new tool result — repeating last observation]: {_state['last_obs']}"
