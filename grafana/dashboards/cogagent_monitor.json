@@ -385,8 +385,9 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
         "textMode": "auto",
