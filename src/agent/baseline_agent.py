@@ -138,7 +138,7 @@ class BaselineAutogenAgent(AutogenAgent):
             )
 
             if action_score < 0.8:
-                self.adapter._obs = [f"action '{suggested_action}' is not admissible."]
+                self.adapter.set_observation(f"action '{suggested_action}' is not admissible.")
                 self.success = False
             else:
                 self.adapter.step(action)

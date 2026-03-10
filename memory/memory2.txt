@@ -1,2 +1,0 @@
-Cluster 1; Confidence Score = 1; Concept: - A closed container must be opened before its contents can be taken.
-Cluster 2; Confidence Score = 3; Concept: - When searching for objects needed for a task, prioritize checking closed containers first as they often contain the target items. For "put X in/on Y" tasks, follow the sequence: find X → take X → go to Y → move X to Y.

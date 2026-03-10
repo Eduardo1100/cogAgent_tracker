@@ -38,7 +38,7 @@ class GWTAutogenAgent(AutogenAgent):
         llm_profile,
         log_path,
         game_no=1,
-        max_chat_round=200,
+        max_chat_round=150,
         max_actions=35,
         rounds_per_game=1,
         rag_episode_k=4,
@@ -664,9 +664,9 @@ class GWTAutogenAgent(AutogenAgent):
                 suggested_action, admissible_commands
             )
             if action_score < 0.98:
-                self.adapter._obs = [
+                self.adapter.set_observation(
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
-                ]
+                )
                 # Inadmissible actions don't consume the action budget
             else:
                 self.adapter.step(action)

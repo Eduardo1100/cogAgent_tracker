@@ -48,7 +48,6 @@ def get_git_branch() -> str | None:
         return None
 
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -190,10 +189,10 @@ def parse_arguments():
         help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
-        "--max_actions", type=int, default=40, help="Max environment actions per game"
+        "--max_actions", type=int, default=35, help="Max environment actions per game"
     )
     parser.add_argument(
-        "--max_chat_rounds", type=int, default=200, help="Max chat rounds per game"
+        "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
     )
     parser.add_argument(
         "--rag_episode_k",
@@ -294,7 +293,7 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
     from scienceworld import ScienceWorldEnv
 
     sw_env = ScienceWorldEnv("")
-    task_names = args.sw_tasks or sw_env.getTaskNames()
+    task_names = args.sw_tasks or sw_env.get_task_names()
 
     # Per-run metrics
     chat_round_list: list[int] = []
@@ -339,22 +338,26 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
 
     game_no = 0
     total_games = sum(
-        min(args.sw_variations, sw_env.getVariationsForTask(t)) if args.sw_variations else sw_env.getVariationsForTask(t)
+        min(args.sw_variations, sw_env.get_max_variations(t))
+        if args.sw_variations
+        else sw_env.get_max_variations(t)
         for t in task_names
     )
     experiment.num_games = total_games
     db.commit()
 
     for task_name in task_names:
-        total_vars = sw_env.getVariationsForTask(task_name)
-        num_vars = min(args.sw_variations, total_vars) if args.sw_variations else total_vars
+        total_vars = sw_env.get_max_variations(task_name)
+        num_vars = (
+            min(args.sw_variations, total_vars) if args.sw_variations else total_vars
+        )
         for var_idx in range(num_vars):
             game_no += 1
             num_games_evaluated += 1
 
             sw_env.load(task_name, var_idx)
             obs, info = sw_env.reset()
-            adapter = ScienceWorldAdapter(sw_env, obs, info)
+            adapter = ScienceWorldAdapter(sw_env, obs, info, task_name=task_name)
             agent.set_environment(sw_env, obs, info, game_no, adapter=adapter)
             log_paths = agent.log_paths
 
@@ -365,10 +368,14 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
             raw_usage = autogen.gather_usage_summary(agent.group_chat.agents)
             usage_data = (raw_usage or {}).get("usage_including_cached_inference", {})
             game_prompt_tokens = sum(
-                v.get("prompt_tokens", 0) for v in usage_data.values() if isinstance(v, dict)
+                v.get("prompt_tokens", 0)
+                for v in usage_data.values()
+                if isinstance(v, dict)
             )
             game_completion_tokens = sum(
-                v.get("completion_tokens", 0) for v in usage_data.values() if isinstance(v, dict)
+                v.get("completion_tokens", 0)
+                for v in usage_data.values()
+                if isinstance(v, dict)
             )
             game_total_tokens = game_prompt_tokens + game_completion_tokens
             game_total_cost = usage_data.get("total_cost", 0.0)
@@ -379,7 +386,10 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 total_run_usage["total_tokens"] += game_total_tokens
                 total_run_usage["total_cost"] += game_total_cost
                 wandb.log(
-                    {"game/total_tokens": game_total_tokens, "game/cost": game_total_cost},
+                    {
+                        "game/total_tokens": game_total_tokens,
+                        "game/cost": game_total_cost,
+                    },
                     step=num_games_evaluated,
                 )
 
@@ -423,7 +433,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 {
                     "episode_number": num_games_evaluated,
                     "task_outcome": agent.task_status,
-                    "memory": belief_matches if belief_matches else agent.curr_episodic_memory,
+                    "memory": belief_matches
+                    if belief_matches
+                    else agent.curr_episodic_memory,
                 }
             )
 
@@ -448,17 +460,27 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 cumulative_successful_actions += agent.num_actions_taken
                 cumulative_successful_chat_rounds += chat_round_list[-1]
                 cumulative_successful_runtime += elapsed_minutes
-                avg_actions_taken_per_successful_game = cumulative_successful_actions / num_successes
-                avg_chat_rounds_per_successful_game = cumulative_successful_chat_rounds / num_successes
-                avg_runtime_per_successful_game = cumulative_successful_runtime / num_successes
+                avg_actions_taken_per_successful_game = (
+                    cumulative_successful_actions / num_successes
+                )
+                avg_chat_rounds_per_successful_game = (
+                    cumulative_successful_chat_rounds / num_successes
+                )
+                avg_runtime_per_successful_game = (
+                    cumulative_successful_runtime / num_successes
+                )
             else:
                 num_failures = num_games_evaluated - num_successes
                 failure_list.append(game_no)
                 cumulative_failing_actions += agent.num_actions_taken
                 cumulative_failing_chat_rounds += chat_round_list[-1]
                 cumulative_failing_runtime += elapsed_minutes
-                avg_actions_taken_per_failing_game = cumulative_failing_actions / num_failures
-                avg_chat_rounds_per_failing_game = cumulative_failing_chat_rounds / num_failures
+                avg_actions_taken_per_failing_game = (
+                    cumulative_failing_actions / num_failures
+                )
+                avg_chat_rounds_per_failing_game = (
+                    cumulative_failing_chat_rounds / num_failures
+                )
                 avg_runtime_per_failing_game = cumulative_failing_runtime / num_failures
 
             success_rate = num_successes / num_games_evaluated
@@ -487,9 +509,13 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 step=num_games_evaluated,
             )
 
-            concept_matches = re.findall(r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL)
+            concept_matches = re.findall(
+                r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
+            )
             concept_matches = [c.strip() for c in concept_matches]
-            concept_matches = [c for c in concept_matches if not c.upper().startswith("NO CONCEPT")]
+            concept_matches = [
+                c for c in concept_matches if not c.upper().startswith("NO CONCEPT")
+            ]
 
             try:
                 experiment.total_tokens = total_run_usage["total_tokens"]
@@ -511,7 +537,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 error_message=str(error_message) if error_message else None,
                 transitions={"transitions": transitions},
                 belief_state={
-                    "memory": belief_matches if belief_matches else agent.curr_episodic_memory
+                    "memory": belief_matches
+                    if belief_matches
+                    else agent.curr_episodic_memory
                 },
                 task=agent.task,
                 task_type=agent.adapter.infer_task_type(),
@@ -531,8 +559,12 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
             print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
 
             print(f"[Ran Game #{game_no}] task={task_name} var={var_idx}")
-            print(f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m")
-            print(f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%")
+            print(
+                f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m"
+            )
+            print(
+                f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
+            )
 
     experiment.end_time = datetime.now(UTC)
     experiment.total_runtime_minutes = cumulative_runtime
