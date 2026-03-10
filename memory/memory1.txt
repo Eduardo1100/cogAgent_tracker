@@ -1,1 +1,4 @@
-- Spatula are often found on countertops and can be taken directly. This is a useful heuristic for finding spatula in kitchen environments.
+- When searching for objects in this environment, prioritize checking closed containers as they often contain the target items.
+- A closed container must be opened before its contents can be taken.
+- To locate a non-visible target object, search inside closed containers first. Once the object is in hand, navigating directly to the target location enables a transfer action to complete the task.
+- When searching for objects needed for a task, prioritize checking closed containers first as they often contain the target items. For "put X in/on Y" tasks, follow the sequence: find X → take X → go to Y → move X to Y.

@@ -38,6 +38,13 @@ def get_git_commit() -> str | None:
         return None
 
 
+def get_git_branch() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+
 def infer_task_type(task: str) -> int | None:
     """Infer ALFWorld task type (1–6) from the task description string."""
     t = task.lower()
@@ -101,7 +108,9 @@ def get_llm_profile(config_data):
                 env_var = value[2:-1]
                 model_config[key] = os.getenv(env_var, "")
 
-    return {"config_list": curr_profile, "cache_seed": 42, "temperature": 0.0}
+    _cache_seed_env = os.getenv("CACHE_SEED", "42")
+    _cache_seed = None if _cache_seed_env.lower() == "null" else int(_cache_seed_env)
+    return {"config_list": curr_profile, "cache_seed": _cache_seed, "temperature": 0.0}
 
 
 def ensure_s3_bucket(s3, bucket_name: str) -> None:
@@ -201,13 +210,14 @@ def parse_arguments():
         "--long_term_guidance", action="store_true", help="Enable long-term guidance"
     )
     parser.add_argument(
-        "--num_games", type=int, default=1, help="Games to evaluate per split"
+        "--num_games", type=int, default=-1,
+        help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
         "--max_actions", type=int, default=30, help="Max environment actions per game"
     )
     parser.add_argument(
-        "--max_chat_rounds", type=int, default=500, help="Max chat rounds per game"
+        "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for game selection"
@@ -218,7 +228,42 @@ def parse_arguments():
         default=None,
         help="Dataset splits to evaluate (overrides config). E.g. --splits valid_seen",
     )
+    parser.add_argument(
+        "--game_ids",
+        type=str,
+        default=None,
+        help="Comma-separated game indices to run, e.g. '1,5,10' (debug mode).",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=int,
+        default=None,
+        choices=[1, 2, 3, 4, 5, 6],
+        help="Run one random game of this task type (debug mode). "
+             "1=pick&place 2=examine 3=clean 4=heat 5=cool 6=pick-two.",
+    )
     return parser.parse_args()
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _scan_task_types(env, total_num_games: int) -> dict[int | None, list[int]]:
+    """Pre-scan all games to build a task-type -> [game_index] mapping.
+
+    ALFWorld advances env state on every env.reset() call, so we must cycle
+    through all games once to identify task types before the real run loop.
+    """
+    _task_re = re.compile(r"your task is to[:\s]+(.+)", re.IGNORECASE)
+    index: dict[int | None, list[int]] = {}
+    for i in range(1, total_num_games + 1):
+        obs, _ = env.reset()
+        raw_obs = obs[0] if isinstance(obs, list) else obs
+        m = _task_re.search(raw_obs)
+        task_desc = m.group(1).strip() if m else raw_obs
+        tt = infer_task_type(task_desc)
+        index.setdefault(tt, []).append(i)
+    return index
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -337,10 +382,41 @@ def main():
                         f"at path={resolved_eval_path} with train_eval_mode={train_eval_mode}"
                     )
 
-                num_games_to_evaluate = min(args.num_games, total_num_games)
-                selected_games = sorted(
-                    random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
-                )
+                if args.game_ids is not None:
+                    # Debug mode: specific game list
+                    selected_games = sorted(
+                        int(g.strip()) for g in args.game_ids.split(",") if g.strip()
+                    )
+                    invalid = [g for g in selected_games if not (1 <= g <= total_num_games)]
+                    if invalid:
+                        raise ValueError(
+                            f"Game IDs out of range [1, {total_num_games}]: {invalid}"
+                        )
+                    num_games_to_evaluate = len(selected_games)
+                elif args.task_type is not None:
+                    # Debug mode: one random game of the requested task type.
+                    # Requires a pre-scan pass; afterwards reinitialise env from game 1.
+                    task_type_index = _scan_task_types(env, total_num_games)
+                    alfred_env2 = AlfredTWEnv(config, train_eval=train_eval_mode)
+                    env = alfred_env2.init_env(batch_size=1)
+                    matching = task_type_index.get(args.task_type, [])
+                    if not matching:
+                        raise RuntimeError(
+                            f"No games found for task_type={args.task_type} in split={split_name}"
+                        )
+                    selected_games = [random.choice(matching)]
+                    num_games_to_evaluate = 1
+                else:
+                    # Normal mode: all games or a random sample
+                    if args.num_games <= 0:
+                        num_games_to_evaluate = total_num_games
+                        selected_games = list(range(1, total_num_games + 1))
+                    else:
+                        num_games_to_evaluate = min(args.num_games, total_num_games)
+                        selected_games = sorted(
+                            random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
+                        )
+
                 print(f"Selected {num_games_to_evaluate} Games: {selected_games}")
 
                 # Per-split metrics (reset each split) (#9 / #11)
@@ -390,6 +466,7 @@ def main():
                     # Persist agent prompts, transition graph, and git commit
                     experiment.agents_config = agent.agents_info
                     experiment.git_commit = get_git_commit()
+                    experiment.git_branch = get_git_branch()
                     db.commit()
                     cache.set_cache(
                         f"agents_config:{experiment.id}",

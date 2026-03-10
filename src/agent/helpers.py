@@ -185,17 +185,27 @@ def create_echo_agent():
         human_input_mode="NEVER",
     )
 
+    # Track last known observation so we can repeat it if the relay misses
+    _state = {"last_obs": None}
+
     def relay_observation(recipient, messages, sender, config):
         if not messages:
             return False, None
-        last_msg = messages[-1]
 
-        # If the last message was a tool result, relay it as text
-        if last_msg.get("role") == "tool":
-            content = last_msg.get("content") or "Action completed."
-            return True, f"[Observation]: {content}"
+        # AutoGen appends an empty text reply from External_Perception_Agent AFTER
+        # the tool result, so messages[-1] is never role='tool'. Search backwards
+        # over a wider window to survive AutoGen version differences and any extra
+        # housekeeping messages inserted between tool execution and this call.
+        for msg in reversed(messages[-8:]):
+            if msg.get("role") == "tool":
+                content = msg.get("content") or "Action completed."
+                _state["last_obs"] = content
+                return True, f"[Observation]: {content}"
 
-        # If the last message was a prompt, just acknowledge
+        # No tool message found — repeat the last known percept so agents never
+        # drift into "awaiting observation" loops after history truncation.
+        if _state["last_obs"] is not None:
+            return True, f"[No new tool result — repeating last observation]: {_state['last_obs']}"
         return True, "[Internal State Synchronized]"
 
     echo_agent.register_reply([ConversableAgent, None], relay_observation)

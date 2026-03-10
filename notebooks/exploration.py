@@ -89,8 +89,8 @@ def _(episodes_df, mo):
 
 @app.cell
 def _(episodes_df, mo):
-    import matplotlib.pyplot as plt
     import matplotlib
+    import matplotlib.pyplot as plt
 
     matplotlib.use("Agg")
 
