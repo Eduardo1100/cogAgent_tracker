@@ -28,7 +28,7 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 
 debug: ## Debug a single game. ENV=alfworld(default)|scienceworld. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS="task-1-boil ..." | SW_VARS=k variations.
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; $(if $(filter scienceworld,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py $(if $(filter scienceworld,$(ENV)),config/scienceworld.yaml --env-type scienceworld $(if $(SW_TASKS),--sw-tasks $(SW_TASKS),) $(if $(SW_VARS),--sw-variations $(SW_VARS),--sw-variations 1),src/agent/configs/eval_config.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))) --gwt'
+	sh -lc 'set -eux; uv sync --frozen; $(if $(filter scienceworld,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py $(if $(filter scienceworld,$(ENV)),src/agent/configs/scienceworld.yaml --env-type scienceworld $(if $(SW_TASKS),--sw-tasks $(SW_TASKS),) $(if $(SW_VARS),--sw-variations $(SW_VARS),--sw-variations 1),src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))) --gwt'
 
 test: ## Run tests with pytest
 	uv run pytest tests/
