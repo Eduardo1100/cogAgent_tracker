@@ -1,6 +1,7 @@
 from autogen import ConversableAgent, GroupChat, GroupChatManager
 
 from src.agent.autogen_agent import AutogenAgent
+from src.agent.env_adapter import ALFWorldAdapter
 from src.agent.helpers import (
     get_best_candidate,
     get_echo_agent,
@@ -28,13 +29,14 @@ class BaselineAutogenAgent(AutogenAgent):
 
         self.initialize_autogen()
 
-    def set_environment(self, env, obs, info, game_no):
+    def set_environment(self, env, obs, info, game_no, adapter=None):
+        self.adapter = adapter if adapter is not None else ALFWorldAdapter(env, obs, info)
         self.env = env
-        self.obs = obs
-        self.info = info
+        self.obs = self.adapter._obs
+        self.info = self.adapter._info
         self.game_no = game_no
         self.register_log_paths()
-        self.initial_message = obs[0] if obs else ""
+        self.initial_message = self.adapter.observation if obs else ""
 
     def initialize_agents(self):
         self.assistant_agent = ConversableAgent(
@@ -126,8 +128,7 @@ class BaselineAutogenAgent(AutogenAgent):
     def register_functions(self):
         # Define execute_action as a nested function
         def execute_action(suggested_action: str) -> str:
-            assert len(list(self.info["admissible_commands"])) == 1
-            admissible_commands = list(self.info["admissible_commands"][0])
+            admissible_commands = self.adapter.admissible_actions
             assert len(admissible_commands) > 0
 
             self.num_actions_taken += 1
@@ -137,19 +138,19 @@ class BaselineAutogenAgent(AutogenAgent):
             )
 
             if action_score < 0.8:
-                self.obs = [f"action '{suggested_action}' is not admissible."]
+                self.adapter.set_observation(f"action '{suggested_action}' is not admissible.")
                 self.success = False
             else:
-                self.obs, scores, dones, self.info = self.env.step([action])
-                self.success = dones[0]
+                self.adapter.step(action)
+                self.success = self.adapter.has_won
 
             # time.sleep(1)
             if self.success:
-                return f"Observation: {self.obs[0]}\nTask Status: SUCCESS\nActions Left: {self.max_actions - self.num_actions_taken}"
+                return f"Observation: {self.adapter.observation}\nTask Status: SUCCESS\nActions Left: {self.max_actions - self.num_actions_taken}"
             elif self.num_actions_taken >= self.max_actions:
-                return f"Observation: {self.obs[0]}\nTask Status: FAILURE\nActions Left: {self.max_actions - self.num_actions_taken}"
+                return f"Observation: {self.adapter.observation}\nTask Status: FAILURE\nActions Left: {self.max_actions - self.num_actions_taken}"
             else:
-                return f"Observation: {self.obs[0]}\nTask Status: INCOMPLETE\nActions Left: {self.max_actions - self.num_actions_taken}"
+                return f"Observation: {self.adapter.observation}\nTask Status: INCOMPLETE\nActions Left: {self.max_actions - self.num_actions_taken}"
 
         register_function_lambda({r"execute_action": execute_action}, [self.echo_agent])
 

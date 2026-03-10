@@ -290,11 +290,8 @@ class ConvertOrphanedToolMessages:
                     result.append(msg)
                 else:
                     # Incomplete — strip tool_calls so the API doesn't reject.
-                    calls = [
-                        f"[Calling {c['function']['name']}]"
-                        for c in msg.get("tool_calls", [])
-                    ]
-                    msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
+                    # Do NOT annotate with "[Calling ...]" text — Action_Agent
+                    # would see orphaned plain-text markers and mimic them.
                     msg.pop("tool_calls", None)
                     pending_ids = set()
                     result.append(msg)
@@ -366,12 +363,10 @@ def flatten_tool_messages(messages):
             msg.pop("tool_call_id", None)
             msg.pop("tool_responses", None)
 
-        # 2. Strip 'tool_calls' from assistant messages so Reasoner doesn't 400
+        # 2. Strip 'tool_calls' from assistant messages so Reasoner doesn't 400.
+        # Do NOT annotate with "[Calling ...]" text — cognitive agents would
+        # accumulate those markers and start mimicking them in their output.
         if "tool_calls" in msg:
-            calls = [
-                f"[Calling {c['function']['name']}]" for c in msg.get("tool_calls", [])
-            ]
-            msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
             msg.pop("tool_calls", None)
 
         scrubbed.append(msg)
