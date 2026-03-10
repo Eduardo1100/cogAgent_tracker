@@ -66,8 +66,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.read_only_memory = False
 
         self.echo_agent = None
-        self.planning_agent = None
-        self.motor_agent = None
+        self.action_agent = None
         self.thinking_agent = None
         self.external_perception_agent = None
         self.internal_perception_agent_1 = None
@@ -163,6 +162,9 @@ class GWTAutogenAgent(AutogenAgent):
         # set to self.max_chat_round inside _reinit_groupchat().
         self._reinit_groupchat()
         # Clear per-game RAG caches so stale embeddings don't pollute retrieval.
+        # _cluster_cache is intentionally NOT cleared: it is keyed by the content
+        # hash of memory1.txt and auto-invalidates whenever concepts change, so it
+        # stays valid across games as long as memory is unchanged.
         self._episodic_rag_cache.clear()
         self._concept_rag_cache.clear()
         self.task = obs[0].split("Your task is to: ")[1]
@@ -276,31 +278,17 @@ class GWTAutogenAgent(AutogenAgent):
             "Description": self.retrieve_memory_agent.description,
         }
 
-        self.motor_agent = ConversableAgent(
-            name="Motor_Agent",
-            system_message=_PROMPTS["motor_agent"],
-            description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
+        self.action_agent = ConversableAgent(
+            name="Action_Agent",
+            system_message=_PROMPTS["action_agent"],
+            description="Action_Agent calls the 'execute_action' function with the best admissible action as the argument.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.motor_agent.name] = {
-            "Prompt": self.motor_agent.system_message,
-            "Description": self.motor_agent.description,
-        }
-
-        # Planning agent's prompt is the main limiting factor when it comes to improving success rate.
-        self.planning_agent = ConversableAgent(
-            name="Planning_Agent",
-            system_message=_PROMPTS["planning_agent"],
-            description="Planning_Agent proposes a high-level plan to solve the current task.",
-            llm_config=standard_config,
-            is_termination_msg=lambda msg: False,
-            human_input_mode="NEVER",
-        )
-        self.agents_info[self.planning_agent.name] = {
-            "Prompt": self.planning_agent.system_message,
-            "Description": self.planning_agent.description,
+        self.agents_info[self.action_agent.name] = {
+            "Prompt": self.action_agent.system_message,
+            "Description": self.action_agent.description,
         }
 
         self.thinking_agent = ConversableAgent(
@@ -331,7 +319,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         self.external_perception_agent = ConversableAgent(
             name="External_Perception_Agent",
-            description="External_Perception_Agent executes the proposed 'execute_action' function call given by 'Motor_Agent' and then parrots the resulting output as feedback.",
+            description="External_Perception_Agent executes the proposed 'execute_action' function call given by 'Action_Agent' and then parrots the resulting output as feedback.",
             llm_config=None,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
@@ -406,14 +394,12 @@ class GWTAutogenAgent(AutogenAgent):
         self.start_agent = self.external_perception_agent
 
         self.allowed_transitions = {
-            self.planning_agent: [],
-            self.motor_agent: [self.external_perception_agent],
-            # CHANGE: Route through Echo_Agent to broadcast tool results
-            # Route through Echo_Agent to broadcast tool results as plain text
+            self.action_agent: [self.external_perception_agent],
+            # Route through Echo_Agent to broadcast tool results as plain text.
             self.external_perception_agent: [self.echo_agent],
             self.echo_agent: [self.belief_state_agent],
             self.belief_state_agent: [
-                self.motor_agent,
+                self.action_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
                 self.learning_agent,
@@ -424,7 +410,7 @@ class GWTAutogenAgent(AutogenAgent):
                 self.thinking_agent,
                 self.learning_agent,
             ],
-            self.thinking_agent: [self.motor_agent],
+            self.thinking_agent: [self.action_agent],
             self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
             self.internal_perception_agent_1: [self.thinking_agent],
@@ -443,8 +429,7 @@ class GWTAutogenAgent(AutogenAgent):
     def initialize_groupchat(self):
         # Define Active Agents (Exclude Echo_Agent from selection list)
         active_agents = [
-            self.planning_agent,
-            self.motor_agent,
+            self.action_agent,
             self.thinking_agent,
             self.internal_perception_agent_1,
             self.internal_perception_agent_2,
@@ -476,15 +461,13 @@ class GWTAutogenAgent(AutogenAgent):
         # _oai_messages data) instead of a register_reply hook (which only modifies
         # groupchat.messages and is ignored by _generate_oai_reply).
         #
-        # IMPORTANT: Motor_Agent must NOT have FlattenToolMessages applied.
+        # IMPORTANT: Action_Agent must NOT have FlattenToolMessages applied.
         # FlattenToolMessages strips 'tool_calls' keys from all prior messages,
-        # so after a few rounds Motor_Agent's LLM context contains no tool_call
+        # so after a few rounds Action_Agent's LLM context contains no tool_call
         # examples and the model switches to plain-text output instead of calling
         # execute_action() — breaking the observation relay for the rest of the game.
-        # Motor_Agent only needs the history limiter; it uses a standard
-        # OpenAI-compatible model that handles tool_calls natively.
+        # Action_Agent only needs ConvertOrphanedToolMessages; see action_scrubber below.
         cognitive_agents_to_scrub = [
-            self.planning_agent,
             self.thinking_agent,
             self.belief_state_agent,
             self.retrieve_memory_agent,
@@ -495,9 +478,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         self._full_scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(
-                    max_messages=60
-                ),  # was 30 — doubled to prevent cliff-pruning
+                MessageHistoryLimiter(max_messages=60),  # was 50; raised to reduce cliff-pruning
                 FlattenToolMessages(),
             ]
         )
@@ -505,16 +486,16 @@ class GWTAutogenAgent(AutogenAgent):
             if agent is not None:
                 self._full_scrubber.add_to_agent(agent)
 
-        # Motor_Agent must NOT have MessageHistoryLimiter: trimming its context
+        # Action_Agent must NOT have MessageHistoryLimiter: trimming its context
         # causes ConvertOrphanedToolMessages to strip the tool_call/response pairs,
         # leaving only plain-text "[Calling execute_action]" examples — after which
         # the model outputs text instead of JSON tool calls, stalling the game.
-        # Motor_Agent messages are tiny (one tool call each) so no limiter is needed.
-        motor_scrubber = transform_messages.TransformMessages(
+        # Action_Agent messages are tiny (one tool call each) so no limiter is needed.
+        action_scrubber = transform_messages.TransformMessages(
             transforms=[ConvertOrphanedToolMessages()]
         )
-        if self.motor_agent is not None:
-            motor_scrubber.add_to_agent(self.motor_agent)
+        if self.action_agent is not None:
+            action_scrubber.add_to_agent(self.action_agent)
 
         # 4. Initialize GroupChat and Manager (also called each game via _reinit_groupchat).
         self._reinit_groupchat()
@@ -551,8 +532,10 @@ class GWTAutogenAgent(AutogenAgent):
         # (GroupChatManager is not in _active_agents so it was excluded from the
         # cognitive-agent scrubber loop above; it needs the scrubber for the rare
         # cases where speaker_selection_method falls back to "auto".)
-        if hasattr(self, "_full_scrubber") and self._full_scrubber is not None:
-            self._full_scrubber.add_to_agent(self.group_chat_manager)
+        assert hasattr(self, "_full_scrubber") and self._full_scrubber is not None, (
+            "_reinit_groupchat() called before initialize_groupchat() completed"
+        )
+        self._full_scrubber.add_to_agent(self.group_chat_manager)
 
     def register_log_paths(self):
 
@@ -694,11 +677,11 @@ class GWTAutogenAgent(AutogenAgent):
             if self.task_status == "COMPLETED":
                 self.task_success = True
                 self.rounds_left -= 1
-                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Try to figure out what went right and what good decisions were made that lead to success, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Motor_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Try to figure out what went right and what good decisions were made that lead to success, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Action_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
             elif self.task_status == "FAILED":
                 self.task_failed = True
                 self.rounds_left -= 1
-                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Try to figure out what went wrong and what mistakes were made that lead to failure, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Motor_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Try to figure out what went wrong and what mistakes were made that lead to failure, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Action_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
 
             self.update_percept(suggested_action)
 
@@ -710,11 +693,11 @@ class GWTAutogenAgent(AutogenAgent):
             return json.dumps(self.percept) + reflection
 
         # Register the WRAPPER instead of the method
-        assert self.motor_agent is not None
+        assert self.action_agent is not None
         assert self.external_perception_agent is not None
         register_function(
             execute_action1,
-            caller=self.motor_agent,
+            caller=self.action_agent,
             executor=self.external_perception_agent,
             name="execute_action",
             description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
@@ -1042,10 +1025,16 @@ class GWTAutogenAgent(AutogenAgent):
 
         # Stuck-state early termination: tick _stale_action_count exactly once
         # per complete observation relay — i.e. only when echo_agent just spoke.
-        # That way the count equals the number of full action cycles (Motor →
+        # That way the count equals the number of full action cycles (Action →
         # External_Perception → Echo) during which no new execute_action call
         # was made, giving a clean semantic: "8 stale rounds = 8 full cycles
-        # with no admissible action executed."
+        # with no action executed."
+        #
+        # Note: echo_agent's own _relay_state["stale_count"] independently fires
+        # a STRAWBERRY termination after 6 consecutive relays with NO tool message
+        # at all (Action_Agent output plain text instead of calling execute_action).
+        # That guard fires first in a full stall; this counter covers the separate
+        # (unlikely) case where execute_action IS called but num_actions_taken stalls.
         if last_speaker is self.echo_agent:
             if self.num_actions_taken == self._last_seen_actions_taken:
                 self._stale_action_count += 1
@@ -1094,16 +1083,16 @@ class GWTAutogenAgent(AutogenAgent):
                     # Identical belief state fired again — skip Thinking_Agent
                     self._consecutive_thinking_count = 0
                     self._last_belief_content = ""
-                    return self.motor_agent
+                    return self.action_agent
                 self._last_belief_content = current_content
                 self._consecutive_thinking_count += 1
                 return self.thinking_agent
             self._last_belief_content = ""
             self._consecutive_thinking_count = 0
-            return self.motor_agent
+            return self.action_agent
 
         # Safety valve: if the task is done and the conversation is still
-        # running (e.g. Motor_Agent stuck outputting text instead of calling
+        # running (e.g. Action_Agent stuck outputting text instead of calling
         # execute_action), cap max_round to force termination.
         if self.task_success or (self.task_failed and self.rounds_left == 0):
             if not hasattr(self, "_task_done_msg_count"):

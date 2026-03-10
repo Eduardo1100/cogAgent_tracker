@@ -208,14 +208,14 @@ def create_echo_agent():
 
         if _state["stale_count"] >= 6:
             return True, (
-                "[SYSTEM ERROR: Motor_Agent has failed to execute a tool call for "
+                "[SYSTEM ERROR: Action_Agent has failed to execute a tool call for "
                 f"{_state['stale_count']} consecutive rounds. "
                 "The session is being terminated. STRAWBERRY]"
             )
         if _state["stale_count"] >= 2:
             return True, (
                 "[SYSTEM ERROR: No tool was executed this round. "
-                "Motor_Agent must output a real execute_action() tool call — "
+                "Action_Agent must output a real execute_action() tool call — "
                 "for example: execute_action('go to desk 1'). "
                 "Plain text responses are not valid.]"
             )
@@ -245,10 +245,10 @@ class ConvertOrphanedToolMessages:
        missing (the tool message was never matched, e.g. the pairing was
        broken by intermediate non-tool messages after truncation).
        Fix: strip the tool_calls key so it becomes a plain assistant message
-       (text noting the call is kept so Motor_Agent still sees an example).
+       (text noting the call is kept so Action_Agent still sees an example).
 
     Unlike FlattenToolMessages this transform leaves intact all tool_calls /
-    tool pairs that ARE correctly adjacent, so Motor_Agent keeps working
+    tool pairs that ARE correctly adjacent, so Action_Agent keeps working
     examples of the tool-call format in its history.
     """
 
