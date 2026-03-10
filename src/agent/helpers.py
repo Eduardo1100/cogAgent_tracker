@@ -185,8 +185,8 @@ def create_echo_agent():
         human_input_mode="NEVER",
     )
 
-    # Track last known observation so we can repeat it if the relay misses
-    _state = {"last_obs": None}
+    # Track last known observation and consecutive stale rounds
+    _state = {"last_obs": None, "stale_count": 0}
 
     def relay_observation(recipient, messages, sender, config):
         if not messages:
@@ -200,16 +200,133 @@ def create_echo_agent():
             if msg.get("role") == "tool":
                 content = msg.get("content") or "Action completed."
                 _state["last_obs"] = content
+                _state["stale_count"] = 0
                 return True, f"[Observation]: {content}"
 
-        # No tool message found — repeat the last known percept so agents never
-        # drift into "awaiting observation" loops after history truncation.
+        # No tool message found — count consecutive stale rounds.
+        _state["stale_count"] += 1
+
+        if _state["stale_count"] >= 6:
+            return True, (
+                "[SYSTEM ERROR: Action_Agent has failed to execute a tool call for "
+                f"{_state['stale_count']} consecutive rounds. "
+                "The session is being terminated. STRAWBERRY]"
+            )
+        if _state["stale_count"] >= 2:
+            return True, (
+                "[SYSTEM ERROR: No tool was executed this round. "
+                "Action_Agent must output a real execute_action() tool call — "
+                "for example: execute_action('go to desk 1'). "
+                "Plain text responses are not valid.]"
+            )
         if _state["last_obs"] is not None:
             return True, f"[No new tool result — repeating last observation]: {_state['last_obs']}"
         return True, "[Internal State Synchronized]"
 
     echo_agent.register_reply([ConversableAgent, None], relay_observation)
+    # Expose _state so callers can reset it between games without recreating the agent.
+    echo_agent._relay_state = _state
     return echo_agent
+
+
+class ConvertOrphanedToolMessages:
+    """Fix broken tool_calls / tool pairings left by history truncation.
+
+    Applied after MessageHistoryLimiter so that truncation never produces
+    messages that strict OpenAI-compatible APIs reject with a 400.
+
+    Two kinds of breakage can occur after the window is trimmed:
+
+    1. role='tool' whose tool_call_id has no matching tool_calls in the
+       window (the assistant tool_calls was cut off the front).
+       Fix: convert the orphaned tool message to role='user'.
+
+    2. role='assistant' with tool_calls whose required tool responses are
+       missing (the tool message was never matched, e.g. the pairing was
+       broken by intermediate non-tool messages after truncation).
+       Fix: strip the tool_calls key so it becomes a plain assistant message
+       (text noting the call is kept so Action_Agent still sees an example).
+
+    Unlike FlattenToolMessages this transform leaves intact all tool_calls /
+    tool pairs that ARE correctly adjacent, so Action_Agent keeps working
+    examples of the tool-call format in its history.
+    """
+
+    def apply_transform(self, messages: list[dict]) -> list[dict]:
+        msgs = copy.deepcopy(messages)
+
+        # Pass 1 — find which assistant tool_calls messages are "complete":
+        # all of their tool_call_ids have a matching role='tool' immediately
+        # following (no non-tool messages in between).
+        complete_tool_call_ids: set[str] = set()
+        i = 0
+        while i < len(msgs):
+            msg = msgs[i]
+            if msg.get("role") == "assistant" and "tool_calls" in msg:
+                tc_ids = {tc["id"] for tc in msg.get("tool_calls", []) if "id" in tc}
+                j = i + 1
+                found: set[str] = set()
+                while j < len(msgs) and msgs[j].get("role") == "tool":
+                    tid = msgs[j].get("tool_call_id")
+                    if tid:
+                        found.add(tid)
+                    j += 1
+                if tc_ids and tc_ids == found:
+                    complete_tool_call_ids |= tc_ids
+            i += 1
+
+        # Pass 2 — rewrite messages.
+        result: list[dict] = []
+        pending_ids: set[str] = set()
+
+        for msg in msgs:
+            role = msg.get("role")
+
+            if role == "assistant" and "tool_calls" in msg:
+                tc_ids = {tc["id"] for tc in msg.get("tool_calls", []) if "id" in tc}
+                if tc_ids <= complete_tool_call_ids:
+                    # All calls are complete — keep tool_calls intact.
+                    pending_ids = tc_ids
+                    result.append(msg)
+                else:
+                    # Incomplete — strip tool_calls so the API doesn't reject.
+                    calls = [
+                        f"[Calling {c['function']['name']}]"
+                        for c in msg.get("tool_calls", [])
+                    ]
+                    msg["content"] = (msg.get("content") or "") + "\n" + "\n".join(calls)
+                    msg.pop("tool_calls", None)
+                    pending_ids = set()
+                    result.append(msg)
+
+            elif role == "tool":
+                tid = msg.get("tool_call_id")
+                if tid and tid in pending_ids:
+                    pending_ids.discard(tid)
+                    result.append(msg)
+                else:
+                    # Orphaned tool response — convert to plain user observation.
+                    content = msg.get("content") or "No observation provided."
+                    msg["role"] = "user"
+                    msg["content"] = f"[Observation]: {content}"
+                    msg.pop("tool_call_id", None)
+                    msg.pop("tool_responses", None)
+                    result.append(msg)
+
+            else:
+                pending_ids = set()
+                result.append(msg)
+
+        return result
+
+    def get_logs(
+        self, pre_transform_messages: list[dict], post_transform_messages: list[dict]
+    ) -> tuple[str, bool]:
+        changed = any(
+            pre != post
+            for pre, post in zip(pre_transform_messages, post_transform_messages)
+        )
+        return ("Orphaned tool messages converted" if changed else ""), changed
 
 
 class FlattenToolMessages:

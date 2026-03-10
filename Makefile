@@ -26,9 +26,9 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
 
-debug: ## Debug on valid_unseen. GAMES=1,2,3 | TASK=1-6 | default: 1 random game
+debug: ## Debug on valid_unseen. GAMES=1,2,3 | TASK=1-6 | N=k for k random games | default: 1 random game
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games 1))'
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))'
 
 test: ## Run tests with pytest
 	uv run pytest tests/

@@ -1,8 +1,6 @@
-import copy
 import hashlib
 import json
 import os
-import random
 import re
 
 import matplotlib.pyplot as plt
@@ -15,22 +13,37 @@ from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
 from src.agent.helpers import (
+    ConvertOrphanedToolMessages,
     FlattenToolMessages,
+    create_echo_agent,
     get_best_candidate,
     is_termination_msg_generic,
     sentence_transformer_model,
 )
+from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_episodes
 
 
 class GWTAutogenAgent(AutogenAgent):
+    _UNCERTAINTY_RE = re.compile(
+        r"\b(uncertain|unclear|unsure|unknown|conflicting|"
+        r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
+        r"|do\s+not\s+know|don't\s+know|need\s+to\s+(?:verify|check|confirm)"
+        r"|may\s+(?:be|need)|might\s+(?:be|need))\b",
+        re.IGNORECASE,
+    )
+
     def __init__(
         self,
         llm_profile,
         log_path,
         game_no=1,
-        max_chat_round=400,
-        max_actions=30,
+        max_chat_round=200,
+        max_actions=40,
         rounds_per_game=1,
+        rag_episode_k=4,
+        rag_concept_k=5,
+        rag_episode_k_initial=4,
+        rag_concept_k_initial=5,
         args=None,
         env=None,
         obs="",
@@ -48,24 +61,28 @@ class GWTAutogenAgent(AutogenAgent):
             info,
         )
 
+        self.rag_episode_k = rag_episode_k
+        self.rag_concept_k = rag_concept_k
+        self.rag_episode_k_initial = rag_episode_k_initial
+        self.rag_concept_k_initial = rag_concept_k_initial
+
         self.read_only_memory = False
 
         self.echo_agent = None
-        self.planning_agent = None
-        self.motor_agent = None
-        self.idea_agent = None
+        self.action_agent = None
+        self.thinking_agent = None
         self.external_perception_agent = None
         self.internal_perception_agent_1 = None
         self.internal_perception_agent_2 = None
         self.internal_perception_agent_3 = None
-        self.conscious_agent = None
+        self.belief_state_agent = None
         self.retrieve_memory_agent = None
         self.learning_agent = None
         self.record_long_term_memory_agent = None
         self.focus_agent = None
         self.agents_info = {}
 
-        self._ = self.max_actions
+        self._initial_max_actions = self.max_actions
         self.rounds = rounds_per_game
         self.max_round_actions = self.max_actions // self.rounds
         self.max_actions = self.max_actions - self.max_round_actions * (self.rounds - 1)
@@ -87,21 +104,23 @@ class GWTAutogenAgent(AutogenAgent):
         self.task_status = "INCOMPLETE"
         self.initial_message = ""
         self.memory = ""
+        self._episodic_rag_cache: dict = {}
+        self._concept_rag_cache: dict = {}
 
-    def _make_conscious_termination_fn(self):
-        """Returns a termination predicate for Conscious_Agent.
+    def _make_belief_state_termination_fn(self):
+        """Returns a termination predicate for Belief_State_Agent.
         Terminates on STRAWBERRY/FLEECE OR after task_success is True
-        and Conscious_Agent has been visited twice (grace period for
+        and Belief_State_Agent has been visited twice (grace period for
         Learning_Agent to run one cycle).
         """
-        self._conscious_post_success_visits = 0
+        self._belief_state_post_success_visits = 0
 
         def _check(msg):
             if is_termination_msg_generic(msg):
                 return True
             if self.task_success or (self.task_failed and self.rounds_left == 0):
-                self._conscious_post_success_visits += 1
-                return self._conscious_post_success_visits >= 2
+                self._belief_state_post_success_visits += 1
+                return self._belief_state_post_success_visits >= 2
             return False
 
         return _check
@@ -116,14 +135,41 @@ class GWTAutogenAgent(AutogenAgent):
         self.cluster_knowledge()
 
         self.num_actions_taken = 0
-        self.max_actions = self._ - self.max_round_actions * (self.rounds - 1)
+        self.max_actions = self._initial_max_actions - self.max_round_actions * (
+            self.rounds - 1
+        )
         self.rounds_left = self.rounds
         self.task_failed = False
         self.task_success = False
         self.success = False
-        self._conscious_post_success_visits = 0
+        self._belief_state_post_success_visits = 0
+        self._stale_action_count = 0
+        self._last_seen_actions_taken = -1
+        self._last_belief_content = ""
+        self._consecutive_thinking_count = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
+        # Reset echo agent relay state so stale_count from the previous game
+        # doesn't fire false system errors at the start of a new game.
+        if self.echo_agent is not None and hasattr(self.echo_agent, "_relay_state"):
+            self.echo_agent._relay_state["stale_count"] = 0
+            self.echo_agent._relay_state["last_obs"] = None
+        # Clear all agent _oai_messages so game 1 context doesn't bleed into game 2.
+        if self.group_chat is not None:
+            for agent in self.group_chat.agents:
+                agent.clear_history()
+        # Recreate GroupChat and GroupChatManager so game 2 starts with a completely
+        # clean slate.  GroupChatManager accumulates _oai_messages keyed by every
+        # agent it spoke with; without reinit those 100+ rounds of stale history
+        # bleed into game 2 and can cause the first LLM call to hang.  max_round is
+        # set to self.max_chat_round inside _reinit_groupchat().
+        self._reinit_groupchat()
+        # Clear per-game RAG caches so stale embeddings don't pollute retrieval.
+        # _cluster_cache is intentionally NOT cleared: it is keyed by the content
+        # hash of memory1.txt and auto-invalidates whenever concepts change, so it
+        # stays valid across games as long as memory is unchanged.
+        self._episodic_rag_cache.clear()
+        self._concept_rag_cache.clear()
         self.task = obs[0].split("Your task is to: ")[1]
         self.admissible_actions = list(self.info["admissible_commands"][0])
         self.task_status = "INCOMPLETE"
@@ -188,34 +234,20 @@ class GWTAutogenAgent(AutogenAgent):
         with _prompts_path.open() as _f:
             _PROMPTS = yaml.safe_load(_f)
 
-        # 1. Get the full list of models from your profile
         self.llm_config_list = self.llm_profile.get("config_list", [])
 
-        # 2. Define the 'Standard' Priority: Gemini -> Chat -> Reasoner
-        # If Gemini is dead (429), it immediately tries DeepSeek Chat.
-        standard_fallback_list = self.llm_config_list
-
-        # 3. Define the 'Reasoner' Priority: Reasoner -> Chat -> Gemini
-        # We REVERSE it so the Conscious Agent always tries to 'think' first.
-        reasoner_fallback_list = list(reversed(self.llm_config_list))
-
+        # Standard priority: Gemini -> Chat -> Reasoner
         standard_config = {
-            "config_list": standard_fallback_list,
+            "config_list": self.llm_config_list,
             "temperature": 0.0,
             "max_tokens": 200,
         }
 
+        # Reasoner priority: Reasoner -> Chat -> Gemini (reversed)
         reasoner_config = {
-            "config_list": reasoner_fallback_list,
+            "config_list": list(reversed(self.llm_config_list)),
             "temperature": 1.0,  # Reasoners need higher temp for R1/o1
         }
-
-        # Planning config needs higher token limits for long horizon planning
-        planning_config = copy.deepcopy(reasoner_config)
-        planning_config["max_tokens"] = 1500
-
-        # ... (Keep all your agent initializations exactly the same below this!) ...
-        from src.agent.helpers import create_echo_agent
 
         self.echo_agent = create_echo_agent()
         self.agents_info[self.echo_agent.name] = {
@@ -226,7 +258,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.focus_agent = ConversableAgent(
             name="Focus_Agent",
             system_message=_PROMPTS["focus_agent"],
-            description="Focus_Agent calls the 'focus' function whenever Conscious_Agent fails to state a BELIEF STATE until Conscious_Agent outputs a BELIEF STATE.",
+            description="Focus_Agent calls the 'focus' function whenever Belief_State_Agent fails to state a BELIEF STATE until Belief_State_Agent outputs a BELIEF STATE.",
             llm_config=standard_config,
             is_termination_msg=lambda msg: False,
             human_input_mode="NEVER",
@@ -249,62 +281,48 @@ class GWTAutogenAgent(AutogenAgent):
             "Description": self.retrieve_memory_agent.description,
         }
 
-        self.motor_agent = ConversableAgent(
-            name="Motor_Agent",
-            system_message=_PROMPTS["motor_agent"],
-            description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
-            llm_config=standard_config,
-            human_input_mode="NEVER",
-            is_termination_msg=lambda msg: False,
-        )
-        self.agents_info[self.motor_agent.name] = {
-            "Prompt": self.motor_agent.system_message,
-            "Description": self.motor_agent.description,
-        }
-
-        # Planning agent's prompt is the main limiting factor when it comes to improving success rate.
-        self.planning_agent = ConversableAgent(
-            name="Planning_Agent",
-            system_message=_PROMPTS["planning_agent"],
-            description="Planning_Agent proposes a high-level plan to solve the current task.",
-            llm_config=planning_config,
-            is_termination_msg=lambda msg: False,
-            human_input_mode="NEVER",
-        )
-        self.agents_info[self.planning_agent.name] = {
-            "Prompt": self.planning_agent.system_message,
-            "Description": self.planning_agent.description,
-        }
-
-        self.idea_agent = ConversableAgent(
-            name="Idea_Agent",
-            system_message=_PROMPTS["idea_agent"],
-            description="Idea_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
+        self.action_agent = ConversableAgent(
+            name="Action_Agent",
+            system_message=_PROMPTS["action_agent"],
+            description="Action_Agent calls the 'execute_action' function with the best admissible action as the argument.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.idea_agent.name] = {
-            "Prompt": self.idea_agent.system_message,
-            "Description": self.idea_agent.description,
+        self.agents_info[self.action_agent.name] = {
+            "Prompt": self.action_agent.system_message,
+            "Description": self.action_agent.description,
         }
 
-        self.conscious_agent = ConversableAgent(
-            name="Conscious_Agent",
-            system_message=_PROMPTS["conscious_agent"],
-            description="Conscious_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
+        self.thinking_agent = ConversableAgent(
+            name="Thinking_Agent",
+            system_message=_PROMPTS["thinking_agent"],
+            description="Thinking_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
             llm_config=reasoner_config,
             human_input_mode="NEVER",
-            is_termination_msg=self._make_conscious_termination_fn(),
+            is_termination_msg=lambda msg: False,
         )
-        self.agents_info[self.conscious_agent.name] = {
-            "Prompt": self.conscious_agent.system_message,
-            "Description": self.conscious_agent.description,
+        self.agents_info[self.thinking_agent.name] = {
+            "Prompt": self.thinking_agent.system_message,
+            "Description": self.thinking_agent.description,
+        }
+
+        self.belief_state_agent = ConversableAgent(
+            name="Belief_State_Agent",
+            system_message=_PROMPTS["belief_state_agent"],
+            description="Belief_State_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
+            llm_config=reasoner_config,
+            human_input_mode="NEVER",
+            is_termination_msg=self._make_belief_state_termination_fn(),
+        )
+        self.agents_info[self.belief_state_agent.name] = {
+            "Prompt": self.belief_state_agent.system_message,
+            "Description": self.belief_state_agent.description,
         }
 
         self.external_perception_agent = ConversableAgent(
             name="External_Perception_Agent",
-            description="External_Perception_Agent executes the proposed 'execute_action' function call given by 'Motor_Agent' and then parrots the resulting output as feedback.",
+            description="External_Perception_Agent executes the proposed 'execute_action' function call given by 'Action_Agent' and then parrots the resulting output as feedback.",
             llm_config=None,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
@@ -379,25 +397,27 @@ class GWTAutogenAgent(AutogenAgent):
         self.start_agent = self.external_perception_agent
 
         self.allowed_transitions = {
-            self.planning_agent: [self.motor_agent],
-            self.motor_agent: [self.external_perception_agent],
-            # CHANGE: Route through Echo_Agent to broadcast tool results
+            self.action_agent: [self.external_perception_agent],
+            # Route through Echo_Agent to broadcast tool results as plain text.
             self.external_perception_agent: [self.echo_agent],
-            self.echo_agent: [self.conscious_agent],
-            self.conscious_agent: [
-                self.planning_agent,
+            self.echo_agent: [self.belief_state_agent],
+            self.belief_state_agent: [
+                self.action_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
                 self.learning_agent,
-                self.idea_agent,
+                self.thinking_agent,
             ],
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
-            self.internal_perception_agent_3: [self.idea_agent, self.learning_agent],
-            self.idea_agent: [self.planning_agent],
+            self.internal_perception_agent_3: [
+                self.thinking_agent,
+                self.learning_agent,
+            ],
+            self.thinking_agent: [self.action_agent],
             self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
-            self.internal_perception_agent_1: [self.idea_agent],
-            self.internal_perception_agent_2: [self.conscious_agent],
+            self.internal_perception_agent_1: [self.thinking_agent],
+            self.internal_perception_agent_2: [self.belief_state_agent],
             self.focus_agent: [self.internal_perception_agent_2],
         }
 
@@ -410,20 +430,14 @@ class GWTAutogenAgent(AutogenAgent):
             json.dump(self.agents_info, f, indent=4)
 
     def initialize_groupchat(self):
-        # 1. Setup the Relay (Echo Agent)
-        # self.llm_config_list = self.llm_profile.get("config_list", [])
-        # self.echo_agent = create_echo_agent(self.llm_config_list[0])
-        # self.echo_agent = create_echo_agent()
-
-        # 2. Define Active Agents (Exclude Echo_Agent from selection list)
+        # Define Active Agents (Exclude Echo_Agent from selection list)
         active_agents = [
-            self.planning_agent,
-            self.motor_agent,
-            self.idea_agent,
+            self.action_agent,
+            self.thinking_agent,
             self.internal_perception_agent_1,
             self.internal_perception_agent_2,
             self.internal_perception_agent_3,
-            self.conscious_agent,
+            self.belief_state_agent,
             self.retrieve_memory_agent,
             self.learning_agent,
             self.record_long_term_memory_agent,
@@ -441,11 +455,74 @@ class GWTAutogenAgent(AutogenAgent):
                 valid_next = [s for s in next_speakers if s.name in active_agent_names]
                 filtered_transitions[speaker] = valid_next
 
-        # 4. Initialize GroupChat and Manager
+        # Store topology so _reinit_groupchat() can rebuild GroupChat/Manager each game.
+        self._active_agents = active_agents
+        self._filtered_transitions = filtered_transitions
+
+        # 5 JIT SCRUBBING (Input Protection for LLMs)
+        # Use TransformMessages (applied just before the API call, on the correct
+        # _oai_messages data) instead of a register_reply hook (which only modifies
+        # groupchat.messages and is ignored by _generate_oai_reply).
+        #
+        # IMPORTANT: Action_Agent must NOT have FlattenToolMessages applied.
+        # FlattenToolMessages strips 'tool_calls' keys from all prior messages,
+        # so after a few rounds Action_Agent's LLM context contains no tool_call
+        # examples and the model switches to plain-text output instead of calling
+        # execute_action() — breaking the observation relay for the rest of the game.
+        # Action_Agent only needs ConvertOrphanedToolMessages; see action_scrubber below.
+        cognitive_agents_to_scrub = [
+            self.thinking_agent,
+            self.belief_state_agent,
+            self.retrieve_memory_agent,
+            self.learning_agent,
+            self.record_long_term_memory_agent,
+            self.focus_agent,
+        ]
+
+        self._full_scrubber = transform_messages.TransformMessages(
+            transforms=[
+                MessageHistoryLimiter(
+                    max_messages=60
+                ),  # was 50; raised to reduce cliff-pruning
+                FlattenToolMessages(),
+            ]
+        )
+        for agent in cognitive_agents_to_scrub:
+            if agent is not None:
+                self._full_scrubber.add_to_agent(agent)
+
+        # Action_Agent must NOT have MessageHistoryLimiter: trimming its context
+        # causes ConvertOrphanedToolMessages to strip the tool_call/response pairs,
+        # leaving only plain-text "[Calling execute_action]" examples — after which
+        # the model outputs text instead of JSON tool calls, stalling the game.
+        # Action_Agent messages are tiny (one tool call each) so no limiter is needed.
+        action_scrubber = transform_messages.TransformMessages(
+            transforms=[ConvertOrphanedToolMessages()]
+        )
+        if self.action_agent is not None:
+            action_scrubber.add_to_agent(self.action_agent)
+
+        # 4. Initialize GroupChat and Manager (also called each game via _reinit_groupchat).
+        self._reinit_groupchat()
+
+    def _reinit_groupchat(self):
+        """Create a fresh GroupChat and GroupChatManager for the upcoming game.
+
+        Called once at startup (from initialize_groupchat) and again at the start
+        of every subsequent game (from set_environment).  Recreating these objects
+        gives each game a completely clean slate — GroupChatManager accumulates
+        _oai_messages keyed by every agent it spoke with, so without reinit the
+        second game inherits 100+ rounds of stale history that can cause the first
+        LLM call to hang or produce corrupted responses.
+
+        Cognitive-agent transforms (_full_scrubber, motor_scrubber) are registered
+        directly on agent objects and survive across games; only the GroupChatManager's
+        scrubber registration must be repeated here for the new manager instance.
+        """
         self.group_chat = GroupChat(
-            agents=active_agents,
+            agents=self._active_agents,
             messages=[],
-            allowed_or_disallowed_speaker_transitions=filtered_transitions,
+            allowed_or_disallowed_speaker_transitions=self._filtered_transitions,
             speaker_transitions_type="allowed",
             max_round=self.max_chat_round,
             speaker_selection_method=self.custom_speaker_selection,
@@ -456,45 +533,14 @@ class GWTAutogenAgent(AutogenAgent):
             llm_config=self.llm_config_list[0],
         )
 
-        # 5 JIT SCRUBBING (Input Protection for LLMs)
-        # Use TransformMessages (applied just before the API call, on the correct
-        # _oai_messages data) instead of a register_reply hook (which only modifies
-        # groupchat.messages and is ignored by _generate_oai_reply).
-        #
-        # IMPORTANT: Motor_Agent must NOT have FlattenToolMessages applied.
-        # FlattenToolMessages strips 'tool_calls' keys from all prior messages,
-        # so after a few rounds Motor_Agent's LLM context contains no tool_call
-        # examples and the model switches to plain-text output instead of calling
-        # execute_action() — breaking the observation relay for the rest of the game.
-        # Motor_Agent only needs the history limiter; it uses a standard
-        # OpenAI-compatible model that handles tool_calls natively.
-        reasoner_agents = [
-            self.planning_agent,
-            self.idea_agent,
-            self.conscious_agent,
-            self.retrieve_memory_agent,
-            self.learning_agent,
-            self.record_long_term_memory_agent,
-            self.focus_agent,
-            self.group_chat_manager,
-        ]
-
-        full_scrubber = transform_messages.TransformMessages(
-            transforms=[
-                MessageHistoryLimiter(max_messages=50),
-                FlattenToolMessages(),
-            ]
+        # Register the full scrubber on the new GroupChatManager instance.
+        # (GroupChatManager is not in _active_agents so it was excluded from the
+        # cognitive-agent scrubber loop above; it needs the scrubber for the rare
+        # cases where speaker_selection_method falls back to "auto".)
+        assert hasattr(self, "_full_scrubber") and self._full_scrubber is not None, (
+            "_reinit_groupchat() called before initialize_groupchat() completed"
         )
-        for agent in reasoner_agents:
-            if agent is not None:
-                full_scrubber.add_to_agent(agent)
-
-        # Motor_Agent only gets history limiting — tool_call format must be preserved.
-        motor_scrubber = transform_messages.TransformMessages(
-            transforms=[MessageHistoryLimiter(max_messages=50)]
-        )
-        if self.motor_agent is not None:
-            motor_scrubber.add_to_agent(self.motor_agent)
+        self._full_scrubber.add_to_agent(self.group_chat_manager)
 
     def register_log_paths(self):
 
@@ -621,7 +667,7 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
                 # Inadmissible actions don't consume the action budget
             else:
-                self.obs, scores, dones, self.info = self.env.step([action])
+                self.obs, _, __, self.info = self.env.step([action])
                 self.success = self.info["won"][0]
                 self.num_actions_taken += 1
 
@@ -636,11 +682,11 @@ class GWTAutogenAgent(AutogenAgent):
             if self.task_status == "COMPLETED":
                 self.task_success = True
                 self.rounds_left -= 1
-                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Try to figure out what went right and what good decisions were made that lead to success, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Motor_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Identify what went right and what good decisions led to success. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
             elif self.task_status == "FAILED":
                 self.task_failed = True
                 self.rounds_left -= 1
-                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Try to figure out what went wrong and what mistakes were made that lead to failure, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Motor_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
 
             self.update_percept(suggested_action)
 
@@ -652,11 +698,11 @@ class GWTAutogenAgent(AutogenAgent):
             return json.dumps(self.percept) + reflection
 
         # Register the WRAPPER instead of the method
-        assert self.motor_agent is not None
+        assert self.action_agent is not None
         assert self.external_perception_agent is not None
         register_function(
             execute_action1,
-            caller=self.motor_agent,
+            caller=self.action_agent,
             executor=self.external_perception_agent,
             name="execute_action",
             description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
@@ -756,6 +802,7 @@ class GWTAutogenAgent(AutogenAgent):
             line.strip() for line in concept_text.split("\n") if line.strip()
         ]
         num_concepts = len(concept_lines)
+        print(f"🧠 Clustering {num_concepts} concept(s)...")
 
         empty_result = {
             "representative_concepts": [],
@@ -778,8 +825,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         # Calculate k (clusters) using capped growth function to prevent over-clustering
-        max_concepts = num_concepts
-        chosen_k = max(1, min(max_concepts, int(num_concepts ** (1 / 2))))
+        chosen_k = max(1, min(num_concepts, int(num_concepts ** (1 / 2))))
 
         kmeans = KMeans(n_clusters=chosen_k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(embeddings)
@@ -885,12 +931,24 @@ class GWTAutogenAgent(AutogenAgent):
             f"- Max environment actions allowed: {self.max_actions} (physical interactions only).\n\n"
         )
 
+        relevant_knowledge = retrieve_relevant_concepts(
+            self.knowledge,
+            self.task,
+            k=self.rag_concept_k_initial,
+            cache=self._concept_rag_cache,
+        )
+        relevant_episodes = retrieve_relevant_episodes(
+            self.prev_episodic_memories,
+            self.task,
+            k=self.rag_episode_k_initial,
+            cache=self._episodic_rag_cache,
+        )
         memory_section = "--- PRIOR KNOWLEDGE & EPISODIC MEMORY ---\n"
         memory_section += (
             json.dumps(
                 {
-                    "knowledge": self.knowledge,
-                    "recent_episodic_memories": self.prev_episodic_memories[:20],
+                    "knowledge": relevant_knowledge,
+                    "recent_episodic_memories": relevant_episodes,
                     "current_episode_memory": self.curr_episodic_memory,
                 },
             )
@@ -913,17 +971,31 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
     def retrieve_memory(self):
-        random_episodic_memories = self.prev_episodic_memories
-        if len(random_episodic_memories) >= 5:
-            random_episodic_memories = sorted(
-                random.sample(self.prev_episodic_memories, 5),
-                key=lambda x: x["episode_number"],
-            )
+        query = self.task
+        if self.curr_episodic_memory:
+            last = self.curr_episodic_memory[-1]
+            query += " " + (last if isinstance(last, str) else json.dumps(last))
+
+        print(
+            f"🔍 Retrieving memory: {len(self.prev_episodic_memories)} episode(s), "
+            f"{len(self.knowledge)} concept(s) → top-{self.rag_episode_k} episodes, "
+            f"top-{self.rag_concept_k} concepts"
+        )
+
+        relevant_episodes = retrieve_relevant_episodes(
+            self.prev_episodic_memories,
+            query,
+            k=self.rag_episode_k,
+            cache=self._episodic_rag_cache,
+        )
+        relevant_knowledge = retrieve_relevant_concepts(
+            self.knowledge, query, k=self.rag_concept_k, cache=self._concept_rag_cache
+        )
 
         self.memory = json.dumps(
             {
-                "knowledge": self.knowledge,
-                "previous_episodic_memories": random_episodic_memories,
+                "knowledge": relevant_knowledge,
+                "previous_episodic_memories": relevant_episodes,
                 "current_episode_memory": self.curr_episodic_memory,
             },
         )
@@ -948,7 +1020,7 @@ class GWTAutogenAgent(AutogenAgent):
             return self.external_perception_agent
 
         # Route tool responses via the transition graph (e.g. Internal_Perception_Agent_1
-        # → Idea_Agent, Internal_Perception_Agent_2 → Conscious_Agent, etc.).
+        # → Thinking_Agent, Internal_Perception_Agent_2 → Belief_State_Agent, etc.).
         # Only fall back to echo_agent for external_perception_agent responses.
         if last_msg.get("role") == "tool":
             executors = self.allowed_transitions.get(last_speaker, [])
@@ -956,42 +1028,84 @@ class GWTAutogenAgent(AutogenAgent):
                 return executors[0]
             return self.echo_agent
 
+        # Stuck-state early termination: tick _stale_action_count exactly once
+        # per complete observation relay — i.e. only when echo_agent just spoke.
+        # That way the count equals the number of full action cycles (Action →
+        # External_Perception → Echo) during which no new execute_action call
+        # was made, giving a clean semantic: "8 stale rounds = 8 full cycles
+        # with no action executed."
+        #
+        # Note: echo_agent's own _relay_state["stale_count"] independently fires
+        # a STRAWBERRY termination after 6 consecutive relays with NO tool message
+        # at all (Action_Agent output plain text instead of calling execute_action).
+        # That guard fires first in a full stall; this counter covers the separate
+        # (unlikely) case where execute_action IS called but num_actions_taken stalls.
+        if last_speaker is self.echo_agent:
+            if self.num_actions_taken == self._last_seen_actions_taken:
+                self._stale_action_count += 1
+            else:
+                self._stale_action_count = 0
+                self._last_seen_actions_taken = self.num_actions_taken
+            if self._stale_action_count >= 8:
+                # +1: the AutoGen termination check (i == max_round - 1) runs
+                # BEFORE select_speaker, so we target the NEXT iteration.
+                # Guard: only reduce max_round, never increase it.
+                new_cap = len(messages) + 1
+                if self.group_chat.max_round > new_cap:
+                    self.group_chat.max_round = new_cap
+
         # Standard Graph Transitions
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
 
         # Gate Learning_Agent: only invoke it after a task outcome (success/failure).
-        if self.learning_agent in possible_speakers and not self.task_success and not self.task_failed:
-            possible_speakers = [s for s in possible_speakers if s is not self.learning_agent]
-
-        # Gate Idea_Agent: only invoke when Conscious_Agent signals uncertainty.
-        # When the belief state is confident, route directly to Planning_Agent to
-        # avoid an expensive extra LLM call every cycle.
         if (
-            last_speaker is self.conscious_agent
-            and self.idea_agent in possible_speakers
+            self.learning_agent in possible_speakers
             and not self.task_success
             and not self.task_failed
         ):
-            last_content = (last_msg.get("content") or "").lower()
-            # Use word boundaries so "uncertainties" (negated context) does not
-            # match the marker "uncertain".  "no observation" is a phrase so it
-            # uses a simple substring check deliberately.
-            _uncertainty_re = re.compile(
-                r"\b(uncertain|unclear|unsure|unknown|conflicting|"
-                r"contradictory|ambiguous|stalled)\b"
-            )
-            if _uncertainty_re.search(last_content) or "no observation" in last_content:
-                return self.idea_agent
-            return self.planning_agent
+            possible_speakers = [
+                s for s in possible_speakers if s is not self.learning_agent
+            ]
+
+        # Gate Thinking_Agent: only invoke when Belief_State_Agent signals uncertainty.
+        # Also skip if the belief state content is identical to the previous round —
+        # repeating Thinking_Agent on an unchanged belief wastes tokens with no gain.
+        if (
+            last_speaker is self.belief_state_agent
+            and self.thinking_agent in possible_speakers
+            and not self.task_success
+            and not self.task_failed
+        ):
+            current_content = last_msg.get("content") or ""
+            if (
+                self._UNCERTAINTY_RE.search(current_content.lower())
+                or "no observation" in current_content.lower()
+            ):
+                if (
+                    current_content == self._last_belief_content
+                    and self._consecutive_thinking_count >= 1
+                ):
+                    # Identical belief state fired again — skip Thinking_Agent
+                    self._consecutive_thinking_count = 0
+                    self._last_belief_content = ""
+                    return self.action_agent
+                self._last_belief_content = current_content
+                self._consecutive_thinking_count += 1
+                return self.thinking_agent
+            self._last_belief_content = ""
+            self._consecutive_thinking_count = 0
+            return self.action_agent
 
         # Safety valve: if the task is done and the conversation is still
-        # running (e.g. Motor_Agent stuck outputting text instead of calling
+        # running (e.g. Action_Agent stuck outputting text instead of calling
         # execute_action), cap max_round to force termination.
         if self.task_success or (self.task_failed and self.rounds_left == 0):
             if not hasattr(self, "_task_done_msg_count"):
                 self._task_done_msg_count = len(messages)
             elif len(messages) > self._task_done_msg_count + 12:
-                self.group_chat.max_round = len(messages)
+                new_cap = len(messages) + 1
+                if self.group_chat.max_round > new_cap:
+                    self.group_chat.max_round = new_cap
 
         if len(possible_speakers) == 1:
             return possible_speakers[0]
