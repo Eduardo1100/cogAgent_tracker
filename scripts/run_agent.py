@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
+from src.agent.env_adapter import ALFWorldAdapter, ScienceWorldAdapter, infer_task_type
 from src.agent.gwt_agent import GWTAutogenAgent
 from src.storage import cache
 from src.storage.database import SessionLocal, engine
@@ -46,39 +47,6 @@ def get_git_branch() -> str | None:
     except Exception:
         return None
 
-
-def infer_task_type(task: str) -> int | None:
-    """Infer ALFWorld task type (1–6) from the task description string.
-
-    ALFWorld task strings are like "clean some apple and put it in the sink"
-    — no "with" keyword, so we match on the primary action verb only.
-    Order matters: check specific verbs before the generic "put/place".
-    """
-    t = task.lower()
-    if "look at" in t:
-        return 2
-    if "clean" in t:
-        return 3
-    if "heat" in t:
-        return 4
-    if "cool" in t:
-        return 5
-    if "two" in t:
-        return 6
-    if "put" in t or "place" in t:
-        return 1
-    return None
-
-
-def count_inadmissible_actions(history_path: str) -> int:
-    """Count how many times the agent attempted a non-admissible action."""
-    try:
-        with open(history_path) as f:
-            return sum(
-                1 for line in f if "not in the list of admissible actions" in line
-            )
-    except Exception:
-        return 0
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -277,6 +245,24 @@ def parse_arguments():
         help="Run one random game of this task type (debug mode). "
         "1=pick&place 2=examine 3=clean 4=heat 5=cool 6=pick-two.",
     )
+    parser.add_argument(
+        "--env-type",
+        choices=["alfworld", "scienceworld"],
+        default="alfworld",
+        help="Which environment to evaluate (default: alfworld).",
+    )
+    parser.add_argument(
+        "--sw-tasks",
+        nargs="+",
+        default=None,
+        help="ScienceWorld task names to evaluate (default: all tasks).",
+    )
+    parser.add_argument(
+        "--sw-variations",
+        type=int,
+        default=None,
+        help="Number of variations per task (default: all variations).",
+    )
     return parser.parse_args()
 
 
@@ -299,6 +285,273 @@ def _scan_task_types(env, total_num_games: int) -> dict[int | None, list[int]]:
         tt = infer_task_type(task_desc)
         index.setdefault(tt, []).append(i)
     return index
+
+
+# ── ScienceWorld eval loop ──────────────────────────────────────────────────────
+
+
+def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
+    from scienceworld import ScienceWorldEnv
+
+    sw_env = ScienceWorldEnv("")
+    task_names = args.sw_tasks or sw_env.getTaskNames()
+
+    # Per-run metrics
+    chat_round_list: list[int] = []
+    error_list: list[int] = []
+    success_list: list[int] = []
+    failure_list: list[int] = []
+    cumulative_successful_actions = cumulative_failing_actions = 0
+    cumulative_successful_chat_rounds = cumulative_failing_chat_rounds = 0
+    cumulative_successful_runtime = cumulative_failing_runtime = 0
+    avg_actions_taken_per_successful_game = avg_actions_taken_per_failing_game = 0.0
+    avg_chat_rounds_per_successful_game = avg_chat_rounds_per_failing_game = 0.0
+    avg_runtime_per_successful_game = avg_runtime_per_failing_game = 0.0
+    cumulative_runtime = 0.0
+    num_games_evaluated = num_successes = 0
+    error_adjusted_success_rate = 0.0
+    total_run_usage: dict[str, float] = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
+
+    experiment = ExperimentRun(
+        agent_name=agent_name,
+        llm_model=llm_profile_name,
+        eval_env_type="scienceworld",
+        max_actions_per_game=args.max_actions,
+        max_chat_rounds=args.max_chat_rounds,
+        start_time=datetime.now(UTC),
+        split="scienceworld",
+        num_games=0,  # updated after counting
+    )
+    db.add(experiment)
+    db.commit()
+    db.refresh(experiment)
+    print(f"✅ Started DB Experiment Run ID: {experiment.id}")
+
+    experiment.agents_config = agent.agents_info
+    experiment.git_commit = get_git_commit()
+    experiment.git_branch = get_git_branch()
+    db.commit()
+
+    game_no = 0
+    total_games = sum(
+        min(args.sw_variations, sw_env.getVariationsForTask(t)) if args.sw_variations else sw_env.getVariationsForTask(t)
+        for t in task_names
+    )
+    experiment.num_games = total_games
+    db.commit()
+
+    for task_name in task_names:
+        total_vars = sw_env.getVariationsForTask(task_name)
+        num_vars = min(args.sw_variations, total_vars) if args.sw_variations else total_vars
+        for var_idx in range(num_vars):
+            game_no += 1
+            num_games_evaluated += 1
+
+            sw_env.load(task_name, var_idx)
+            obs, info = sw_env.reset()
+            adapter = ScienceWorldAdapter(sw_env, obs, info)
+            agent.set_environment(sw_env, obs, info, game_no, adapter=adapter)
+            log_paths = agent.log_paths
+
+            print(f"\n[Running Game #{game_no}] task={task_name} var={var_idx}")
+            chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+            cumulative_runtime += elapsed_minutes
+
+            raw_usage = autogen.gather_usage_summary(agent.group_chat.agents)
+            usage_data = (raw_usage or {}).get("usage_including_cached_inference", {})
+            game_prompt_tokens = sum(
+                v.get("prompt_tokens", 0) for v in usage_data.values() if isinstance(v, dict)
+            )
+            game_completion_tokens = sum(
+                v.get("completion_tokens", 0) for v in usage_data.values() if isinstance(v, dict)
+            )
+            game_total_tokens = game_prompt_tokens + game_completion_tokens
+            game_total_cost = usage_data.get("total_cost", 0.0)
+            game_usage = usage_data
+            if game_usage:
+                total_run_usage["prompt_tokens"] += game_prompt_tokens
+                total_run_usage["completion_tokens"] += game_completion_tokens
+                total_run_usage["total_tokens"] += game_total_tokens
+                total_run_usage["total_cost"] += game_total_cost
+                wandb.log(
+                    {"game/total_tokens": game_total_tokens, "game/cost": game_total_cost},
+                    step=num_games_evaluated,
+                )
+
+            if error_message:
+                error_list.append(game_no)
+                with open(log_paths["error_message_path"], "a") as f:
+                    f.write(f"Run Chat: {error_message}\n")
+
+            if chat_result and getattr(chat_result, "chat_history", []):
+                with open(log_paths["chat_history_path"], "w") as f:
+                    for message in chat_result.chat_history:
+                        f.write("-" * 20 + "\n")
+                        for key in ["name", "role", "content"]:
+                            if key in message:
+                                f.write(
+                                    f"{key}:\n{message[key]}\n"
+                                    if key == "content"
+                                    else f"{key}: {message[key]}\n"
+                                )
+                        for k, v in message.items():
+                            if k not in ["name", "role", "content"]:
+                                f.write(f"{k}: {v}\n")
+                chat_round_list.append(len(chat_result.chat_history))
+            else:
+                chat_round_list.append(-1)
+                with open(log_paths["chat_history_path"], "w") as f:
+                    f.write("Error Message: no chat history in chat result\n")
+
+            with open(log_paths["chat_history_path"]) as f:
+                chat_text = f.read()
+
+            transitions, belief_matches = extract_chat_metadata(chat_text)
+
+            transition_path = os.path.join(
+                os.path.dirname(log_paths["chat_history_path"]), "transition_log.json"
+            )
+            with open(transition_path, "w") as f:
+                json.dump(transitions, f, indent=2)
+
+            agent.prev_episodic_memories.append(
+                {
+                    "episode_number": num_games_evaluated,
+                    "task_outcome": agent.task_status,
+                    "memory": belief_matches if belief_matches else agent.curr_episodic_memory,
+                }
+            )
+
+            s3_key = None
+            try:
+                _s3_key = f"experiments/run_{experiment.id}/game_{game_no}_chat.txt"
+                s3.put_object(
+                    Bucket=BUCKET_NAME,
+                    Key=_s3_key,
+                    Body=chat_text.encode("utf-8"),
+                    ContentType="text/plain",
+                )
+                s3_key = _s3_key
+                print(f"☁️ Uploaded chat history to S3: {s3_key}")
+            except Exception as e:
+                print(f"⚠️ S3 upload failed: {e}")
+
+            success = agent.success
+            if success:
+                num_successes += 1
+                success_list.append(game_no)
+                cumulative_successful_actions += agent.num_actions_taken
+                cumulative_successful_chat_rounds += chat_round_list[-1]
+                cumulative_successful_runtime += elapsed_minutes
+                avg_actions_taken_per_successful_game = cumulative_successful_actions / num_successes
+                avg_chat_rounds_per_successful_game = cumulative_successful_chat_rounds / num_successes
+                avg_runtime_per_successful_game = cumulative_successful_runtime / num_successes
+            else:
+                num_failures = num_games_evaluated - num_successes
+                failure_list.append(game_no)
+                cumulative_failing_actions += agent.num_actions_taken
+                cumulative_failing_chat_rounds += chat_round_list[-1]
+                cumulative_failing_runtime += elapsed_minutes
+                avg_actions_taken_per_failing_game = cumulative_failing_actions / num_failures
+                avg_chat_rounds_per_failing_game = cumulative_failing_chat_rounds / num_failures
+                avg_runtime_per_failing_game = cumulative_failing_runtime / num_failures
+
+            success_rate = num_successes / num_games_evaluated
+            num_games_no_error = num_games_evaluated - len(
+                [g for g in error_list if g not in success_list]
+            )
+            error_adjusted_success_rate = (
+                num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
+            )
+
+            wandb.log(
+                {
+                    "task_name": task_name,
+                    "var_idx": var_idx,
+                    "game_no": game_no,
+                    "success": int(success),
+                    "actions_taken": agent.num_actions_taken,
+                    "success_rate": success_rate,
+                    "runtime": elapsed_minutes,
+                    "cumulative_runtime": cumulative_runtime,
+                    "chat_rounds": chat_round_list[-1],
+                    "error_adjusted_success_rate": error_adjusted_success_rate,
+                    "final/total_tokens": total_run_usage["total_tokens"],
+                    "final/total_cost": total_run_usage["total_cost"],
+                },
+                step=num_games_evaluated,
+            )
+
+            concept_matches = re.findall(r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL)
+            concept_matches = [c.strip() for c in concept_matches]
+            concept_matches = [c for c in concept_matches if not c.upper().startswith("NO CONCEPT")]
+
+            try:
+                experiment.total_tokens = total_run_usage["total_tokens"]
+                experiment.total_cost = total_run_usage["total_cost"]
+                experiment.prompt_tokens = int(total_run_usage["prompt_tokens"])
+                experiment.completion_tokens = int(total_run_usage["completion_tokens"])
+                db.commit()
+            except Exception as e:
+                print(f"⚠️ Database logging failed: {e}")
+                db.rollback()
+
+            episode = EpisodeRun(
+                experiment_id=experiment.id,
+                game_number=game_no,
+                success=bool(success),
+                actions_taken=agent.num_actions_taken,
+                chat_rounds=chat_round_list[-1],
+                runtime_minutes=elapsed_minutes,
+                error_message=str(error_message) if error_message else None,
+                transitions={"transitions": transitions},
+                belief_state={
+                    "memory": belief_matches if belief_matches else agent.curr_episodic_memory
+                },
+                task=agent.task,
+                task_type=agent.adapter.infer_task_type(),
+                inadmissible_action_count=agent.adapter.count_inadmissible_actions(
+                    log_paths["history_path"]
+                ),
+                concepts_learned=concept_matches if concept_matches else None,
+                prompt_tokens=game_prompt_tokens if game_usage else None,
+                completion_tokens=game_completion_tokens if game_usage else None,
+                episode_cost=game_total_cost if game_usage else None,
+                success_rate=success_rate,
+                error_adjusted_success_rate=error_adjusted_success_rate,
+                chat_history_s3_key=s3_key,
+            )
+            db.add(episode)
+            db.commit()
+            print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
+
+            print(f"[Ran Game #{game_no}] task={task_name} var={var_idx}")
+            print(f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m")
+            print(f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%")
+
+    experiment.end_time = datetime.now(UTC)
+    experiment.total_runtime_minutes = cumulative_runtime
+    experiment.success_rate = success_rate if num_games_evaluated else 0.0
+    experiment.error_adjusted_success_rate = error_adjusted_success_rate
+    experiment.num_errors = len(error_list)
+    experiment.avg_actions_per_successful_game = avg_actions_taken_per_successful_game
+    experiment.avg_chat_rounds_per_successful_game = avg_chat_rounds_per_successful_game
+    experiment.avg_runtime_per_successful_game = avg_runtime_per_successful_game
+    experiment.avg_actions_per_failing_game = avg_actions_taken_per_failing_game
+    experiment.avg_chat_rounds_per_failing_game = avg_chat_rounds_per_failing_game
+    experiment.avg_runtime_per_failing_game = avg_runtime_per_failing_game
+    db.commit()
+    print("✅ ScienceWorld experiment finalized in the database.")
+
+    print(
+        f"Final Success Rate: {num_successes}/{num_games_evaluated} = "
+        f"{100 * (num_successes / num_games_evaluated if num_games_evaluated else 0):.2f}%"
+    )
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -343,6 +596,15 @@ def main():
         rag_concept_k_initial=args.rag_concept_k_initial,
         args=args,
     )
+
+    if args.env_type == "scienceworld":
+        db = SessionLocal()
+        try:
+            run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db)
+        finally:
+            db.close()
+        wandb.finish()
+        return
 
     eval_splits = args.splits or config["general"]["evaluate"]["splits"]
     eval_envs = config["general"]["evaluate"]["envs"]
@@ -757,8 +1019,8 @@ def main():
                                 else agent.curr_episodic_memory
                             },
                             task=agent.task,
-                            task_type=infer_task_type(agent.task),
-                            inadmissible_action_count=count_inadmissible_actions(
+                            task_type=agent.adapter.infer_task_type(),
+                            inadmissible_action_count=agent.adapter.count_inadmissible_actions(
                                 log_paths["history_path"]
                             ),
                             concepts_learned=concept_matches

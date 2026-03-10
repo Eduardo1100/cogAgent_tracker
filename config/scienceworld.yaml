@@ -1,0 +1,4 @@
+env:
+  type: scienceworld
+  tasks: null          # null = all tasks
+  variations: 5        # default per-task variation count

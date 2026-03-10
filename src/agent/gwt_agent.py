@@ -12,6 +12,7 @@ from autogen.agentchat.contrib.capabilities.transforms import MessageHistoryLimi
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
+from src.agent.env_adapter import ALFWorldAdapter
 from src.agent.helpers import (
     ConvertOrphanedToolMessages,
     FlattenToolMessages,
@@ -38,7 +39,7 @@ class GWTAutogenAgent(AutogenAgent):
         log_path,
         game_no=1,
         max_chat_round=200,
-        max_actions=40,
+        max_actions=35,
         rounds_per_game=1,
         rag_episode_k=4,
         rag_concept_k=5,
@@ -125,10 +126,11 @@ class GWTAutogenAgent(AutogenAgent):
 
         return _check
 
-    def set_environment(self, env, obs, info, game_no):
+    def set_environment(self, env, obs, info, game_no, adapter=None):
+        self.adapter = (
+            adapter if adapter is not None else ALFWorldAdapter(env, obs, info)
+        )
         self.env = env
-        self.obs = obs
-        self.info = info
         self.game_no = game_no
 
         self.register_game_log_paths()
@@ -170,8 +172,8 @@ class GWTAutogenAgent(AutogenAgent):
         # stays valid across games as long as memory is unchanged.
         self._episodic_rag_cache.clear()
         self._concept_rag_cache.clear()
-        self.task = obs[0].split("Your task is to: ")[1]
-        self.admissible_actions = list(self.info["admissible_commands"][0])
+        self.task = self.adapter.task
+        self.admissible_actions = self.adapter.admissible_actions
         self.task_status = "INCOMPLETE"
         self.curr_episodic_memory = []
         self.retrieve_memory()
@@ -182,7 +184,7 @@ class GWTAutogenAgent(AutogenAgent):
         with open(self.log_paths["task_path"], "w") as f:
             f.write(f"Task: {self.task}\n")
 
-        initial_observation = self.obs[0].split("Your task is to: ")[0].split("\n\n")[1]
+        initial_observation = self.adapter.initial_observation
         with open(self.log_paths["history_path"], "w") as f:
             f.write(f"action: 'None'. observation: '{initial_observation}'\n")
 
@@ -191,7 +193,7 @@ class GWTAutogenAgent(AutogenAgent):
 
     def update_percept(self, action):
 
-        curr_admissible = list(self.info["admissible_commands"][0])
+        curr_admissible = self.adapter.admissible_actions
         no_longer = sorted(set(self.admissible_actions) - set(curr_admissible))
         newly_added = sorted(set(curr_admissible) - set(self.admissible_actions))
         self.admissible_actions = curr_admissible
@@ -199,7 +201,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.percept = {
             "timestep": self.num_actions_taken,
             "attempted_action": action,
-            "resulting_observation": self.obs[0],
+            "resulting_observation": self.adapter.observation,
             "task_status": self.task_status,
             "action_attempts_left": self.max_actions - self.num_actions_taken,
         }
@@ -655,20 +657,20 @@ class GWTAutogenAgent(AutogenAgent):
                 self.task_failed = False
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
 
-            admissible_commands = list(self.info["admissible_commands"][0])
+            admissible_commands = self.adapter.admissible_actions
             assert admissible_commands, "No admissible commands found."
 
             action, action_score = get_best_candidate(
                 suggested_action, admissible_commands
             )
             if action_score < 0.98:
-                self.obs = [
+                self.adapter._obs = [
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
                 ]
                 # Inadmissible actions don't consume the action budget
             else:
-                self.obs, _, __, self.info = self.env.step([action])
-                self.success = self.info["won"][0]
+                self.adapter.step(action)
+                self.success = self.adapter.has_won
                 self.num_actions_taken += 1
 
             reflection = ""
@@ -693,7 +695,9 @@ class GWTAutogenAgent(AutogenAgent):
             with open(self.log_paths["admissible_commands_path"], "a+") as f:
                 f.write(f"{self.admissible_actions}\n")
             with open(self.log_paths["history_path"], "a+") as f:
-                f.write(f"action: '{suggested_action}'. observation: '{self.obs[0]}'\n")
+                f.write(
+                    f"action: '{suggested_action}'. observation: '{self.adapter.observation}'\n"
+                )
 
             return json.dumps(self.percept) + reflection
 
