@@ -40,7 +40,9 @@ def get_git_commit() -> str | None:
 
 def get_git_branch() -> str | None:
     try:
-        return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+        return subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
+        ).strip()
     except Exception:
         return None
 
@@ -72,7 +74,9 @@ def count_inadmissible_actions(history_path: str) -> int:
     """Count how many times the agent attempted a non-admissible action."""
     try:
         with open(history_path) as f:
-            return sum(1 for line in f if "not in the list of admissible actions" in line)
+            return sum(
+                1 for line in f if "not in the list of admissible actions" in line
+            )
     except Exception:
         return 0
 
@@ -215,33 +219,45 @@ def parse_arguments():
         "--long_term_guidance", action="store_true", help="Enable long-term guidance"
     )
     parser.add_argument(
-        "--num_games", type=int, default=-1,
+        "--num_games",
+        type=int,
+        default=-1,
         help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
-        "--max_actions", type=int, default=30, help="Max environment actions per game"
+        "--max_actions", type=int, default=35, help="Max environment actions per game"
     )
     parser.add_argument(
-        "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
+        "--max_chat_rounds", type=int, default=200, help="Max chat rounds per game"
     )
     parser.add_argument(
-        "--rag_episode_k", type=int, default=5,
+        "--rag_episode_k",
+        type=int,
+        default=5,
         help="Episodes retrieved by retrieve_memory() (mid-game RAG call)",
     )
     parser.add_argument(
-        "--rag_concept_k", type=int, default=5,
+        "--rag_concept_k",
+        type=int,
+        default=5,
         help="Knowledge concepts retrieved by retrieve_memory() (mid-game RAG call)",
     )
     parser.add_argument(
-        "--rag_episode_k_initial", type=int, default=10,
+        "--rag_episode_k_initial",
+        type=int,
+        default=10,
         help="Episodes injected in the initial message (start-of-game RAG)",
     )
     parser.add_argument(
-        "--rag_concept_k_initial", type=int, default=5,
+        "--rag_concept_k_initial",
+        type=int,
+        default=5,
         help="Knowledge concepts injected in the initial message (start-of-game RAG)",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=int,
+        default=None,
         help="Random seed for game selection (default: None = truly random).",
     )
     parser.add_argument(
@@ -262,7 +278,7 @@ def parse_arguments():
         default=None,
         choices=[1, 2, 3, 4, 5, 6],
         help="Run one random game of this task type (debug mode). "
-             "1=pick&place 2=examine 3=clean 4=heat 5=cool 6=pick-two.",
+        "1=pick&place 2=examine 3=clean 4=heat 5=cool 6=pick-two.",
     )
     return parser.parse_args()
 
@@ -413,7 +429,9 @@ def main():
                     selected_games = sorted(
                         int(g.strip()) for g in args.game_ids.split(",") if g.strip()
                     )
-                    invalid = [g for g in selected_games if not (1 <= g <= total_num_games)]
+                    invalid = [
+                        g for g in selected_games if not (1 <= g <= total_num_games)
+                    ]
                     if invalid:
                         raise ValueError(
                             f"Game IDs out of range [1, {total_num_games}]: {invalid}"
@@ -440,7 +458,9 @@ def main():
                     else:
                         num_games_to_evaluate = min(args.num_games, total_num_games)
                         selected_games = sorted(
-                            random.sample(range(1, total_num_games + 1), num_games_to_evaluate)
+                            random.sample(
+                                range(1, total_num_games + 1), num_games_to_evaluate
+                            )
                         )
 
                 print(f"Selected {num_games_to_evaluate} Games: {selected_games}")
@@ -499,7 +519,9 @@ def main():
                         json.dumps(agent.agents_info),
                         expire=86400,
                     )
-                    print(f"✅ Logged agents_config for Experiment Run ID: {experiment.id}")
+                    print(
+                        f"✅ Logged agents_config for Experiment Run ID: {experiment.id}"
+                    )
 
                     # ALFWorld cycles games sequentially; env.reset() must be called
                     # for every index to advance the environment state even for skips.
@@ -524,15 +546,27 @@ def main():
                         raw_usage = autogen.gather_usage_summary(
                             agent.group_chat.agents
                         )
-                        usage_data = (raw_usage or {}).get("usage_including_cached_inference", {})
-                        game_prompt_tokens = sum(v.get("prompt_tokens", 0) for v in usage_data.values() if isinstance(v, dict))
-                        game_completion_tokens = sum(v.get("completion_tokens", 0) for v in usage_data.values() if isinstance(v, dict))
+                        usage_data = (raw_usage or {}).get(
+                            "usage_including_cached_inference", {}
+                        )
+                        game_prompt_tokens = sum(
+                            v.get("prompt_tokens", 0)
+                            for v in usage_data.values()
+                            if isinstance(v, dict)
+                        )
+                        game_completion_tokens = sum(
+                            v.get("completion_tokens", 0)
+                            for v in usage_data.values()
+                            if isinstance(v, dict)
+                        )
                         game_total_tokens = game_prompt_tokens + game_completion_tokens
                         game_total_cost = usage_data.get("total_cost", 0.0)
                         game_usage = usage_data  # truthy check below
                         if game_usage:
                             total_run_usage["prompt_tokens"] += game_prompt_tokens
-                            total_run_usage["completion_tokens"] += game_completion_tokens
+                            total_run_usage["completion_tokens"] += (
+                                game_completion_tokens
+                            )
                             total_run_usage["total_tokens"] += game_total_tokens
                             total_run_usage["total_cost"] += game_total_cost
                             wandb.log(
@@ -600,7 +634,9 @@ def main():
                         # Upload to S3
                         s3_key = None
                         try:
-                            _s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
+                            _s3_key = (
+                                f"experiments/run_{experiment.id}/game_{i}_chat.txt"
+                            )
                             s3.put_object(
                                 Bucket=BUCKET_NAME,
                                 Key=_s3_key,
@@ -687,8 +723,12 @@ def main():
                         try:
                             experiment.total_tokens = total_run_usage["total_tokens"]
                             experiment.total_cost = total_run_usage["total_cost"]
-                            experiment.prompt_tokens = int(total_run_usage["prompt_tokens"])
-                            experiment.completion_tokens = int(total_run_usage["completion_tokens"])
+                            experiment.prompt_tokens = int(
+                                total_run_usage["prompt_tokens"]
+                            )
+                            experiment.completion_tokens = int(
+                                total_run_usage["completion_tokens"]
+                            )
                             db.commit()
                             print(
                                 f"✅ Database updated for Run ID: {experiment.id}"
@@ -719,9 +759,13 @@ def main():
                             inadmissible_action_count=count_inadmissible_actions(
                                 log_paths["history_path"]
                             ),
-                            concepts_learned=concept_matches if concept_matches else None,
+                            concepts_learned=concept_matches
+                            if concept_matches
+                            else None,
                             prompt_tokens=game_prompt_tokens if game_usage else None,
-                            completion_tokens=game_completion_tokens if game_usage else None,
+                            completion_tokens=game_completion_tokens
+                            if game_usage
+                            else None,
                             episode_cost=game_total_cost if game_usage else None,
                             success_rate=success_rate,
                             error_adjusted_success_rate=error_adjusted_success_rate,
@@ -787,12 +831,24 @@ def main():
                     experiment.success_rate = success_rate
                     experiment.error_adjusted_success_rate = error_adjusted_success_rate
                     experiment.num_errors = len(error_list)
-                    experiment.avg_actions_per_successful_game = avg_actions_taken_per_successful_game
-                    experiment.avg_chat_rounds_per_successful_game = avg_chat_rounds_per_successful_game
-                    experiment.avg_runtime_per_successful_game = avg_runtime_per_successful_game
-                    experiment.avg_actions_per_failing_game = avg_actions_taken_per_failing_game
-                    experiment.avg_chat_rounds_per_failing_game = avg_chat_rounds_per_failing_game
-                    experiment.avg_runtime_per_failing_game = avg_runtime_per_failing_game
+                    experiment.avg_actions_per_successful_game = (
+                        avg_actions_taken_per_successful_game
+                    )
+                    experiment.avg_chat_rounds_per_successful_game = (
+                        avg_chat_rounds_per_successful_game
+                    )
+                    experiment.avg_runtime_per_successful_game = (
+                        avg_runtime_per_successful_game
+                    )
+                    experiment.avg_actions_per_failing_game = (
+                        avg_actions_taken_per_failing_game
+                    )
+                    experiment.avg_chat_rounds_per_failing_game = (
+                        avg_chat_rounds_per_failing_game
+                    )
+                    experiment.avg_runtime_per_failing_game = (
+                        avg_runtime_per_failing_game
+                    )
                     db.commit()
                     print("✅ Experiment securely finalized in the database.")
 

@@ -28,13 +28,14 @@ class GWTAutogenAgent(AutogenAgent):
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled)\b"
     )
+
     def __init__(
         self,
         llm_profile,
         log_path,
         game_no=1,
-        max_chat_round=400,
-        max_actions=30,
+        max_chat_round=200,
+        max_actions=35,
         rounds_per_game=1,
         rag_episode_k=5,
         rag_concept_k=5,
@@ -132,7 +133,9 @@ class GWTAutogenAgent(AutogenAgent):
         self.cluster_knowledge()
 
         self.num_actions_taken = 0
-        self.max_actions = self._initial_max_actions - self.max_round_actions * (self.rounds - 1)
+        self.max_actions = self._initial_max_actions - self.max_round_actions * (
+            self.rounds - 1
+        )
         self.rounds_left = self.rounds
         self.task_failed = False
         self.task_success = False
@@ -144,20 +147,21 @@ class GWTAutogenAgent(AutogenAgent):
         self._consecutive_thinking_count = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
-        # Reset GroupChat max_round in case stale-termination capped it last game.
-        if self.group_chat is not None:
-            self.group_chat.max_round = self.max_chat_round
         # Reset echo agent relay state so stale_count from the previous game
         # doesn't fire false system errors at the start of a new game.
         if self.echo_agent is not None and hasattr(self.echo_agent, "_relay_state"):
             self.echo_agent._relay_state["stale_count"] = 0
             self.echo_agent._relay_state["last_obs"] = None
-        # Clear GroupChat message history and all agent chat histories so game 1
-        # context doesn't bleed into subsequent games.
+        # Clear all agent _oai_messages so game 1 context doesn't bleed into game 2.
         if self.group_chat is not None:
-            self.group_chat.messages.clear()
             for agent in self.group_chat.agents:
                 agent.clear_history()
+        # Recreate GroupChat and GroupChatManager so game 2 starts with a completely
+        # clean slate.  GroupChatManager accumulates _oai_messages keyed by every
+        # agent it spoke with; without reinit those 100+ rounds of stale history
+        # bleed into game 2 and can cause the first LLM call to hang.  max_round is
+        # set to self.max_chat_round inside _reinit_groupchat().
+        self._reinit_groupchat()
         # Clear per-game RAG caches so stale embeddings don't pollute retrieval.
         self._episodic_rag_cache.clear()
         self._concept_rag_cache.clear()
@@ -276,7 +280,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Motor_Agent",
             system_message=_PROMPTS["motor_agent"],
             description="Motor_Agent calls the 'execute_action' function with the best admissible action as the argument.",
-            llm_config=standard_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -316,7 +320,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Belief_State_Agent",
             system_message=_PROMPTS["belief_state_agent"],
             description="Belief_State_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
-            llm_config=standard_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=self._make_belief_state_termination_fn(),
         )
@@ -377,7 +381,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Learning_Agent",
             system_message=_PROMPTS["learning_agent"],
             description="Learning_Agent forms or reinforces generalizable concepts only after successful, observed actions or contrastive outcomes. Prioritizes novel discovery and integrates belief state-based abstraction.",
-            llm_config=standard_config,
+            llm_config=reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -402,22 +406,25 @@ class GWTAutogenAgent(AutogenAgent):
         self.start_agent = self.external_perception_agent
 
         self.allowed_transitions = {
-            self.planning_agent: [self.motor_agent],
+            self.planning_agent: [],
             self.motor_agent: [self.external_perception_agent],
             # CHANGE: Route through Echo_Agent to broadcast tool results
             # Route through Echo_Agent to broadcast tool results as plain text
             self.external_perception_agent: [self.echo_agent],
             self.echo_agent: [self.belief_state_agent],
             self.belief_state_agent: [
-                self.planning_agent,
+                self.motor_agent,
                 self.retrieve_memory_agent,
                 self.focus_agent,
                 self.learning_agent,
                 self.thinking_agent,
             ],
             self.retrieve_memory_agent: [self.internal_perception_agent_3],
-            self.internal_perception_agent_3: [self.thinking_agent, self.learning_agent],
-            self.thinking_agent: [self.planning_agent],
+            self.internal_perception_agent_3: [
+                self.thinking_agent,
+                self.learning_agent,
+            ],
+            self.thinking_agent: [self.motor_agent],
             self.learning_agent: [self.record_long_term_memory_agent],
             self.record_long_term_memory_agent: [self.internal_perception_agent_1],
             self.internal_perception_agent_1: [self.thinking_agent],
@@ -460,20 +467,9 @@ class GWTAutogenAgent(AutogenAgent):
                 valid_next = [s for s in next_speakers if s.name in active_agent_names]
                 filtered_transitions[speaker] = valid_next
 
-        # 4. Initialize GroupChat and Manager
-        self.group_chat = GroupChat(
-            agents=active_agents,
-            messages=[],
-            allowed_or_disallowed_speaker_transitions=filtered_transitions,
-            speaker_transitions_type="allowed",
-            max_round=self.max_chat_round,
-            speaker_selection_method=self.custom_speaker_selection,
-        )
-
-        self.group_chat_manager = GroupChatManager(
-            groupchat=self.group_chat,
-            llm_config=self.llm_config_list[0],
-        )
+        # Store topology so _reinit_groupchat() can rebuild GroupChat/Manager each game.
+        self._active_agents = active_agents
+        self._filtered_transitions = filtered_transitions
 
         # 5 JIT SCRUBBING (Input Protection for LLMs)
         # Use TransformMessages (applied just before the API call, on the correct
@@ -487,7 +483,7 @@ class GWTAutogenAgent(AutogenAgent):
         # execute_action() — breaking the observation relay for the rest of the game.
         # Motor_Agent only needs the history limiter; it uses a standard
         # OpenAI-compatible model that handles tool_calls natively.
-        scrubbed_agents = [
+        cognitive_agents_to_scrub = [
             self.planning_agent,
             self.thinking_agent,
             self.belief_state_agent,
@@ -495,18 +491,19 @@ class GWTAutogenAgent(AutogenAgent):
             self.learning_agent,
             self.record_long_term_memory_agent,
             self.focus_agent,
-            self.group_chat_manager,
         ]
 
-        full_scrubber = transform_messages.TransformMessages(
+        self._full_scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(max_messages=60),  # was 30 — doubled to prevent cliff-pruning
+                MessageHistoryLimiter(
+                    max_messages=60
+                ),  # was 30 — doubled to prevent cliff-pruning
                 FlattenToolMessages(),
             ]
         )
-        for agent in scrubbed_agents:
+        for agent in cognitive_agents_to_scrub:
             if agent is not None:
-                full_scrubber.add_to_agent(agent)
+                self._full_scrubber.add_to_agent(agent)
 
         # Motor_Agent must NOT have MessageHistoryLimiter: trimming its context
         # causes ConvertOrphanedToolMessages to strip the tool_call/response pairs,
@@ -518,6 +515,44 @@ class GWTAutogenAgent(AutogenAgent):
         )
         if self.motor_agent is not None:
             motor_scrubber.add_to_agent(self.motor_agent)
+
+        # 4. Initialize GroupChat and Manager (also called each game via _reinit_groupchat).
+        self._reinit_groupchat()
+
+    def _reinit_groupchat(self):
+        """Create a fresh GroupChat and GroupChatManager for the upcoming game.
+
+        Called once at startup (from initialize_groupchat) and again at the start
+        of every subsequent game (from set_environment).  Recreating these objects
+        gives each game a completely clean slate — GroupChatManager accumulates
+        _oai_messages keyed by every agent it spoke with, so without reinit the
+        second game inherits 100+ rounds of stale history that can cause the first
+        LLM call to hang or produce corrupted responses.
+
+        Cognitive-agent transforms (_full_scrubber, motor_scrubber) are registered
+        directly on agent objects and survive across games; only the GroupChatManager's
+        scrubber registration must be repeated here for the new manager instance.
+        """
+        self.group_chat = GroupChat(
+            agents=self._active_agents,
+            messages=[],
+            allowed_or_disallowed_speaker_transitions=self._filtered_transitions,
+            speaker_transitions_type="allowed",
+            max_round=self.max_chat_round,
+            speaker_selection_method=self.custom_speaker_selection,
+        )
+
+        self.group_chat_manager = GroupChatManager(
+            groupchat=self.group_chat,
+            llm_config=self.llm_config_list[0],
+        )
+
+        # Register the full scrubber on the new GroupChatManager instance.
+        # (GroupChatManager is not in _active_agents so it was excluded from the
+        # cognitive-agent scrubber loop above; it needs the scrubber for the rare
+        # cases where speaker_selection_method falls back to "auto".)
+        if hasattr(self, "_full_scrubber") and self._full_scrubber is not None:
+            self._full_scrubber.add_to_agent(self.group_chat_manager)
 
     def register_log_paths(self):
 
@@ -909,10 +944,16 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         relevant_knowledge = retrieve_relevant_concepts(
-            self.knowledge, self.task, k=self.rag_concept_k_initial, cache=self._concept_rag_cache
+            self.knowledge,
+            self.task,
+            k=self.rag_concept_k_initial,
+            cache=self._concept_rag_cache,
         )
         relevant_episodes = retrieve_relevant_episodes(
-            self.prev_episodic_memories, self.task, k=self.rag_episode_k_initial, cache=self._episodic_rag_cache
+            self.prev_episodic_memories,
+            self.task,
+            k=self.rag_episode_k_initial,
+            cache=self._episodic_rag_cache,
         )
         memory_section = "--- PRIOR KNOWLEDGE & EPISODIC MEMORY ---\n"
         memory_section += (
@@ -954,7 +995,10 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         relevant_episodes = retrieve_relevant_episodes(
-            self.prev_episodic_memories, query, k=self.rag_episode_k, cache=self._episodic_rag_cache
+            self.prev_episodic_memories,
+            query,
+            k=self.rag_episode_k,
+            cache=self._episodic_rag_cache,
         )
         relevant_knowledge = retrieve_relevant_concepts(
             self.knowledge, query, k=self.rag_concept_k, cache=self._concept_rag_cache
@@ -996,21 +1040,25 @@ class GWTAutogenAgent(AutogenAgent):
                 return executors[0]
             return self.echo_agent
 
-        # Stuck-state early termination: if num_actions_taken hasn't changed for
-        # 8 consecutive speaker-selection calls, force termination to avoid burning
-        # tokens on a stalled game (e.g. Motor_Agent outputting plain text).
-        if self.num_actions_taken == self._last_seen_actions_taken:
-            self._stale_action_count += 1
-        else:
-            self._stale_action_count = 0
-            self._last_seen_actions_taken = self.num_actions_taken
-        print(f"[STALE_DBG] actions={self.num_actions_taken} last_seen={self._last_seen_actions_taken} stale_count={self._stale_action_count} max_round={self.group_chat.max_round} msgs={len(messages)} last_speaker={last_speaker.name} role={last_msg.get('role')} has_tc={'tool_calls' in last_msg}", flush=True)
-        if self._stale_action_count >= 8:
-            # +1 so the termination check (i == max_round - 1) fires on the NEXT
-            # AutoGen iteration. Setting len(messages) would target the current i
-            # which has already passed the check point in the loop.
-            self.group_chat.max_round = len(messages) + 1
-            print(f"[STALE_DBG] TERMINATING: set max_round={self.group_chat.max_round}", flush=True)
+        # Stuck-state early termination: tick _stale_action_count exactly once
+        # per complete observation relay — i.e. only when echo_agent just spoke.
+        # That way the count equals the number of full action cycles (Motor →
+        # External_Perception → Echo) during which no new execute_action call
+        # was made, giving a clean semantic: "8 stale rounds = 8 full cycles
+        # with no admissible action executed."
+        if last_speaker is self.echo_agent:
+            if self.num_actions_taken == self._last_seen_actions_taken:
+                self._stale_action_count += 1
+            else:
+                self._stale_action_count = 0
+                self._last_seen_actions_taken = self.num_actions_taken
+            if self._stale_action_count >= 8:
+                # +1: the AutoGen termination check (i == max_round - 1) runs
+                # BEFORE select_speaker, so we target the NEXT iteration.
+                # Guard: only reduce max_round, never increase it.
+                new_cap = len(messages) + 1
+                if self.group_chat.max_round > new_cap:
+                    self.group_chat.max_round = new_cap
 
         # Standard Graph Transitions
         possible_speakers = self.allowed_transitions.get(last_speaker, [])
@@ -1035,18 +1083,24 @@ class GWTAutogenAgent(AutogenAgent):
             and not self.task_failed
         ):
             current_content = last_msg.get("content") or ""
-            if self._UNCERTAINTY_RE.search(current_content.lower()) or "no observation" in current_content.lower():
-                if current_content == self._last_belief_content and self._consecutive_thinking_count >= 1:
+            if (
+                self._UNCERTAINTY_RE.search(current_content.lower())
+                or "no observation" in current_content.lower()
+            ):
+                if (
+                    current_content == self._last_belief_content
+                    and self._consecutive_thinking_count >= 1
+                ):
                     # Identical belief state fired again — skip Thinking_Agent
                     self._consecutive_thinking_count = 0
                     self._last_belief_content = ""
-                    return self.planning_agent
+                    return self.motor_agent
                 self._last_belief_content = current_content
                 self._consecutive_thinking_count += 1
                 return self.thinking_agent
             self._last_belief_content = ""
             self._consecutive_thinking_count = 0
-            return self.planning_agent
+            return self.motor_agent
 
         # Safety valve: if the task is done and the conversation is still
         # running (e.g. Motor_Agent stuck outputting text instead of calling
@@ -1055,7 +1109,9 @@ class GWTAutogenAgent(AutogenAgent):
             if not hasattr(self, "_task_done_msg_count"):
                 self._task_done_msg_count = len(messages)
             elif len(messages) > self._task_done_msg_count + 12:
-                self.group_chat.max_round = len(messages) + 1
+                new_cap = len(messages) + 1
+                if self.group_chat.max_round > new_cap:
+                    self.group_chat.max_round = new_cap
 
         if len(possible_speakers) == 1:
             return possible_speakers[0]
