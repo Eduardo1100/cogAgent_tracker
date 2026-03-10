@@ -26,7 +26,10 @@ from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_e
 class GWTAutogenAgent(AutogenAgent):
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
-        r"contradictory|ambiguous|stalled)\b"
+        r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
+        r"|do\s+not\s+know|don't\s+know|need\s+to\s+(?:verify|check|confirm)"
+        r"|may\s+(?:be|need)|might\s+(?:be|need))\b",
+        re.IGNORECASE,
     )
 
     def __init__(
@@ -35,11 +38,11 @@ class GWTAutogenAgent(AutogenAgent):
         log_path,
         game_no=1,
         max_chat_round=200,
-        max_actions=35,
+        max_actions=40,
         rounds_per_game=1,
-        rag_episode_k=5,
+        rag_episode_k=4,
         rag_concept_k=5,
-        rag_episode_k_initial=10,
+        rag_episode_k_initial=4,
         rag_concept_k_initial=5,
         args=None,
         env=None,
@@ -478,7 +481,9 @@ class GWTAutogenAgent(AutogenAgent):
 
         self._full_scrubber = transform_messages.TransformMessages(
             transforms=[
-                MessageHistoryLimiter(max_messages=60),  # was 50; raised to reduce cliff-pruning
+                MessageHistoryLimiter(
+                    max_messages=60
+                ),  # was 50; raised to reduce cliff-pruning
                 FlattenToolMessages(),
             ]
         )
@@ -677,11 +682,11 @@ class GWTAutogenAgent(AutogenAgent):
             if self.task_status == "COMPLETED":
                 self.task_success = True
                 self.rounds_left -= 1
-                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Try to figure out what went right and what good decisions were made that lead to success, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Action_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Identify what went right and what good decisions led to success. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
             elif self.task_status == "FAILED":
                 self.task_failed = True
                 self.rounds_left -= 1
-                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Try to figure out what went wrong and what mistakes were made that lead to failure, and have Learning_Agent learn any helpful generalizable insights. When you are done and ready for the next task, have Action_Agent call the 'execute_action' function with any action as the argument, for example ACTION: [end chat]."
+                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
 
             self.update_percept(suggested_action)
 

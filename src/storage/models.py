@@ -40,7 +40,6 @@ class ExperimentRun(Base):
     )  # e.g., "GWTAutogenAgent"
     llm_model: Mapped[str] = mapped_column(String(50))  # e.g., "gpt-4o"
     eval_env_type: Mapped[str] = mapped_column(String(100))  # e.g., "AlfredThorEnv"
-    long_term_guidance: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Global Limits
     max_actions_per_game: Mapped[int] = mapped_column(Integer)

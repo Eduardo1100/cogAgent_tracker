@@ -216,16 +216,13 @@ def parse_arguments():
     group.add_argument("--gwt", action="store_true", help="Use GWTAutogenAgent")
 
     parser.add_argument(
-        "--long_term_guidance", action="store_true", help="Enable long-term guidance"
-    )
-    parser.add_argument(
         "--num_games",
         type=int,
         default=-1,
         help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
-        "--max_actions", type=int, default=35, help="Max environment actions per game"
+        "--max_actions", type=int, default=40, help="Max environment actions per game"
     )
     parser.add_argument(
         "--max_chat_rounds", type=int, default=200, help="Max chat rounds per game"
@@ -497,7 +494,6 @@ def main():
                         agent_name=agent_name,
                         llm_model=llm_profile_name,
                         eval_env_type=eval_env_type,
-                        long_term_guidance=args.long_term_guidance,
                         max_actions_per_game=args.max_actions,
                         max_chat_rounds=args.max_chat_rounds,
                         start_time=datetime.now(UTC),
@@ -738,8 +734,14 @@ def main():
                             db.rollback()
 
                         concept_matches = re.findall(
-                            r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text
+                            r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
                         )
+                        concept_matches = [c.strip() for c in concept_matches]
+                        concept_matches = [
+                            c
+                            for c in concept_matches
+                            if not c.upper().startswith("NO CONCEPT")
+                        ]
                         episode = EpisodeRun(
                             experiment_id=experiment.id,
                             game_number=i,
