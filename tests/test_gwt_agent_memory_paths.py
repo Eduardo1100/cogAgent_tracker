@@ -1134,7 +1134,8 @@ def test_state_change_task_contract_separates_substance_from_transformation(tmp_
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
         "Your task is to melt water. First, focus on the substance. "
-        "Then, take actions that will cause it to change its state of matter."
+        "Then, take actions that will cause it to change its state of matter "
+        "without boiling or combusting it. Also, keep the substance intact."
     )
 
     contract = agent._get_task_contract()
@@ -1150,6 +1151,10 @@ def test_state_change_task_contract_separates_substance_from_transformation(tmp_
     assert "melt" not in contract["target_entities"]
     assert "actions" not in contract["target_entities"]
     assert "will" not in contract["target_entities"]
+    assert "without" not in contract["target_entities"]
+    assert "boiling" not in contract["target_entities"]
+    assert "combusting" not in contract["target_entities"]
+    assert "also" not in contract["target_entities"]
 
 
 def test_state_change_phase_moves_from_search_to_focus_to_transformation(tmp_path):
@@ -1280,3 +1285,341 @@ def test_state_change_shortlist_prefers_grounded_transformation_after_focus(tmp_
     assert "look at water" in shortlist
     assert "move picture to kitchen" not in shortlist
     assert "focus on picture" not in shortlist
+
+
+def test_state_change_canonicalizes_unsupported_substance_alias_to_grounded_container(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the kitchen. In it, you see a glass jar "
+        "(containing a substance called sodium chloride) and a cupboard."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+
+    canonical = agent._canonicalize_suggested_action(
+        "focus on jar containing salt water",
+        [
+            "focus on glass jar",
+            "focus on cupboard",
+            "look at glass jar",
+        ],
+    )
+
+    assert canonical == "focus on glass jar"
+
+
+def test_state_change_phase_switches_to_probe_sources_after_container_search(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a fridge, a cupboard, "
+            "a sink, and a kettle."
+        )
+    }
+    agent.admissible_actions = [
+        "look in fridge",
+        "look in cupboard",
+        "look at sink",
+        "activate sink",
+        "fill kettle from sink",
+    ]
+
+    agent._update_state_change_search_tracking(
+        action="look in fridge",
+        observation=(
+            "This room is called the kitchen. In it, you see a fridge, a cupboard, "
+            "a sink, and a kettle. In the fridge is a cup containing orange juice."
+        ),
+    )
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a fridge, a cupboard, "
+            "a sink, and a kettle. In the fridge is a cup containing orange juice."
+        )
+    }
+    agent._update_state_change_search_tracking(
+        action="look in cupboard",
+        observation=(
+            "This room is called the kitchen. In it, you see a fridge, a cupboard, "
+            "a sink, and a kettle. The cupboard contains a bowl."
+        ),
+    )
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a fridge, a cupboard, "
+            "a sink, and a kettle. The cupboard contains a bowl."
+        )
+    }
+
+    snapshot = agent._get_substance_search_snapshot()
+
+    assert agent._get_current_phase() == "probe_sources"
+    assert snapshot["exhausted_containers"] == ["fridge", "cupboard"]
+    assert "sink" in snapshot["source_candidates"]
+
+
+def test_state_change_shortlist_prefers_source_candidates_after_container_exhaustion(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._exhausted_container_targets = ["fridge", "cupboard"]
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a sink, a kettle, "
+            "a cupboard, and a fridge."
+        )
+    }
+    agent.admissible_actions = [
+        "look at sink",
+        "activate sink",
+        "fill kettle from sink",
+        "look in cupboard",
+        "open cupboard",
+        "move bowl to kitchen",
+        "focus on kitchen",
+    ]
+
+    summary = agent._summarize_admissible_actions(
+        agent.admissible_actions,
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "probe_sources"
+    assert "look at sink" in shortlist
+    assert "activate sink" in shortlist
+    assert "move bowl to kitchen" not in shortlist
+    assert "focus on kitchen" not in shortlist
+
+
+def test_measurement_task_contract_extracts_measurement_roles_and_cleans_tokens(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["measurement_task"] is True
+    assert contract["measurement_property"] == "melting point"
+    assert contract["measurement_target"] == ["solid unknown substance c"]
+    assert contract["measurement_instrument"] == ["thermometer"]
+    assert contract["measurement_branch_targets"] == ["orange box", "yellow box"]
+    assert contract["primary_targets"] == ["solid unknown substance c"]
+    assert contract["supporting_targets"] == ["thermometer"]
+    assert "which" not in contract["target_entities"]
+    assert "next" not in contract["target_entities"]
+    assert "above" not in contract["target_entities"]
+    assert "orange" not in contract["target_entities"]
+
+
+def test_measurement_task_does_not_emit_substance_search_snapshot(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C."
+    )
+    observation = (
+        "This room is called the kitchen. In it, you see a glass jar "
+        "(containing a substance called sodium chloride), a thermometer, "
+        "and solid unknown substance C."
+    )
+    agent._reset_episode_reasoning_state()
+    agent.percept = {"resulting_observation": observation}
+
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+
+    assert agent._grounded_substances == {}
+    assert agent._get_substance_search_snapshot() == {}
+
+
+def test_measurement_proxy_reading_does_not_resolve_branch_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C. "
+        "If the melting point of solid unknown substance C is above 150.0 degrees celsius, "
+        "focus on the orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent._reset_episode_reasoning_state()
+    agent._containment_by_object["solid unknown substance c"] = "orange box"
+
+    agent._update_measurement_tracking(
+        action="use thermometer on orange box",
+        observation="the thermometer measures a temperature of 153 degrees celsius",
+    )
+
+    snapshot = agent._get_measurement_tracking_snapshot()
+
+    assert agent._selected_measurement_branch_target is None
+    assert "latest_proxy_measurement" in snapshot
+    assert "latest_direct_measurement" not in snapshot
+    assert snapshot["branch_ready"] is False
+
+
+def test_measurement_shortlist_gates_branch_targets_until_branch_is_resolved(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a thermometer, "
+            "solid unknown substance C, an orange box, and a yellow box."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 10 degrees celsius",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on orange box",
+            "focus on yellow box",
+            "use thermometer on solid unknown substance c",
+            "look at solid unknown substance c",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "resolve_branch"
+    assert "use thermometer on solid unknown substance c" in shortlist
+    assert "focus on orange box" not in shortlist
+    assert "focus on yellow box" not in shortlist
+
+
+def test_measurement_shortlist_prefers_active_enclosure_for_hidden_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see the agent, a oven, "
+            "a thermometer, and a yellow box."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="move solid unknown substance c to orange box",
+        observation="You move the solid unknown substance C to the orange box.",
+    )
+    agent._update_measurement_tracking(
+        action="move orange box to oven",
+        observation="You move the orange box to the oven.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 10 degrees celsius",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open oven",
+            "look at oven",
+            "use thermometer on solid unknown substance c",
+            "look at solid unknown substance c",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "open oven" in shortlist
+    assert "look at oven" in shortlist
+    assert "use thermometer on solid unknown substance c" not in shortlist
+    assert "look at solid unknown substance c" not in shortlist
+
+
+def test_invalid_measurement_exact_action_is_retired_from_shortlist(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a thermometer, "
+            "solid unknown substance C, and a oven."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._record_invalid_exact_action("use thermometer on orange box")
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "use thermometer on orange box",
+            "use thermometer on solid unknown substance c",
+            "look at oven",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "use thermometer on solid unknown substance c" in shortlist
+    assert "use thermometer on orange box" not in shortlist

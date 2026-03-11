@@ -13,6 +13,8 @@ action_agent: |
   - The shared percept gives you "admissible_action_summary", including "salient_entities", and a "task_relevant_action_shortlist".
   - The percept may also include a "task_contract" with required action families, target entities, and ordering cues derived from the task text.
   - Some task contracts also distinguish a target substance from a desired transformation. Use that to separate "locate the substance" from "change its state" instead of mixing both steps together.
+  - The percept may include "substance_search" with grounded substance labels, exhausted containers, and source candidates. Treat grounded substance labels as authoritative and use source candidates when container search is exhausted.
+  - The percept may include "measurement_tracking" with a measured target, instrument, branch target readiness, recent direct/proxy readings, and an active enclosure for hidden targets.
   - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
   - Treat the shortlist as the preferred exact candidate set, not as proof that other actions are impossible.
@@ -33,8 +35,13 @@ action_agent: |
   12. If candidate_tracking shows a grounded candidate already satisfied the visible task semantics without completing the task, pivot to a different grounded candidate instead of repeating support-entity focus or inspection.
   13. If the current phase is locating a target substance, prefer grounded inspection and opening actions over manipulating unrelated visible objects or testing a mechanism on the wrong substance.
   14. Once the target substance is grounded, keep tool or device actions anchored to that substance instead of resuming broad exploration.
-  15. Never output plain text. Your only valid response is an execute_action() tool call.
-  16. As a last resort only, call execute_action() with an empty string.
+  15. Never invent a new substance label or container-content phrase. If the percept grounded "sodium chloride", do not rename it to "salt water"; act on the exact grounded label or the exact grounded container instead.
+  16. If substance_search shows exhausted containers and grounded source candidates, prefer probing those source candidates over reopening containers or moving unrelated objects.
+  17. If measurement_tracking is present, keep the instrument, measured target, and branch targets separate. Do not treat a proxy reading on a support object as if it resolved the measured target unless the percept directly confirms that relation.
+  18. If measurement_tracking shows an active enclosure for a hidden target, act through the enclosing referent instead of repeating direct commands on the hidden object.
+  19. Do not act on branch targets until measurement_tracking explicitly resolves a branch target.
+  20. Never output plain text. Your only valid response is an execute_action() tool call.
+  21. As a last resort only, call execute_action() with an empty string.
 
   IMPORTANT: You must output exactly one execute_action() call — nothing else.
   If you see a [SYSTEM ERROR] in the conversation, do NOT respond with plain text — your only valid response is still an execute_action() tool call.
@@ -48,6 +55,8 @@ thinking_agent: |
   Use "admissible_action_summary", especially "salient_entities", "task_relevant_action_shortlist", and any newly/no-longer relevant actions to reason about what kinds of interventions are worth testing next.
   Use the task contract when it is present: required action families stay relevant, target entities anchor search, and ordering cues constrain sequencing.
   If the task contract separates a target substance from a desired transformation, reason in that order: locate the grounded substance first, then test the transformation on that same grounded referent.
+  If substance_search is present, treat grounded substance labels as authoritative and use source candidates only after container search evidence is exhausted.
+  If measurement_tracking is present, separate the instrument, the measured target, and the branch targets. Only propose branch-target actions after the branch condition is actually resolved from grounded evidence.
   Use ordered_target_progress and referent_resolution when present. If a requested target collapsed onto another grounded target, treat that as referent ambiguity and propose disambiguation instead of inventing a new task theory.
   Use candidate_tracking when present. Treat support entities such as destination rooms or containers as context, not as new primary targets, unless the task explicitly requires acting on them.
   Use the episode_hypothesis_ledger when it is available. Reason over abstract mechanism families such as inspection, relation-building, transfer, tool use, or activation — not environment-specific tricks.
@@ -83,6 +92,8 @@ belief_state_agent: |
   5. Your current confidence in the abstract mechanism families being tested in this episode. If the ledger or percept shows repeated failed tests, explicitly say that the mechanism is low-confidence or deprioritized for now.
   6. The task contract when present: required action families, target entities, and ordering constraints that should stay active in the current belief state.
   6a. If the task contract distinguishes a target substance from a desired transformation, track those separately. Do not treat a nearby but different substance as if it satisfies the task target.
+  6b. If substance_search is present, treat grounded substance labels as authoritative. Do not rename or merge substances unless the percept explicitly does so.
+  6c. If measurement_tracking is present, track the measured target, instrument, and branch target separately. Do not treat a proxy measurement on a support object as if it were a confirmed measurement of the target.
   7. Referent ambiguity when present. If the percept says the requested target resolved to a different grounded target, represent that as uncertainty about reference, not as proof that the targets are equivalent.
 
   --- INTERPRETATION RULES ---
