@@ -2,15 +2,10 @@ import importlib
 import signal
 import sys
 import types
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 
 def _install_run_agent_stubs() -> None:
@@ -56,13 +51,18 @@ def _install_run_agent_stubs() -> None:
     sys.modules.setdefault("src.config.schema_health", schema_health_module)
 
 
+def _load_run_agent_module():
+    sys.modules.pop("scripts.run_agent", None)
+    return importlib.import_module("scripts.run_agent")
+
+
 def test_finalize_experiment_persists_cancelled_after_session_commit_failure(
     tmp_path, monkeypatch
 ):
     from src.storage.models import Base, ExperimentRun
 
     _install_run_agent_stubs()
-    run_agent = importlib.import_module("scripts.run_agent")
+    run_agent = _load_run_agent_module()
 
     db_path = tmp_path / "status_retry.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
@@ -124,7 +124,7 @@ def test_finalize_experiment_persists_cancelled_after_session_commit_failure(
 
 def test_sigterm_handler_routes_to_keyboard_interrupt():
     _install_run_agent_stubs()
-    run_agent = importlib.import_module("scripts.run_agent")
+    run_agent = _load_run_agent_module()
 
     with pytest.raises(KeyboardInterrupt, match="Received signal"):
         run_agent._raise_keyboard_interrupt(signal.SIGTERM, None)
@@ -134,7 +134,7 @@ def test_signal_handler_marks_active_experiment_cancelled(tmp_path, monkeypatch)
     from src.storage.models import Base, ExperimentRun
 
     _install_run_agent_stubs()
-    run_agent = importlib.import_module("scripts.run_agent")
+    run_agent = _load_run_agent_module()
 
     db_path = tmp_path / "signal_cancel.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
