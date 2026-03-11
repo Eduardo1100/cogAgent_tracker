@@ -1,8 +1,13 @@
 from fastapi import FastAPI
 
-from src.storage.database import Base, engine
+from src.config.env_validation import require_env_vars
+from src.config.schema_health import require_current_schema
 
-Base.metadata.create_all(bind=engine)
+require_env_vars(
+    ["DATABASE_URL", "REDIS_URL", "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"],
+    context="API startup",
+)
+require_current_schema(context="API startup")
 
 app = FastAPI(title="cogAgent Tracker API")
 

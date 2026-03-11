@@ -33,7 +33,7 @@
         "y": 0
       },
       "id": 100,
-      "title": "Run Summary",
+      "title": "Run Overview",
       "type": "row"
     },
     {
@@ -69,7 +69,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
+        "w": 2,
         "x": 0,
         "y": 1
       },
@@ -77,8 +77,9 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -94,7 +95,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric * 100, 1),\n  0\n) AS success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric, 4),\n  0\n) AS success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -106,49 +107,28 @@
         "uid": "cogagent-pg"
       },
       "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "unit": "percentunit",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0.5
-              },
-              {
-                "color": "green",
-                "value": 0.8
-              }
-            ]
-          }
-        },
+        "defaults": {},
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 3,
+        "w": 4,
+        "x": 2,
         "y": 1
       },
       "id": 2,
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background"
+        "textMode": "value",
+        "colorMode": "none"
       },
-      "title": "Error-Adjusted Rate",
+      "title": "Current Game",
       "type": "stat",
       "targets": [
         {
@@ -158,7 +138,50 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(\n  ROUND(\n    (\n      COUNT(*) FILTER (WHERE success = true)::float8\n      / NULLIF(\n          COUNT(*) FILTER (WHERE success = true OR error_message IS NULL),\n          0\n        )::float8 * 100\n    )::numeric,\n    1\n  ),\n  0\n) AS error_adjusted_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  NULLIF(e.current_game_label, ''),\n  CASE\n    WHEN last_ep.game_number IS NOT NULL THEN\n      CASE\n        WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'RUNNING'\n          THEN 'Game #' || last_ep.game_number || ' (running)'\n        WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'CANCELLED'\n          THEN 'Game #' || last_ep.game_number || ' (cancelled)'\n        ELSE 'Game #' || last_ep.game_number || ' (completed)'\n      END\n    WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'RUNNING' THEN 'starting'\n    WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'CANCELLED' THEN 'cancelled before first game'\n    ELSE 'no episodes recorded'\n  END\n) AS current_game\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT game_number\n  FROM episode_runs\n  WHERE experiment_id = e.id\n  ORDER BY game_number DESC\n  LIMIT 1\n) last_ep ON TRUE\nWHERE e.id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 16,
+        "y": 1
+      },
+      "id": 9,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
+      "title": "Started At",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC' AS started_at FROM experiment_runs WHERE id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -177,8 +200,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 6,
+        "w": 2,
+        "x": 12,
         "y": 1
       },
       "id": 3,
@@ -202,7 +225,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(ROUND(SUM(episode_cost)::numeric, 4), 0) as total_cost FROM episode_runs WHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  ROUND(\n    COALESCE(\n      NULLIF(e.total_cost, 0),\n      ep.total_cost,\n      0\n    )::numeric,\n    4\n  ),\n  0\n) AS total_cost\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT SUM(COALESCE(episode_cost, 0)) AS total_cost\n  FROM episode_runs\n  WHERE experiment_id = e.id\n) ep ON TRUE\nWHERE e.id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -221,8 +244,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 9,
+        "w": 2,
+        "x": 14,
         "y": 1
       },
       "id": 4,
@@ -246,7 +269,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total_tokens FROM episode_runs WHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  COALESCE(\n    NULLIF(e.total_tokens, 0),\n    ep.total_tokens,\n    0\n  ),\n  0\n) AS total_tokens\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) AS total_tokens\n  FROM episode_runs\n  WHERE experiment_id = e.id\n) ep ON TRUE\nWHERE e.id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -263,11 +286,54 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 12,
+        "w": 4,
+        "x": 6,
         "y": 1
       },
       "id": 7,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
+      "title": "Selected Games",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(NULLIF(selected_games_display, ''), 'not set') as selected_games FROM experiment_runs WHERE id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 18,
+        "y": 1
+      },
+      "id": 8,
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -301,49 +367,6 @@
         "uid": "cogagent-pg"
       },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 15,
-        "y": 1
-      },
-      "id": 8,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "last"
-          ],
-          "fields": "/.*/"
-        },
-        "orientation": "auto",
-        "textMode": "value",
-        "colorMode": "none"
-      },
-      "title": "Started At",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "cogagent-pg"
-          },
-          "editorMode": "code",
-          "rawQuery": true,
-          "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC' as started_at FROM experiment_runs WHERE id = ${experiment_id}",
-          "format": "table",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "postgres",
-        "uid": "cogagent-pg"
-      },
-      "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
@@ -356,9 +379,13 @@
                   "color": "orange",
                   "index": 0
                 },
+                "CANCELLED": {
+                  "color": "red",
+                  "index": 1
+                },
                 "CONCLUDED": {
                   "color": "green",
-                  "index": 1
+                  "index": 2
                 }
               }
             }
@@ -378,7 +405,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 18,
+        "x": 10,
         "y": 1
       },
       "id": 110,
@@ -403,7 +430,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT CASE WHEN end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END AS status FROM experiment_runs WHERE id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(status, CASE WHEN end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) AS status FROM experiment_runs WHERE id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -421,7 +448,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 20,
+        "x": 22,
         "y": 1
       },
       "id": 6,
@@ -464,7 +491,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 22,
+        "x": 20,
         "y": 1
       },
       "id": 5,
@@ -496,6 +523,53 @@
       ]
     },
     {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "id": 31,
+      "options": {
+        "xField": "game_number",
+        "barWidth": 0.8,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "title": "Cost per Game",
+      "type": "barchart",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT game_number, ROUND(COALESCE(episode_cost, 0)::numeric, 4) AS episode_cost FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -504,7 +578,7 @@
         "y": 5
       },
       "id": 105,
-      "title": "Live Progress",
+      "title": "Execution Metrics",
       "type": "row"
     },
     {
@@ -540,8 +614,9 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -596,8 +671,9 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -660,8 +736,9 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
-          ]
+            "last"
+          ],
+          "fields": "/.*/"
         },
         "orientation": "auto",
         "textMode": "auto",
@@ -677,7 +754,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric * 100, 1),\n  0\n) AS live_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  ROUND(AVG(success::int::float8)::numeric, 4),\n  0\n) AS live_success_rate\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -742,24 +819,24 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "avg_actions"
+              "options": "prompt_tokens"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Avg Actions"
+                "value": "Prompt"
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "max_actions"
+              "options": "completion_tokens"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Max Allowed"
+                "value": "Completion"
               }
             ]
           }
@@ -782,7 +859,7 @@
         "textMode": "auto",
         "colorMode": "value"
       },
-      "title": "Actions Taken / Max",
+      "title": "Prompt / Completion Tokens",
       "type": "stat",
       "targets": [
         {
@@ -792,7 +869,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT\n  COALESCE(ROUND(AVG(ep.actions_taken)::numeric, 1), 0) AS avg_actions,\n  MAX(e.max_actions_per_game) AS max_actions\nFROM experiment_runs e\nLEFT JOIN episode_runs ep ON ep.experiment_id = e.id\nWHERE e.id = ${experiment_id}",
+          "rawSql": "SELECT\n  COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,\n  COALESCE(SUM(completion_tokens), 0) AS completion_tokens\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -836,7 +913,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS total_tokens_so_far\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  COALESCE(\n    NULLIF(e.total_tokens, 0),\n    ep.total_tokens,\n    0\n  ),\n  0\n) AS total_tokens_so_far\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) AS total_tokens\n  FROM episode_runs\n  WHERE experiment_id = e.id\n) ep ON TRUE\nWHERE e.id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -849,8 +926,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 1
+          "unit": "currencyUSD",
+          "decimals": 4
         },
         "overrides": []
       },
@@ -871,7 +948,7 @@
         "textMode": "auto",
         "colorMode": "value"
       },
-      "title": "Avg Chat Rounds",
+      "title": "Avg Cost / Episode",
       "type": "stat",
       "targets": [
         {
@@ -881,7 +958,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(ROUND(AVG(chat_rounds)::numeric, 1), 0) AS avg_chat_rounds\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(ROUND(AVG(COALESCE(episode_cost, 0))::numeric, 4), 0) AS avg_cost_per_episode\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
@@ -896,7 +973,7 @@
         "y": 10
       },
       "id": 101,
-      "title": "Per-Game Trends",
+      "title": "Outcome Trends",
       "type": "row"
     },
     {
@@ -1029,7 +1106,7 @@
         "y": 19
       },
       "id": 102,
-      "title": "Task Analysis",
+      "title": "Task Breakdown",
       "type": "row"
     },
     {
@@ -1089,7 +1166,7 @@
         "y": 28
       },
       "id": 103,
-      "title": "Token Usage",
+      "title": "Resource Usage",
       "type": "row"
     },
     {
@@ -1128,7 +1205,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 16,
         "x": 0,
         "y": 29
       },
@@ -1171,7 +1248,7 @@
         "y": 37
       },
       "id": 104,
-      "title": "Episode Table",
+      "title": "Episode Log",
       "type": "row"
     },
     {
@@ -1272,6 +1349,306 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 106,
+      "title": "Platform Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "cogagent-health"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "healthy": {
+                  "color": "green",
+                  "text": "HEALTHY"
+                },
+                "warning": {
+                  "color": "yellow",
+                  "text": "WARNING"
+                },
+                "degraded": {
+                  "color": "red",
+                  "text": "DEGRADED"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 53
+      },
+      "id": 120,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "title": "API Health",
+      "type": "stat",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "status",
+              "text": "status",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "cogagent-health"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "$",
+          "source": "url",
+          "type": "json",
+          "url": "http://app:8000/health",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "cogagent-health"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "current": {
+                  "color": "green",
+                  "text": "CURRENT"
+                },
+                "out_of_date": {
+                  "color": "red",
+                  "text": "OUT OF DATE"
+                },
+                "failed": {
+                  "color": "red",
+                  "text": "FAILED"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 53
+      },
+      "id": 121,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background"
+      },
+      "title": "Schema Health",
+      "type": "stat",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "status",
+              "text": "status",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "cogagent-health"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "$",
+          "source": "url",
+          "type": "json",
+          "url": "http://app:8000/health/schema",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "cogagent-health"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 8,
+        "y": 53
+      },
+      "id": 122,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/"
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none"
+      },
+      "title": "Schema Revision",
+      "type": "stat",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "current_revision",
+              "text": "current_revision",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "cogagent-health"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "$",
+          "source": "url",
+          "type": "json",
+          "url": "http://app:8000/health/schema",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "cogagent-health"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 10,
+        "x": 14,
+        "y": 53
+      },
+      "id": 123,
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "title": "Infrastructure Checks",
+      "type": "table",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "status",
+              "text": "overall",
+              "type": "string"
+            },
+            {
+              "selector": "checks.db.status",
+              "text": "db",
+              "type": "string"
+            },
+            {
+              "selector": "checks.cache.status",
+              "text": "cache",
+              "type": "string"
+            },
+            {
+              "selector": "checks.storage.status",
+              "text": "storage",
+              "type": "string"
+            },
+            {
+              "selector": "checks.schema.status",
+              "text": "schema",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "cogagent-health"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "$",
+          "source": "url",
+          "type": "json",
+          "url": "http://app:8000/health",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ]
     }
   ],
   "refresh": "5s",
@@ -1308,5 +1685,5 @@
   "timezone": "browser",
   "title": "cogAgent Monitor",
   "uid": "cogagent-monitor",
-  "version": 6
+  "version": 8
 }

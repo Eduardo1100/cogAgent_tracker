@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "ag2[gemini,openai]>=0.11.2",
+    "alembic>=1.16.5",
     "alfworld[full]>=0.4.2",
     "boto3>=1.42.59",
     "fastapi[standard]>=0.135.1",

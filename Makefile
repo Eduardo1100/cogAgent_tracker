@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld
+.PHONY: help setup dev train eval debug test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -64,3 +64,12 @@ bootstrap-alfworld:
 	sh -lc 'set -eux; bash scripts/bootstrap_alfworld.sh'
 
 benchmark: eval ## Alias for eval (backwards compat)
+
+db-upgrade: ## Apply Alembic migrations to the current DATABASE_URL
+	uv run alembic upgrade head
+
+db-current: ## Show the current Alembic revision
+	uv run alembic current
+
+db-revision: ## Create a new Alembic revision. MESSAGE="describe change"
+	uv run alembic revision --autogenerate -m "$(or $(MESSAGE),migration)"

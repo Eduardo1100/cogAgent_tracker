@@ -1,0 +1,11 @@
+apiVersion: 1
+datasources:
+  - name: App Health
+    type: yesoreyeram-infinity-datasource
+    uid: cogagent-health
+    access: proxy
+    url: http://app:8000
+    editable: true
+    jsonData:
+      allowedHosts:
+        - http://app:8000
