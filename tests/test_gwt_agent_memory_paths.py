@@ -698,3 +698,257 @@ def test_referent_resolution_records_ambiguity_without_collapsing_targets(tmp_pa
     assert agent._get_ordered_target_snapshot()["ambiguous_focus_targets"] == [
         resolution
     ]
+
+
+def test_task_contract_preserves_primary_target_and_relation_roles(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert "focus" in contract["required_families"]
+    assert "relation" in contract["required_families"]
+    assert contract["primary_targets"] == ["red light bulb"]
+    assert contract["supporting_targets"] == ["renewable power source"]
+    assert contract["required_relations"] == ["electrical circuit"]
+    assert "red" in contract["target_entities"]
+    assert "circuit" in contract["target_entities"]
+    assert "create" not in contract["target_entities"]
+
+
+def test_ordered_target_progress_preserves_discriminative_target_modifiers(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+
+    assert agent._get_ordered_target_snapshot()["completed_focus_targets"] == [
+        "red light bulb"
+    ]
+
+
+def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "You are in the workshop. You see a red light bulb, a red light bulb anode, "
+            "a red light bulb cathode, a red wire, a solar cell, a blue light bulb, "
+            "a green light bulb, and a freezer."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open freezer",
+            "activate freezer",
+            "look at blue light bulb",
+            "look at red light bulb cathode",
+            "connect red wire to red light bulb cathode",
+            "connect solar cell to red wire",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "look at red light bulb cathode" in shortlist
+    assert "connect red wire to red light bulb cathode" in shortlist
+    assert "connect solar cell to red wire" in shortlist
+    assert "open freezer" not in shortlist
+    assert "look at blue light bulb" not in shortlist
+
+
+def test_irrelevant_device_control_does_not_become_promising_from_state_change(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": "The freezer is now open.",
+        "newly_admissible_actions": [],
+        "no_longer_admissible_actions": [],
+    }
+
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="open freezer",
+        executed_action="open freezer",
+        previous_observation="The freezer is closed.",
+    )
+
+    device_control_entry = agent.episode_hypothesis_ledger["device_control"]
+    assert device_control_entry["observable_change_attempts"] == 0
+    assert device_control_entry["evidence_attempts"] == 1
+    assert device_control_entry["status"] == "uncertain"
+    assert agent.recent_hypothesis_tests[-1]["outcome"] == "evidence"
+
+
+def test_lifecycle_task_contract_sets_lifecycle_sequence_mode(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["lifecycle_sequence"] is True
+    assert contract["required_families"] == ["focus"]
+
+
+def test_container_focus_does_not_advance_lifecycle_progress_without_stage_evidence(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_lifecycle_stage_state(
+        action="focus on flower pot containing apple seed and soil and water",
+        observation="You focus on the self watering flower pot 4.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on flower pot containing apple seed and soil and water",
+        observation="You focus on the self watering flower pot 4.",
+    )
+
+    snapshot = agent._get_ordered_target_snapshot()
+    assert snapshot["completed_focus_targets"] == []
+    assert snapshot["focused_stage_labels"] == []
+
+
+def test_inspection_evidence_turns_into_lifecycle_stage_progress(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_lifecycle_stage_state(
+        action="look at apple tree in self watering flower pot 4",
+        observation="a apple tree in the seedling stage",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on apple tree in self watering flower pot 4",
+        observation="You focus on the apple tree.",
+    )
+
+    snapshot = agent._get_ordered_target_snapshot()
+    assert snapshot["completed_focus_targets"] == ["apple tree flower pot 4"]
+    assert snapshot["focused_stage_labels"] == ["seedling"]
+    assert snapshot["observed_stage_labels"] == ["seedling"]
+
+
+def test_container_inspection_maps_stage_evidence_to_focusable_referent(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_lifecycle_stage_state(
+        action="look at flower pot containing apple tree and soil and water",
+        observation=(
+            "a self watering flower pot 5 (containing a dead apple tree, soil, "
+            "a substance called water)"
+        ),
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on apple tree in self watering flower pot 5",
+        observation="You focus on the apple tree.",
+    )
+
+    snapshot = agent._get_ordered_target_snapshot()
+    assert snapshot["completed_focus_targets"] == ["apple tree flower pot 5"]
+    assert snapshot["focused_stage_labels"] == ["dead"]
+
+
+def test_lifecycle_shortlist_prefers_inspection_and_stage_bearing_focus(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._update_ordered_target_progress(
+        executed_action="focus on apple seed",
+        observation="You focus on the apple seed.",
+    )
+    agent.percept = {
+        "resulting_observation": (
+            "This outside location is called the outside. Here you see an apple seed, "
+            "an apple tree in self watering flower pot 4, an apple tree in self watering "
+            "flower pot 5, and a adult apple tree."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on apple tree in self watering flower pot 4",
+            "look at apple tree in self watering flower pot 4",
+            "focus on adult apple tree",
+            "pour apple tree in self watering flower pot 4 into outside",
+            "use axe on apple tree in self watering flower pot 5",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "look at apple tree in self watering flower pot 4" in shortlist
+    assert "focus on adult apple tree" in shortlist
+    assert "pour apple tree in self watering flower pot 4 into outside" not in shortlist
+    assert "use axe on apple tree in self watering flower pot 5" not in shortlist
+
+
+def test_numeric_ambiguity_choice_resolves_to_semantic_action(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    resolved_action, resolution = agent._resolve_reasoning_action(
+        "0",
+        (
+            "Ambiguous request: Please enter the number for the action you intended "
+            "(or blank to cancel):\n"
+            "0:\tlook at flower (in apple tree, in self watering flower pot 7, in outside)\n"
+            "1:\tlook at flower (in apple tree, in self watering flower pot 9, in outside)\n"
+        ),
+    )
+
+    assert (
+        resolved_action
+        == "look at flower (in apple tree, in self watering flower pot 7, in outside)"
+    )
+    assert resolution == {
+        "status": "resolved",
+        "choice": "0",
+        "resolved_action": "look at flower (in apple tree, in self watering flower pot 7, in outside)",
+    }
+    assert agent._classify_action_family(resolved_action) == "inspect"
