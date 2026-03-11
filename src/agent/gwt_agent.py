@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,7 +13,7 @@ from autogen.agentchat.contrib.capabilities.transforms import MessageHistoryLimi
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
-from src.agent.env_adapter import ALFWorldAdapter
+from src.agent.env_adapter import ALFWorldAdapter, ScienceWorldAdapter
 from src.agent.helpers import (
     ConvertOrphanedToolMessages,
     FlattenToolMessages,
@@ -25,6 +26,8 @@ from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_e
 
 
 class GWTAutogenAgent(AutogenAgent):
+    _AGENT_DIR = Path(__file__).resolve().parent
+    _MEMORY_ROOT = _AGENT_DIR / "memory"
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
@@ -107,6 +110,21 @@ class GWTAutogenAgent(AutogenAgent):
         self.memory = ""
         self._episodic_rag_cache: dict = {}
         self._concept_rag_cache: dict = {}
+
+    def _get_memory_environment_name(self) -> str:
+        if isinstance(getattr(self, "adapter", None), ScienceWorldAdapter):
+            return "scienceworld"
+        if isinstance(getattr(self, "adapter", None), ALFWorldAdapter):
+            return "alfworld"
+
+        env_type = getattr(getattr(self, "args", None), "env_type", None)
+        if env_type:
+            return re.sub(r"[^a-z0-9_-]+", "_", env_type.lower())
+
+        return "alfworld"
+
+    def _get_memory_dir(self) -> Path:
+        return self._MEMORY_ROOT / self._get_memory_environment_name()
 
     def _make_belief_state_termination_fn(self):
         """Returns a termination predicate for Belief_State_Agent.
@@ -547,11 +565,11 @@ class GWTAutogenAgent(AutogenAgent):
     def register_log_paths(self):
 
         # Ensure memory directory and memory files exist
-        memory_path = "memory"
-        os.makedirs(memory_path, exist_ok=True)
+        memory_path = self._get_memory_dir()
+        memory_path.mkdir(parents=True, exist_ok=True)
 
-        memory1_path = os.path.join(memory_path, "memory1.txt")
-        memory2_path = os.path.join(memory_path, "memory2.txt")
+        memory1_path = str(memory_path / "memory1.txt")
+        memory2_path = str(memory_path / "memory2.txt")
         result_dict_path = os.path.join(self.log_path, "result_dict.txt")
         agents_info_path = os.path.join(self.log_path, "agents_info.json")
         start_memory1_path = os.path.join(self.log_path, "start_memory1.txt")
@@ -560,6 +578,7 @@ class GWTAutogenAgent(AutogenAgent):
         end_memory2_path = os.path.join(self.log_path, "end_memory2.txt")
 
         self.log_paths = {
+            "memory_dir": str(memory_path),
             "memory1_path": memory1_path,
             "memory2_path": memory2_path,
             "result_dict_path": result_dict_path,
