@@ -7,11 +7,11 @@ Create Date: 2026-03-11 00:00:01
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "20260311_000001"
 down_revision = None
@@ -24,7 +24,9 @@ def _has_table(inspector, table_name: str) -> bool:
 
 
 def _has_column(inspector, table_name: str, column_name: str) -> bool:
-    return column_name in {column["name"] for column in inspector.get_columns(table_name)}
+    return column_name in {
+        column["name"] for column in inspector.get_columns(table_name)
+    }
 
 
 def upgrade() -> None:
@@ -38,14 +40,21 @@ def upgrade() -> None:
             sa.Column("filename", sa.String(), nullable=True),
             sa.Column("result", sa.String(), nullable=True),
             sa.Column("confidence", sa.Integer(), nullable=True),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=True,
+            ),
         )
         op.create_index("ix_predictions_id", "predictions", ["id"], unique=False)
 
     if not _has_table(inspector, "experiment_runs"):
         op.create_table(
             "experiment_runs",
-            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True, nullable=False),
+            sa.Column(
+                "id", sa.Integer(), primary_key=True, autoincrement=True, nullable=False
+            ),
             sa.Column("agent_name", sa.String(length=100), nullable=False),
             sa.Column("llm_model", sa.String(length=50), nullable=False),
             sa.Column("eval_env_type", sa.String(length=100), nullable=False),
@@ -102,7 +111,9 @@ def upgrade() -> None:
     if not _has_table(inspector, "episode_runs"):
         op.create_table(
             "episode_runs",
-            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True, nullable=False),
+            sa.Column(
+                "id", sa.Integer(), primary_key=True, autoincrement=True, nullable=False
+            ),
             sa.Column("experiment_id", sa.Integer(), nullable=False),
             sa.Column("game_number", sa.Integer(), nullable=False),
             sa.Column("success", sa.Boolean(), nullable=False),
@@ -143,7 +154,9 @@ def downgrade() -> None:
         op.drop_table("episode_runs")
 
     if _has_table(inspector, "experiment_runs"):
-        existing_columns = {column["name"] for column in inspector.get_columns("experiment_runs")}
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("experiment_runs")
+        }
         removable_columns = [
             "current_game_label",
             "current_game_number",

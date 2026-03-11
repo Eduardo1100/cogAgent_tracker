@@ -13,17 +13,17 @@ from pathlib import Path
 
 import autogen
 import yaml
+from autogen.oai.client import OpenAIClient
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
-from src.agent.env_adapter import ALFWorldAdapter, ScienceWorldAdapter, infer_task_type
+from src.agent.env_adapter import ScienceWorldAdapter, infer_task_type
 from src.agent.gwt_agent import GWTAutogenAgent
 from src.config.env_validation import require_env_vars
 from src.config.schema_health import require_current_schema
 from src.storage import cache
-from autogen.oai.client import OpenAIClient
 from src.storage.database import SessionLocal
 from src.storage.models import EpisodeRun, ExperimentRun
 from src.storage.s3 import get_s3_client
@@ -95,7 +95,11 @@ def get_usage_totals(agents) -> dict[str, float]:
         "usage_excluding_cached_inference", {}
     )
     prompt_tokens = int(
-        sum(v.get("prompt_tokens", 0) for v in usage_data.values() if isinstance(v, dict))
+        sum(
+            v.get("prompt_tokens", 0)
+            for v in usage_data.values()
+            if isinstance(v, dict)
+        )
     )
     completion_tokens = int(
         sum(
@@ -215,9 +219,7 @@ def finalize_experiment(
     experiment.error_adjusted_success_rate = error_adjusted_success_rate
     experiment.num_errors = error_count
     experiment.avg_actions_per_successful_game = avg_actions_per_successful_game
-    experiment.avg_chat_rounds_per_successful_game = (
-        avg_chat_rounds_per_successful_game
-    )
+    experiment.avg_chat_rounds_per_successful_game = avg_chat_rounds_per_successful_game
     experiment.avg_runtime_per_successful_game = avg_runtime_per_successful_game
     experiment.avg_actions_per_failing_game = avg_actions_per_failing_game
     experiment.avg_chat_rounds_per_failing_game = avg_chat_rounds_per_failing_game
@@ -546,7 +548,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
         for task_name in task_names:
             total_vars = sw_env.get_max_variations(task_name)
             num_vars = (
-                min(args.sw_variations, total_vars) if args.sw_variations else total_vars
+                min(args.sw_variations, total_vars)
+                if args.sw_variations
+                else total_vars
             )
             for var_idx in range(num_vars):
                 game_no += 1
@@ -618,7 +622,8 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 transitions, belief_matches = extract_chat_metadata(chat_text)
 
                 transition_path = os.path.join(
-                    os.path.dirname(log_paths["chat_history_path"]), "transition_log.json"
+                    os.path.dirname(log_paths["chat_history_path"]),
+                    "transition_log.json",
                 )
                 with open(transition_path, "w") as f:
                     json.dump(transitions, f, indent=2)
@@ -684,7 +689,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                     [g for g in error_list if g not in success_list]
                 )
                 error_adjusted_success_rate = (
-                    num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
                 )
 
                 wandb.log(
@@ -939,7 +946,9 @@ def main():
 
                     if args.game_ids is not None:
                         selected_games = sorted(
-                            int(g.strip()) for g in args.game_ids.split(",") if g.strip()
+                            int(g.strip())
+                            for g in args.game_ids.split(",")
+                            if g.strip()
                         )
                         invalid = [
                             g for g in selected_games if not (1 <= g <= total_num_games)
@@ -979,7 +988,9 @@ def main():
                     success_list: list[int] = []
                     failure_list: list[int] = []
                     cumulative_successful_actions = cumulative_failing_actions = 0
-                    cumulative_successful_chat_rounds = cumulative_failing_chat_rounds = 0
+                    cumulative_successful_chat_rounds = (
+                        cumulative_failing_chat_rounds
+                    ) = 0
                     cumulative_successful_runtime = cumulative_failing_runtime = 0
                     avg_actions_taken_per_successful_game = (
                         avg_actions_taken_per_failing_game
@@ -1086,10 +1097,14 @@ def main():
 
                                 if error_message:
                                     error_list.append(i)
-                                    with open(log_paths["error_message_path"], "a") as f:
+                                    with open(
+                                        log_paths["error_message_path"], "a"
+                                    ) as f:
                                         f.write(f"Run Chat: {error_message}\n")
 
-                                if chat_result and getattr(chat_result, "chat_history", []):
+                                if chat_result and getattr(
+                                    chat_result, "chat_history", []
+                                ):
                                     with open(log_paths["chat_history_path"], "w") as f:
                                         for message in chat_result.chat_history:
                                             f.write("-" * 20 + "\n")
@@ -1103,7 +1118,9 @@ def main():
                                             for k, v in message.items():
                                                 if k not in ["name", "role", "content"]:
                                                     f.write(f"{k}: {v}\n")
-                                    chat_round_list.append(len(chat_result.chat_history))
+                                    chat_round_list.append(
+                                        len(chat_result.chat_history)
+                                    )
                                 else:
                                     chat_round_list.append(-1)
                                     with open(log_paths["chat_history_path"], "w") as f:
@@ -1136,9 +1153,7 @@ def main():
 
                                 s3_key = None
                                 try:
-                                    _s3_key = (
-                                        f"experiments/run_{experiment.id}/game_{i}_chat.txt"
-                                    )
+                                    _s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
                                     s3.put_object(
                                         Bucket=BUCKET_NAME,
                                         Key=_s3_key,
@@ -1154,14 +1169,19 @@ def main():
                                 if success:
                                     num_successes += 1
                                     success_list.append(i)
-                                    cumulative_successful_actions += agent.num_actions_taken
-                                    cumulative_successful_chat_rounds += chat_round_list[-1]
+                                    cumulative_successful_actions += (
+                                        agent.num_actions_taken
+                                    )
+                                    cumulative_successful_chat_rounds += (
+                                        chat_round_list[-1]
+                                    )
                                     cumulative_successful_runtime += elapsed_minutes
                                     avg_actions_taken_per_successful_game = (
                                         cumulative_successful_actions / num_successes
                                     )
                                     avg_chat_rounds_per_successful_game = (
-                                        cumulative_successful_chat_rounds / num_successes
+                                        cumulative_successful_chat_rounds
+                                        / num_successes
                                     )
                                     avg_runtime_per_successful_game = (
                                         cumulative_successful_runtime / num_successes
@@ -1169,8 +1189,12 @@ def main():
                                 else:
                                     num_failures = num_games_evaluated - num_successes
                                     failure_list.append(i)
-                                    cumulative_failing_actions += agent.num_actions_taken
-                                    cumulative_failing_chat_rounds += chat_round_list[-1]
+                                    cumulative_failing_actions += (
+                                        agent.num_actions_taken
+                                    )
+                                    cumulative_failing_chat_rounds += chat_round_list[
+                                        -1
+                                    ]
                                     cumulative_failing_runtime += elapsed_minutes
                                     avg_actions_taken_per_failing_game = (
                                         cumulative_failing_actions / num_failures
@@ -1210,9 +1234,15 @@ def main():
                                         "cumulative_runtime": cumulative_runtime,
                                         "chat_rounds": chat_round_list[-1],
                                         "error_adjusted_success_rate": error_adjusted_success_rate,
-                                        "final/total_tokens": total_run_usage["total_tokens"],
-                                        "final/total_cost": total_run_usage["total_cost"],
-                                        "final/prompt_tokens": total_run_usage["prompt_tokens"],
+                                        "final/total_tokens": total_run_usage[
+                                            "total_tokens"
+                                        ],
+                                        "final/total_cost": total_run_usage[
+                                            "total_cost"
+                                        ],
+                                        "final/prompt_tokens": total_run_usage[
+                                            "prompt_tokens"
+                                        ],
                                         "final/completion_tokens": total_run_usage[
                                             "completion_tokens"
                                         ],
@@ -1221,8 +1251,12 @@ def main():
                                 )
 
                                 try:
-                                    experiment.total_tokens = total_run_usage["total_tokens"]
-                                    experiment.total_cost = total_run_usage["total_cost"]
+                                    experiment.total_tokens = total_run_usage[
+                                        "total_tokens"
+                                    ]
+                                    experiment.total_cost = total_run_usage[
+                                        "total_cost"
+                                    ]
                                     experiment.prompt_tokens = int(
                                         total_run_usage["prompt_tokens"]
                                     )
@@ -1238,7 +1272,9 @@ def main():
                                     db.rollback()
 
                                 concept_matches = re.findall(
-                                    r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
+                                    r"CONCEPT DISCOVERED: \[(.*?)\]",
+                                    chat_text,
+                                    re.DOTALL,
                                 )
                                 concept_matches = [c.strip() for c in concept_matches]
                                 concept_matches = [

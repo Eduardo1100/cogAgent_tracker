@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 # 1. Manually load the .env file so os.getenv can see your variables
 load_dotenv()
 
+
 # 2. Grab the URL and apply "Auto-Fixes"
 def get_database_url() -> str:
     raw_url = os.getenv("DATABASE_URL")
@@ -30,6 +31,7 @@ engine = create_engine(DATABASE_URL)
 
 # 4. Create a Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 def get_db():
     db = SessionLocal()

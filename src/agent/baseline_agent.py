@@ -24,13 +24,23 @@ class BaselineAutogenAgent(AutogenAgent):
         info=None,
     ):
         super().__init__(
-            llm_profile, log_path, game_no, max_chat_round, max_actions, args, env, obs, info
+            llm_profile,
+            log_path,
+            game_no,
+            max_chat_round,
+            max_actions,
+            args,
+            env,
+            obs,
+            info,
         )
 
         self.initialize_autogen()
 
     def set_environment(self, env, obs, info, game_no, adapter=None):
-        self.adapter = adapter if adapter is not None else ALFWorldAdapter(env, obs, info)
+        self.adapter = (
+            adapter if adapter is not None else ALFWorldAdapter(env, obs, info)
+        )
         self.env = env
         self.obs = self.adapter._obs
         self.info = self.adapter._info
@@ -138,7 +148,9 @@ class BaselineAutogenAgent(AutogenAgent):
             )
 
             if action_score < 0.8:
-                self.adapter.set_observation(f"action '{suggested_action}' is not admissible.")
+                self.adapter.set_observation(
+                    f"action '{suggested_action}' is not admissible."
+                )
                 self.success = False
             else:
                 self.adapter.step(action)

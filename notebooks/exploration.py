@@ -108,14 +108,25 @@ def _(episodes_df, mo):
 
     # 2. Inadmissible actions
     ax = axes[0, 1]
-    ax.bar(episodes_df["game_number"], episodes_df["inadmissible_action_count"], color="orange")
+    ax.bar(
+        episodes_df["game_number"],
+        episodes_df["inadmissible_action_count"],
+        color="orange",
+    )
     ax.set_title("Inadmissible Actions per Game")
     ax.set_xlabel("Game #")
     ax.set_ylabel("Count")
 
     # 3. Task type success rate
     ax = axes[1, 0]
-    task_map = {1: "pick_place", 2: "look_light", 3: "clean_place", 4: "heat_place", 5: "cool_place", 6: "two_object"}
+    task_map = {
+        1: "pick_place",
+        2: "look_light",
+        3: "clean_place",
+        4: "heat_place",
+        5: "cool_place",
+        6: "two_object",
+    }
     if "task_type" in episodes_df.columns:
         task_stats = (
             episodes_df.groupby("task_type")["success"]
@@ -131,8 +142,16 @@ def _(episodes_df, mo):
 
     # 4. Tokens per game
     ax = axes[1, 1]
-    if "prompt_tokens" in episodes_df.columns and "completion_tokens" in episodes_df.columns:
-        ax.bar(episodes_df["game_number"], episodes_df["prompt_tokens"], label="Prompt", color="steelblue")
+    if (
+        "prompt_tokens" in episodes_df.columns
+        and "completion_tokens" in episodes_df.columns
+    ):
+        ax.bar(
+            episodes_df["game_number"],
+            episodes_df["prompt_tokens"],
+            label="Prompt",
+            color="steelblue",
+        )
         ax.bar(
             episodes_df["game_number"],
             episodes_df["completion_tokens"],

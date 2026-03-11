@@ -7,4 +7,6 @@ def require_env_vars(variable_names: list[str], *, context: str) -> None:
         return
 
     missing_list = ", ".join(sorted(missing))
-    raise RuntimeError(f"Missing required environment variables for {context}: {missing_list}")
+    raise RuntimeError(
+        f"Missing required environment variables for {context}: {missing_list}"
+    )

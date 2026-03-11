@@ -146,9 +146,7 @@ def backfill_experiment(
 
         completed = len(episodes)
         successes = sum(1 for ep in episodes if ep.success)
-        error_free = sum(
-            1 for ep in episodes if ep.success or ep.error_message is None
-        )
+        error_free = sum(1 for ep in episodes if ep.success or ep.error_message is None)
         experiment.total_tokens = int(
             round(sum(per_episode_prompt) + sum(per_episode_completion))
         )
