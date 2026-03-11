@@ -29,7 +29,7 @@
 - [src/storage/cache.py](/home/eduardo/Projects/cogAgent_tracker/src/storage/cache.py): Redis helpers.
 - [src/storage/s3.py](/home/eduardo/Projects/cogAgent_tracker/src/storage/s3.py): MinIO/S3 client and upload helper.
 - [src/config/schema_health.py](/home/eduardo/Projects/cogAgent_tracker/src/config/schema_health.py): Alembic head/current revision enforcement.
-- [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py): primary evaluation runner. It logs experiment metadata, token usage, cost, S3 artifacts, and W&B data.
+- [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py): primary evaluation runner. It logs experiment metadata, token usage, cost, S3 artifacts, and W&B data. On `Ctrl+C`, it now attempts to persist partial chat transcripts locally and save interrupted episode metadata to storage/DB before the experiment is marked `CANCELLED`.
 - [scripts/backfill_experiment_metrics.py](/home/eduardo/Projects/cogAgent_tracker/scripts/backfill_experiment_metrics.py): repair utility for historical metrics and git metadata.
 - [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py): cognitive multi-agent runtime, including long-term memory path registration.
 - [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory): tracked memory store split by environment (`alfworld/`, `scienceworld/`) with `memory1.txt` and `memory2.txt` per environment.
@@ -52,6 +52,7 @@
   - Environment-specific agent memory now lives under [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory); preserve the `alfworld/` and `scienceworld/` split when changing memory logic or moving files.
   - ALFWorld bootstrap is handled by [scripts/bootstrap_alfworld.sh](/home/eduardo/Projects/cogAgent_tracker/scripts/bootstrap_alfworld.sh) and is expected by Docker-based flows.
   - For Docker-run evals, preserve the `exec env ... uv run python ...` pattern in [Makefile](/home/eduardo/Projects/cogAgent_tracker/Makefile) so `Ctrl+C` reaches Python instead of stopping in the shell wrapper.
+  - For iterative agent changes, prefer Graphite stacks with one focused branch per iteration. Current naming convention: `agent-iter-XX-<topic>`.
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.
@@ -88,6 +89,7 @@
 - Agent runner changes:
   - prefer `make debug`
   - use `WANDB_MODE=offline` when possible for local validation
+  - if you touch signal handling, interrupted runs, or per-episode persistence, run `uv run pytest tests/test_run_agent_status.py`
 
 ## Known Gotchas
 - [src/app.py](/home/eduardo/Projects/cogAgent_tracker/src/app.py) validates schema revision at import time, so stale DB state can break seemingly unrelated API work.
@@ -95,6 +97,7 @@
 - [src/storage/database.py](/home/eduardo/Projects/cogAgent_tracker/src/storage/database.py) force-rewrites `postgresql://` URLs to `postgresql+psycopg2://` unless `psycopg2` is already present.
 - `make clean` and `make nuke` are destructive. Avoid them unless the user explicitly wants caches, volumes, or environments wiped.
 - Docker startup runs `uv sync --frozen` and `scripts/bootstrap_alfworld.sh`; container boots may be slow by design.
+- `Ctrl+C` now tries to preserve partial episode traces: `chat_history.txt`, `transition_log.json`, S3 chat upload, and a partial `EpisodeRun` row when the interrupt path has enough context. Hard kills such as `kill -9` still bypass this.
 - The README is sparse and the project metadata still uses the placeholder name `production-template`. Prefer the actual repo structure over marketing text.
 - Pytest CI runs via `uv run pytest tests/`. Keep [tests/conftest.py](/home/eduardo/Projects/cogAgent_tracker/tests/conftest.py) in mind for repo-root import resolution, and make test stubs override `sys.modules` directly instead of relying on import order.
 - [.pre-commit-config.yaml](/home/eduardo/Projects/cogAgent_tracker/.pre-commit-config.yaml) is intentionally tracked. Do not re-add it to `.gitignore`.
