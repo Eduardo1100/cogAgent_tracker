@@ -493,3 +493,86 @@ def test_shortlist_balances_families_and_grounds_on_observation(tmp_path):
     assert "look at door to kitchen" in shortlist
     assert sum(action.startswith("focus on") for action in shortlist) <= 1
 
+
+def test_task_contract_extracts_required_family_and_target_entities(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+
+    contract = agent._get_task_contract()
+
+    assert contract["required_families"] == ["focus"]
+    assert "turtle" in contract["target_entities"]
+    assert contract["ordering_cues"] == ["ordered_sequence"]
+
+
+def test_canonicalize_suggested_action_snaps_to_exact_admissible_command(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    canonical = agent._canonicalize_suggested_action(
+        "move to art studio",
+        [
+            "go to art studio",
+            "open art studio door",
+            "look at picture",
+        ],
+    )
+
+    assert canonical == "go to art studio"
+
+
+def test_required_task_family_is_not_deprioritized_after_repeated_failures(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Connect the red wire to the battery."
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "The action 'connect red wire to battery' is not in the list of admissible actions for the current timestep."
+        ),
+    }
+
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="connect red wire to battery",
+        executed_action=None,
+        previous_observation="",
+    )
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="connect red wire to battery",
+        executed_action=None,
+        previous_observation="",
+    )
+
+    entry = agent.episode_hypothesis_ledger["relation"]
+    assert entry["invalid_attempts"] == 2
+    assert entry["status"] == "uncertain"
+    assert entry["retired"] is False
+
+
+def test_required_focus_family_survives_shortlist_without_hidden_entity_drift(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "You are in the hallway. You see a picture, an art studio door, and a greenhouse door."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at picture",
+            "open art studio door",
+            "go to art studio",
+            "focus on picture",
+            "focus on turtle egg",
+            "focus on turtle",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "focus on picture" in shortlist
+    assert "focus on turtle egg" not in shortlist
+    assert "open art studio door" in shortlist
+    assert "go to art studio" in shortlist
