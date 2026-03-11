@@ -62,6 +62,11 @@ class ExperimentRun(Base):
     # Git info at eval time (for reproducibility)
     git_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     git_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    selected_games: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    selected_games_display: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_game_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_game_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Dataset split evaluated (e.g. "valid_seen", "valid_unseen")
     split: Mapped[str | None] = mapped_column(String(50), nullable=True)

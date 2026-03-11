@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.config.schema_health import get_schema_revision_status
 from src.storage.cache import get_redis_client
 from src.storage.database import get_db
 from src.storage.s3 import get_s3_client
@@ -11,8 +12,7 @@ from src.storage.s3 import get_s3_client
 router = APIRouter()
 
 
-@router.get("/ai")
-def check_ai_env():
+def _ai_health() -> dict:
     cuda_available = torch.cuda.is_available()
     device_name = "cuda" if cuda_available else "cpu"
     return {
@@ -24,8 +24,7 @@ def check_ai_env():
     }
 
 
-@router.get("/db")
-def check_db_env(db: Session = Depends(get_db)):
+def _db_health(db: Session) -> dict:
     try:
         result = db.execute(text("SELECT version();")).scalar()
         return {
@@ -41,8 +40,27 @@ def check_db_env(db: Session = Depends(get_db)):
         }
 
 
-@router.get("/storage")
-def check_storage_env():
+def _schema_health() -> dict:
+    try:
+        schema_status = get_schema_revision_status()
+        return {
+            "status": "current" if schema_status["schema_ok"] else "out_of_date",
+            "message": (
+                "Database schema revision matches Alembic head."
+                if schema_status["schema_ok"]
+                else "Database schema revision does not match Alembic head."
+            ),
+            **schema_status,
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "error": str(e),
+            "message": "Could not determine database schema revision.",
+        }
+
+
+def _storage_health() -> dict:
     s3 = get_s3_client()
     bucket_name = "test-bucket"
     file_name = "success.txt"
@@ -83,8 +101,7 @@ def check_storage_env():
         }
 
 
-@router.get("/cache")
-def check_cache_env():
+def _cache_health() -> dict:
     try:
         r = get_redis_client()
         r.setex(
@@ -102,3 +119,49 @@ def check_cache_env():
             "error": str(e),
             "message": "Could not connect to the Redis cache.",
         }
+
+
+@router.get("")
+def check_all_health(db: Session = Depends(get_db)):
+    checks = {
+        "ai": _ai_health(),
+        "db": _db_health(db),
+        "schema": _schema_health(),
+        "storage": _storage_health(),
+        "cache": _cache_health(),
+    }
+    overall_status = "healthy"
+    if any(check["status"] == "failed" for check in checks.values()):
+        overall_status = "degraded"
+    elif any(check["status"] in {"out_of_date"} for check in checks.values()):
+        overall_status = "warning"
+
+    return {
+        "status": overall_status,
+        "checks": checks,
+    }
+
+
+@router.get("/ai")
+def check_ai_env():
+    return _ai_health()
+
+
+@router.get("/db")
+def check_db_env(db: Session = Depends(get_db)):
+    return _db_health(db)
+
+
+@router.get("/schema")
+def check_schema_env():
+    return _schema_health()
+
+
+@router.get("/storage")
+def check_storage_env():
+    return _storage_health()
+
+
+@router.get("/cache")
+def check_cache_env():
+    return _cache_health()
