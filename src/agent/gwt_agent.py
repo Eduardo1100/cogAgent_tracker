@@ -213,11 +213,16 @@ class GWTAutogenAgent(AutogenAgent):
         "discover",
         "determine whether",
     )
+    _TASK_PROCEDURAL_HINTS = (
+        "first",
+        "then",
+        "and then",
+        "next",
+    )
     _TASK_ORDERING_HINTS = {
         "ordered_sequence": (
             "earliest",
             "latest",
-            "first",
             "second",
             "third",
             "fourth",
@@ -256,8 +261,19 @@ class GWTAutogenAgent(AutogenAgent):
             r"\b(an electrical circuit)\b",
         ),
     }
+    _TASK_STATE_CHANGE_HINTS = {
+        "melt": {"direction": "warm"},
+        "freeze": {"direction": "cool"},
+        "boil": {"direction": "warm"},
+        "heat": {"direction": "warm"},
+        "warm": {"direction": "warm"},
+        "cool": {"direction": "cool"},
+        "chill": {"direction": "cool"},
+    }
     _TASK_ENTITY_STOPWORDS = _TASK_STOPWORDS | {
         "acceptable",
+        "action",
+        "actions",
         "change",
         "compound",
         "compounds",
@@ -278,7 +294,10 @@ class GWTAutogenAgent(AutogenAgent):
         "stage",
         "stages",
         "starting",
+        "transform",
+        "transformation",
         "whether",
+        "will",
     }
     _GENERIC_PRIMARY_TARGET_TOKENS = {
         "thing",
@@ -588,9 +607,25 @@ class GWTAutogenAgent(AutogenAgent):
             self._task_contains_hint(task_lower, hint)
             for hint in self._LIFECYCLE_TASK_HINTS
         )
+        procedural_sequence = any(
+            self._task_contains_hint(task_lower, hint)
+            for hint in self._TASK_PROCEDURAL_HINTS
+        )
         search_mode = any(
             self._task_contains_hint(task_lower, hint)
             for hint in self._TASK_SEARCH_HINTS
+        )
+        (
+            target_substances,
+            desired_transformation,
+            transformation_direction,
+        ) = self._extract_state_change_goal(task)
+        state_change_task = bool(desired_transformation)
+        transformation_tokens = set(
+            self._extract_runtime_tokens(
+                desired_transformation,
+                stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            )
         )
         required_families: list[str] = []
         family_hint_tokens: set[str] = set()
@@ -607,7 +642,7 @@ class GWTAutogenAgent(AutogenAgent):
                     )
 
         support_families: list[str] = []
-        if search_mode and "inspect" not in required_families:
+        if (search_mode or state_change_task) and "inspect" not in required_families:
             support_families.append("inspect")
 
         ordering_cues: list[str] = []
@@ -625,6 +660,20 @@ class GWTAutogenAgent(AutogenAgent):
                     )
 
         role_phrases = self._extract_task_role_phrases(task)
+        if target_substances and (
+            not role_phrases["primary_targets"]
+            or all(
+                not self._extract_runtime_tokens(
+                    phrase,
+                    stopwords=self._TASK_ENTITY_STOPWORDS
+                    | self._ACTION_COMMAND_STOPWORDS,
+                )
+                for phrase in role_phrases["primary_targets"]
+            )
+        ):
+            for substance in target_substances:
+                if substance not in role_phrases["primary_targets"]:
+                    role_phrases["primary_targets"].append(substance)
         candidate_classes = self._extract_candidate_classes(task)
         destination_container, destination_room = self._extract_destination_roles(task)
         if (
@@ -643,12 +692,15 @@ class GWTAutogenAgent(AutogenAgent):
             "supporting_targets",
             "required_relations",
             "candidate_classes",
+            "target_substances",
             "destination_container",
             "destination_room",
         ):
             phrases = role_phrases.get(role, [])
             if role == "candidate_classes":
                 phrases = candidate_classes
+            elif role == "target_substances":
+                phrases = target_substances
             elif role == "destination_container":
                 phrases = [destination_container] if destination_container else []
             elif role == "destination_room":
@@ -665,10 +717,13 @@ class GWTAutogenAgent(AutogenAgent):
 
         raw_target_entities = self._extract_runtime_tokens(
             task,
-            stopwords=self._TASK_ENTITY_STOPWORDS
-            | self._ACTION_COMMAND_STOPWORDS
-            | family_hint_tokens
-            | ordering_tokens,
+            stopwords=(
+                self._TASK_ENTITY_STOPWORDS
+                | self._ACTION_COMMAND_STOPWORDS
+                | family_hint_tokens
+                | ordering_tokens
+                | transformation_tokens
+            ),
             limit=8,
         )
         raw_target_set = set(raw_target_entities)
@@ -683,16 +738,21 @@ class GWTAutogenAgent(AutogenAgent):
             "support_families": support_families,
             "target_entities": target_entities,
             "ordering_cues": ordering_cues,
+            "procedural_sequence": procedural_sequence,
             "lifecycle_sequence": lifecycle_sequence,
+            "state_change_task": state_change_task,
             "search_mode": search_mode,
             "candidate_classes": candidate_classes,
             "primary_targets": role_phrases["primary_targets"],
             "supporting_targets": role_phrases["supporting_targets"],
+            "target_substances": target_substances,
             "destination_container": (
                 [destination_container] if destination_container else []
             ),
             "destination_room": [destination_room] if destination_room else [],
             "required_relations": role_phrases["required_relations"],
+            "desired_transformation": desired_transformation,
+            "transformation_direction": transformation_direction,
         }
 
     def _get_task_contract(self) -> dict:
@@ -725,6 +785,9 @@ class GWTAutogenAgent(AutogenAgent):
         for token in task_contract.get("target_entities", []):
             if token not in keywords:
                 keywords.append(token)
+        transformation = task_contract.get("desired_transformation")
+        if transformation and transformation not in keywords:
+            keywords.append(transformation)
         if keywords:
             return keywords
         return self._extract_runtime_tokens(self.task, stopwords=self._TASK_STOPWORDS)
@@ -750,6 +813,61 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_lifecycle_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("lifecycle_sequence"))
+
+    def _extract_state_change_goal(self, task: str) -> tuple[list[str], str, str]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        desired_transformation = ""
+        transformation_direction = ""
+
+        for verb, metadata in self._TASK_STATE_CHANGE_HINTS.items():
+            if self._task_contains_hint(normalized_task, verb):
+                desired_transformation = verb
+                transformation_direction = metadata["direction"]
+                break
+
+        if not desired_transformation:
+            return [], "", ""
+
+        target_substances: list[str] = []
+        patterns = (
+            rf"\b{re.escape(desired_transformation)}(?:\s+up|\s+down)?\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, normalized_task):
+                phrase = self._normalize_task_phrase(
+                    match.group(1), role="primary_targets"
+                )
+                if phrase and phrase not in target_substances:
+                    target_substances.append(phrase)
+                if len(target_substances) >= 2:
+                    break
+            if target_substances:
+                break
+
+        return target_substances[:2], desired_transformation, transformation_direction
+
+    def _is_state_change_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("state_change_task"))
+
+    def _state_change_target_is_grounded(
+        self,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_state_change_task(contract):
+            return False
+
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        role_token_sets = self._get_task_role_token_sets(contract)
+        return self._role_is_grounded(
+            grounded_token_set, role_token_sets["target_substances"]
+        ) or self._role_is_grounded(
+            grounded_token_set, role_token_sets["primary_targets"]
+        )
 
     def _extract_stage_labels(self, text: str) -> list[str]:
         normalized = self._normalize_runtime_text(text)
@@ -1035,6 +1153,7 @@ class GWTAutogenAgent(AutogenAgent):
             "supporting_targets",
             "required_relations",
             "candidate_classes",
+            "target_substances",
             "destination_container",
             "destination_room",
         ):
@@ -1582,6 +1701,37 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _get_shortlist_family_quotas(current_phase: str) -> dict[str, int]:
         quotas_by_phase = {
+            "locate_substance": {
+                "inspect": 4,
+                "device_control": 3,
+                "relocation": 2,
+                "focus": 1,
+                "transfer_or_transform": 1,
+            },
+            "confirm_referent": {
+                "inspect": 3,
+                "focus": 2,
+                "device_control": 2,
+                "tool_application": 1,
+                "transfer_or_transform": 1,
+                "relocation": 1,
+            },
+            "test_transformation": {
+                "inspect": 2,
+                "device_control": 3,
+                "tool_application": 3,
+                "transfer_or_transform": 2,
+                "focus": 1,
+                "relocation": 1,
+            },
+            "verify_outcome": {
+                "inspect": 3,
+                "focus": 2,
+                "device_control": 2,
+                "tool_application": 2,
+                "transfer_or_transform": 1,
+                "relocation": 1,
+            },
             "gather_evidence": {
                 "inspect": 3,
                 "device_control": 2,
@@ -1621,6 +1771,50 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _get_family_priority(current_phase: str, family: str) -> int:
         priorities_by_phase = {
+            "locate_substance": {
+                "inspect": 7,
+                "device_control": 7,
+                "relocation": 4,
+                "focus": 1,
+                "transfer_or_transform": -2,
+                "tool_application": -2,
+                "relation": -4,
+                "other": -2,
+                "idle": -5,
+            },
+            "confirm_referent": {
+                "focus": 7,
+                "inspect": 6,
+                "device_control": 4,
+                "transfer_or_transform": 2,
+                "tool_application": 2,
+                "relocation": 2,
+                "relation": -2,
+                "other": -2,
+                "idle": -5,
+            },
+            "test_transformation": {
+                "tool_application": 7,
+                "device_control": 6,
+                "transfer_or_transform": 6,
+                "inspect": 5,
+                "focus": 2,
+                "relocation": 1,
+                "relation": -1,
+                "other": -2,
+                "idle": -5,
+            },
+            "verify_outcome": {
+                "inspect": 7,
+                "focus": 5,
+                "device_control": 4,
+                "tool_application": 3,
+                "transfer_or_transform": 2,
+                "relocation": 1,
+                "relation": -2,
+                "other": -2,
+                "idle": -5,
+            },
             "gather_evidence": {
                 "inspect": 6,
                 "device_control": 5,
@@ -2014,9 +2208,153 @@ class GWTAutogenAgent(AutogenAgent):
             "recent_tests": self.recent_hypothesis_tests[-max_recent_tests:],
         }
 
+    def _score_state_change_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        content_token_set: set[str],
+        grounded_token_set: set[str],
+        task_contract: dict,
+        role_token_sets: dict[str, list[set[str]]],
+        grounded_hits: int,
+        target_hits: int,
+        primary_role_hits: int,
+        support_role_hits: int,
+    ) -> int:
+        if not self._is_state_change_task(task_contract):
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        substance_role_hits, _ = self._best_role_overlap(
+            content_token_set, role_token_sets["target_substances"]
+        )
+        substance_full_match = self._has_full_role_match(
+            content_token_set, role_token_sets["target_substances"]
+        )
+        substance_grounded = self._state_change_target_is_grounded(
+            task_contract, grounded_token_set
+        )
+        score = 0
+
+        if substance_role_hits:
+            score += substance_role_hits * 8
+            if substance_full_match:
+                score += 6
+
+        if current_phase == "locate_substance":
+            if family == "inspect":
+                score += 10
+                if normalized.startswith("look in "):
+                    score += 6
+                elif normalized.startswith(("look at ", "look around", "inspect ")):
+                    score += 3
+            elif family == "device_control":
+                score += 8
+                if normalized.startswith("open "):
+                    score += 4
+            elif family == "focus":
+                score += 6 if substance_role_hits and substance_grounded else -14
+            elif family in {"tool_application", "transfer_or_transform", "relation"}:
+                score += 4 if substance_role_hits and substance_grounded else -16
+            elif family == "relocation" and not (
+                substance_role_hits or support_role_hits
+            ):
+                score -= 12
+                if normalized.startswith(("move ", "pick up ", "take ", "grab ")):
+                    score -= 10
+
+            if (
+                content_token_set
+                and grounded_hits > 0
+                and target_hits == 0
+                and family not in {"inspect", "device_control", "relocation"}
+            ):
+                score -= 8
+            if (
+                family == "relocation"
+                and grounded_hits > 0
+                and target_hits == 0
+                and not substance_role_hits
+            ):
+                score -= 8
+
+        elif current_phase == "confirm_referent":
+            if family == "focus":
+                score += 18 if (substance_full_match or primary_role_hits) else -12
+            elif family == "inspect" and (substance_role_hits or primary_role_hits):
+                score += 10
+            elif family in {"tool_application", "transfer_or_transform"}:
+                score -= 10 if not (substance_role_hits or primary_role_hits) else 4
+            elif family == "device_control" and not (
+                substance_role_hits or primary_role_hits or support_role_hits
+            ):
+                score -= 6
+
+        elif current_phase == "test_transformation":
+            if family in {
+                "tool_application",
+                "device_control",
+                "transfer_or_transform",
+            }:
+                score += 12 if (substance_role_hits or primary_role_hits) else -8
+            elif family == "inspect" and (substance_role_hits or primary_role_hits):
+                score += 8
+            elif family == "focus":
+                score += 4 if (substance_role_hits or primary_role_hits) else -8
+            elif family == "relocation" and not (
+                substance_role_hits or primary_role_hits or support_role_hits
+            ):
+                score -= 8
+
+        elif current_phase == "verify_outcome":
+            if family == "inspect" and (substance_role_hits or primary_role_hits):
+                score += 12
+            elif family == "focus" and (substance_role_hits or primary_role_hits):
+                score += 8
+            elif family in {
+                "tool_application",
+                "device_control",
+                "transfer_or_transform",
+            }:
+                score += 2 if (substance_role_hits or primary_role_hits) else -10
+
+        if not substance_grounded:
+            if family == "focus" and not substance_role_hits:
+                score -= 8
+            if (
+                family in {"tool_application", "transfer_or_transform"}
+                and not substance_role_hits
+            ):
+                score -= 6
+
+        return score
+
     def _get_current_phase(self) -> str:
-        if self._is_candidate_search_task() and self._rejected_candidates:
+        task_contract = self._get_task_contract()
+        if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
+        if self._is_state_change_task(task_contract):
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            if not self._state_change_target_is_grounded(
+                task_contract, grounded_tokens
+            ):
+                return "locate_substance"
+            if "focus" in task_contract.get(
+                "required_families", []
+            ) and not self._role_focus_completed(role_token_sets["primary_targets"]):
+                return "confirm_referent"
+            mechanism_progress = any(
+                entry["observable_change_attempts"] > 0
+                for entry in self.episode_hypothesis_ledger.values()
+                if entry["family"]
+                in {"device_control", "tool_application", "transfer_or_transform"}
+            )
+            if not mechanism_progress:
+                return "test_transformation"
+            return "verify_outcome"
         inspect_evidence = any(
             entry["evidence_attempts"] > 0
             for entry in self.episode_hypothesis_ledger.values()
@@ -2106,6 +2444,7 @@ class GWTAutogenAgent(AutogenAgent):
         primary_target_focused = self._role_focus_completed(
             role_token_sets["primary_targets"]
         )
+        state_change_task = self._is_state_change_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
             self._observed_stage_labels
@@ -2304,6 +2643,20 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+        elif state_change_task:
+            score += self._score_state_change_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                content_token_set=content_token_set,
+                grounded_token_set=grounded_token_set,
+                task_contract=task_contract,
+                role_token_sets=role_token_sets,
+                grounded_hits=grounded_hits,
+                target_hits=target_hits,
+                primary_role_hits=primary_role_hits,
+                support_role_hits=support_role_hits,
+            )
 
         if primary_target_focused and family == "relation":
             score += 8

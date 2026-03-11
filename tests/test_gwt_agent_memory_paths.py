@@ -1128,3 +1128,155 @@ def test_custom_speaker_selection_repairs_malformed_thinking_output(tmp_path):
     assert next_speaker is agent.action_agent
     assert groupchat.messages[-1]["content"].startswith("STRATEGY:")
     assert "support entities" in groupchat.messages[-1]["content"]
+
+
+def test_state_change_task_contract_separates_substance_from_transformation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["state_change_task"] is True
+    assert contract["target_substances"] == ["water"]
+    assert contract["desired_transformation"] == "melt"
+    assert contract["transformation_direction"] == "warm"
+    assert contract["procedural_sequence"] is True
+    assert contract["ordering_cues"] == []
+    assert "water" in contract["primary_targets"]
+    assert "water" in contract["target_entities"]
+    assert "melt" not in contract["target_entities"]
+    assert "actions" not in contract["target_entities"]
+    assert "will" not in contract["target_entities"]
+
+
+def test_state_change_phase_moves_from_search_to_focus_to_transformation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see a picture and doors."
+        )
+    }
+    assert agent._get_current_phase() == "locate_substance"
+
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see water in a kettle and a stove."
+        )
+    }
+    assert agent._get_current_phase() == "confirm_referent"
+
+    agent._completed_focus_targets = ["water"]
+    assert agent._get_current_phase() == "test_transformation"
+
+
+def test_state_change_shortlist_suppresses_irrelevant_object_manipulation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see the agent, a picture, "
+            "and doors to the art studio and the kitchen."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move picture to art studio",
+            "focus on agent",
+            "mix agent",
+            "open art studio door",
+            "open door to kitchen",
+            "look around",
+            "go to art studio",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "open door to kitchen" in shortlist
+    assert "move picture to art studio" not in shortlist
+    assert "mix agent" not in shortlist
+    assert "focus on agent" not in shortlist
+
+
+def test_state_change_shortlist_avoids_wrong_visible_substance(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a fridge and a cupboard. "
+            "In the fridge is a cup containing orange juice."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at fridge",
+            "look in fridge",
+            "focus on cup containing orange juice",
+            "use lighter on cup containing orange juice",
+            "open cupboard",
+            "look at cupboard",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "open cupboard" in shortlist
+    assert "look at cupboard" in shortlist
+    assert "use lighter on cup containing orange juice" not in shortlist
+    assert "focus on cup containing orange juice" not in shortlist
+
+
+def test_state_change_shortlist_prefers_grounded_transformation_after_focus(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._completed_focus_targets = ["water"]
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see water in a kettle, "
+            "a lighter, and a metal pot."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "use lighter on water",
+            "look at water",
+            "pour water into metal pot",
+            "go to hallway",
+            "move picture to kitchen",
+            "focus on picture",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "use lighter on water" in shortlist
+    assert "look at water" in shortlist
+    assert "move picture to kitchen" not in shortlist
+    assert "focus on picture" not in shortlist
