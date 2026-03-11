@@ -11,10 +11,10 @@ from sqlalchemy.orm import sessionmaker
 def _install_run_agent_stubs() -> None:
     autogen_module = types.ModuleType("autogen")
     autogen_module.gather_usage_summary = lambda agents: {}
-    sys.modules.setdefault("autogen", autogen_module)
+    sys.modules["autogen"] = autogen_module
 
     autogen_oai_module = types.ModuleType("autogen.oai")
-    sys.modules.setdefault("autogen.oai", autogen_oai_module)
+    sys.modules["autogen.oai"] = autogen_oai_module
 
     autogen_oai_client_module = types.ModuleType("autogen.oai.client")
 
@@ -24,31 +24,31 @@ def _install_run_agent_stubs() -> None:
             return 0.0
 
     autogen_oai_client_module.OpenAIClient = OpenAIClient
-    sys.modules.setdefault("autogen.oai.client", autogen_oai_client_module)
+    sys.modules["autogen.oai.client"] = autogen_oai_client_module
 
     wandb_module = types.ModuleType("wandb")
     wandb_module.login = lambda *args, **kwargs: None
     wandb_module.init = lambda *args, **kwargs: None
     wandb_module.log = lambda *args, **kwargs: None
     wandb_module.finish = lambda *args, **kwargs: None
-    sys.modules.setdefault("wandb", wandb_module)
+    sys.modules["wandb"] = wandb_module
 
     baseline_module = types.ModuleType("src.agent.baseline_agent")
     baseline_module.BaselineAutogenAgent = type("BaselineAutogenAgent", (), {})
-    sys.modules.setdefault("src.agent.baseline_agent", baseline_module)
+    sys.modules["src.agent.baseline_agent"] = baseline_module
 
     gwt_module = types.ModuleType("src.agent.gwt_agent")
     gwt_module.GWTAutogenAgent = type("GWTAutogenAgent", (), {})
-    sys.modules.setdefault("src.agent.gwt_agent", gwt_module)
+    sys.modules["src.agent.gwt_agent"] = gwt_module
 
     env_adapter_module = types.ModuleType("src.agent.env_adapter")
     env_adapter_module.ScienceWorldAdapter = type("ScienceWorldAdapter", (), {})
     env_adapter_module.infer_task_type = lambda task: None
-    sys.modules.setdefault("src.agent.env_adapter", env_adapter_module)
+    sys.modules["src.agent.env_adapter"] = env_adapter_module
 
     schema_health_module = types.ModuleType("src.config.schema_health")
     schema_health_module.require_current_schema = lambda *args, **kwargs: None
-    sys.modules.setdefault("src.config.schema_health", schema_health_module)
+    sys.modules["src.config.schema_health"] = schema_health_module
 
 
 def _load_run_agent_module():
