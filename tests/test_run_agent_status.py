@@ -366,3 +366,108 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
             fake_s3.calls[0]["Key"]
             == f"experiments/run_{experiment.id}/game_2_chat.txt"
         )
+
+
+def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
+    tmp_path, monkeypatch
+):
+    from src.storage.models import Base, EpisodeRun, ExperimentRun
+
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    db_path = tmp_path / "interrupted_dead_adapter.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestingSessionLocal() as db:
+        experiment = ExperimentRun(
+            agent_name="GWTAutogenAgent",
+            llm_model="test-model",
+            eval_env_type="scienceworld",
+            max_actions_per_game=10,
+            max_chat_rounds=20,
+            status="RUNNING",
+        )
+        db.add(experiment)
+        db.commit()
+        db.refresh(experiment)
+
+        game_dir = tmp_path / "game_3"
+        chat_history_path = game_dir / "chat_history.txt"
+        chat_history_path.parent.mkdir(parents=True, exist_ok=True)
+        chat_history_path.write_text(
+            "\n".join(
+                [
+                    "NOTE: Interrupted during run_chat; recovered the latest partial transcript from in-memory group chat state.",
+                    "--------------------",
+                    "name: Belief_State_Agent",
+                    "role: assistant",
+                    "content:",
+                    "BELIEF STATE: [The red light bulb is wired but still off.]",
+                    "",
+                ]
+            )
+        )
+        (game_dir / "history.txt").write_text(
+            "action: 'connect red light bulb cathode to solar panel cathode'. observation: 'Nothing obvious happens.'\n"
+        )
+
+        class FakeS3:
+            def __init__(self):
+                self.calls = []
+
+            def put_object(self, **kwargs):
+                self.calls.append(kwargs)
+
+        fake_s3 = FakeS3()
+
+        def _raise_dead_adapter():
+            raise RuntimeError("java server went away")
+
+        agent = types.SimpleNamespace(
+            log_paths={
+                "chat_history_path": str(chat_history_path),
+                "history_path": str(game_dir / "history.txt"),
+            },
+            group_chat=types.SimpleNamespace(agents=[]),
+            curr_episodic_memory=["memory"],
+            task="Focus on the red light bulb and create an electrical circuit.",
+            num_actions_taken=5,
+            adapter=types.SimpleNamespace(
+                infer_task_type=_raise_dead_adapter,
+                count_inadmissible_actions=lambda _path: 0,
+            ),
+        )
+
+        totals = run_agent.persist_interrupted_episode_run(
+            db,
+            experiment=experiment,
+            agent=agent,
+            game_number=3,
+            s3=fake_s3,
+            total_run_usage={
+                "total_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_cost": 0.0,
+            },
+            elapsed_minutes=0.5,
+            success_rate=0.0,
+            error_adjusted_success_rate=0.0,
+            error_message="Run interrupted: Received signal 2",
+        )
+
+        assert totals["total_tokens"] == 0
+        persisted_episode = (
+            db.query(EpisodeRun).filter(EpisodeRun.experiment_id == experiment.id).one()
+        )
+        assert persisted_episode.task_type is None
+        assert persisted_episode.chat_rounds == 1
+        assert persisted_episode.chat_history_s3_key == (
+            f"experiments/run_{experiment.id}/game_3_chat.txt"
+        )
+        assert fake_s3.calls[0]["Key"] == (
+            f"experiments/run_{experiment.id}/game_3_chat.txt"
+        )

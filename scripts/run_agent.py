@@ -590,6 +590,30 @@ def extract_concepts(chat_text: str) -> list[str]:
     return [c for c in concept_matches if not c.upper().startswith("NO CONCEPT")]
 
 
+def _safe_infer_episode_task_type(adapter) -> int | None:
+    if not (adapter and hasattr(adapter, "infer_task_type")):
+        return None
+    try:
+        return adapter.infer_task_type()
+    except Exception as exc:
+        print(f"⚠️ Task-type inference failed during episode persistence: {exc}")
+        return None
+
+
+def _safe_count_inadmissible_actions(adapter, history_path: str | None) -> int | None:
+    if not history_path or not (
+        adapter and hasattr(adapter, "count_inadmissible_actions")
+    ):
+        return None
+    try:
+        return adapter.count_inadmissible_actions(history_path)
+    except Exception as exc:
+        print(
+            f"⚠️ Inadmissible-action counting failed during episode persistence: {exc}"
+        )
+        return None
+
+
 def persist_episode_run(
     db,
     *,
@@ -612,15 +636,9 @@ def persist_episode_run(
     chat_history_s3_key: str | None,
 ) -> EpisodeRun:
     adapter = getattr(agent, "adapter", None)
-    task_type = (
-        adapter.infer_task_type()
-        if adapter and hasattr(adapter, "infer_task_type")
-        else None
-    )
-    inadmissible_action_count = (
-        adapter.count_inadmissible_actions(log_paths["history_path"])
-        if adapter and hasattr(adapter, "count_inadmissible_actions")
-        else None
+    task_type = _safe_infer_episode_task_type(adapter)
+    inadmissible_action_count = _safe_count_inadmissible_actions(
+        adapter, log_paths.get("history_path")
     )
     concepts_learned = extract_concepts(chat_text)
 
