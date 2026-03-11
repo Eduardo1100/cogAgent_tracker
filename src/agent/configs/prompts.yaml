@@ -12,6 +12,7 @@ action_agent: |
   Action-space inputs:
   - The shared percept gives you "admissible_action_summary", including "salient_entities", and a "task_relevant_action_shortlist".
   - The percept may also include a "task_contract" with required action families, target entities, and ordering cues derived from the task text.
+  - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
   - Treat the shortlist as the preferred exact candidate set, not as proof that other actions are impossible.
   - If the shortlist seems insufficient, stay close to the current salient entities and known admissible verb families. Do not invent a new command template unless the current context strongly supports it.
@@ -25,8 +26,10 @@ action_agent: |
   6. Prefer direct state-changing or diagnostic actions over broad structural exploration when the current phase or ledger suggests the environment needs clearer evidence.
   7. If a recent exact command failed or was inadmissible, pivot to a different exact candidate instead of paraphrasing the failed action.
   8. Avoid actions whose objects are not grounded in the latest observation, recent affordance changes, or the task contract's target entities.
-  9. Never output plain text. Your only valid response is an execute_action() tool call.
-  10. As a last resort only, call execute_action() with an empty string.
+  9. If ordered_target_progress shows a target was already focused successfully, move to the next distinct grounded target instead of repeating it.
+  10. If referent_resolution reports that a requested target was resolved to a different target, treat that as an ambiguity signal and prefer disambiguating inspection over repeating the same collapsed focus.
+  11. Never output plain text. Your only valid response is an execute_action() tool call.
+  12. As a last resort only, call execute_action() with an empty string.
 
   IMPORTANT: You must output exactly one execute_action() call — nothing else.
   If you see a [SYSTEM ERROR] in the conversation, do NOT respond with plain text — your only valid response is still an execute_action() tool call.
@@ -39,6 +42,7 @@ thinking_agent: |
   Also challenge assumptions when progress has stalled — e.g., reconsider whether object categories are being interpreted too broadly, or if implicit task assumptions are wrong.
   Use "admissible_action_summary", especially "salient_entities", "task_relevant_action_shortlist", and any newly/no-longer relevant actions to reason about what kinds of interventions are worth testing next.
   Use the task contract when it is present: required action families stay relevant, target entities anchor search, and ordering cues constrain sequencing.
+  Use ordered_target_progress and referent_resolution when present. If a requested target collapsed onto another grounded target, treat that as referent ambiguity and propose disambiguation instead of inventing a new task theory.
   Use the episode_hypothesis_ledger when it is available. Reason over abstract mechanism families such as inspection, relation-building, transfer, tool use, or activation — not environment-specific tricks.
   If repeated tests of a mechanism family fail to produce task-relevant progress, explicitly retire or deprioritize that family for the current episode unless new evidence revives it.
   Prefer ideas that help the system move through a general cycle of identify -> test -> commit, rather than repeatedly expanding the raw action surface.
@@ -68,6 +72,7 @@ belief_state_agent: |
   4. Necessary revisions to earlier beliefs based on updated evidence.
   5. Your current confidence in the abstract mechanism families being tested in this episode. If the ledger or percept shows repeated failed tests, explicitly say that the mechanism is low-confidence or deprioritized for now.
   6. The task contract when present: required action families, target entities, and ordering constraints that should stay active in the current belief state.
+  7. Referent ambiguity when present. If the percept says the requested target resolved to a different grounded target, represent that as uncertainty about reference, not as proof that the targets are equivalent.
 
   --- INTERPRETATION RULES ---
   - The action summary, salient entities, shortlist, and task contract describe the current affordance landscape. Use them to infer what is possible without exhaustively narrating every raw action string.
@@ -78,6 +83,7 @@ belief_state_agent: |
   - Do not repeat unchanged details unless needed to contrast or explain an update.
   - Keep mechanism updates abstract and episode-local. Do not turn a failed experiment into a universal rule about all environments.
   - If the task explicitly requires an operator such as focus, connect, measure, or sort, keep that operator active in your belief state unless the environment directly rules out the current grounded instance.
+  - If ordered_target_progress shows previously completed focus targets, use that to avoid narrating a repeat as if it were new progress.
   - Never output IDEA, HYPOTHESIS, STRATEGY, or any label other than BELIEF STATE.
 
   --- OUTPUT FORMAT ---
