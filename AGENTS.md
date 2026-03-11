@@ -31,6 +31,8 @@
 - [src/config/schema_health.py](/home/eduardo/Projects/cogAgent_tracker/src/config/schema_health.py): Alembic head/current revision enforcement.
 - [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py): primary evaluation runner. It logs experiment metadata, token usage, cost, S3 artifacts, and W&B data.
 - [scripts/backfill_experiment_metrics.py](/home/eduardo/Projects/cogAgent_tracker/scripts/backfill_experiment_metrics.py): repair utility for historical metrics and git metadata.
+- [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py): cognitive multi-agent runtime, including long-term memory path registration.
+- [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory): tracked memory store split by environment (`alfworld/`, `scienceworld/`) with `memory1.txt` and `memory2.txt` per environment.
 - [src/agent/configs/ALFworld.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/ALFworld.yaml), [src/agent/configs/scienceworld.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/scienceworld.yaml), [src/agent/configs/prompts.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/prompts.yaml): agent/runtime configuration.
 - [alembic/versions/20260311_000001_initial_schema.py](/home/eduardo/Projects/cogAgent_tracker/alembic/versions/20260311_000001_initial_schema.py): current schema baseline.
 - [notebooks/exploration.py](/home/eduardo/Projects/cogAgent_tracker/notebooks/exploration.py): Marimo notebook entrypoint.
@@ -47,6 +49,7 @@
 - Agent/eval work:
   - Main runner is [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py).
   - Default evaluation commands are `make train`, `make eval`, and `make debug`.
+  - Environment-specific agent memory now lives under [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory); preserve the `alfworld/` and `scienceworld/` split when changing memory logic or moving files.
   - ALFWorld bootstrap is handled by [scripts/bootstrap_alfworld.sh](/home/eduardo/Projects/cogAgent_tracker/scripts/bootstrap_alfworld.sh) and is expected by Docker-based flows.
   - For Docker-run evals, preserve the `exec env ... uv run python ...` pattern in [Makefile](/home/eduardo/Projects/cogAgent_tracker/Makefile) so `Ctrl+C` reaches Python instead of stopping in the shell wrapper.
 - Infra connectivity work:
