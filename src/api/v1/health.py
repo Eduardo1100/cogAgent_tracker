@@ -66,7 +66,9 @@ def check_storage_env():
             Params={"Bucket": bucket_name, "Key": file_name},
             ExpiresIn=3600,
         )
-        download_url = raw_url.replace("http://objectstore:9000", "http://localhost:9000")
+        download_url = raw_url.replace(
+            "http://objectstore:9000", "http://localhost:9000"
+        )
 
         return {
             "status": "connected",
@@ -85,7 +87,9 @@ def check_storage_env():
 def check_cache_env():
     try:
         r = get_redis_client()
-        r.setex("infrastructure_test", 60, "Redis is lightning fast and fully operational!")
+        r.setex(
+            "infrastructure_test", 60, "Redis is lightning fast and fully operational!"
+        )
         cached_value = r.get("infrastructure_test")
         return {
             "status": "connected",

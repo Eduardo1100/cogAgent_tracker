@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
-from src.agent.env_adapter import ALFWorldAdapter, ScienceWorldAdapter, infer_task_type
+from src.agent.env_adapter import ScienceWorldAdapter, infer_task_type
 from src.agent.gwt_agent import GWTAutogenAgent
 from src.storage import cache
 from src.storage.database import SessionLocal, engine

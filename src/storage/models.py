@@ -71,7 +71,9 @@ class ExperimentRun(Base):
 
     # Final outcome metrics (mirrors W&B logs)
     success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    error_adjusted_success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_adjusted_success_rate: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
     num_errors: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Token breakdown (total_tokens already exists)
@@ -79,12 +81,24 @@ class ExperimentRun(Base):
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Per-outcome averages (mirrors W&B logs)
-    avg_actions_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_chat_rounds_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_runtime_per_successful_game: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_actions_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_chat_rounds_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_runtime_per_failing_game: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_actions_per_successful_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    avg_chat_rounds_per_successful_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    avg_runtime_per_successful_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    avg_actions_per_failing_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    avg_chat_rounds_per_failing_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    avg_runtime_per_failing_game: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
 
     # Relationship: One Experiment has Many Episodes
     episodes: Mapped[list["EpisodeRun"]] = relationship(
@@ -124,10 +138,14 @@ class EpisodeRun(Base):
 
     # Task description and type
     task: Mapped[str | None] = mapped_column(Text, nullable=True)
-    task_type: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ALFWorld types 1–6
+    task_type: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )  # ALFWorld types 1–6
 
     # Planning quality metrics
-    inadmissible_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inadmissible_action_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     concepts_learned: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # Per-game token usage and cost (mirrors W&B game/*)
@@ -137,7 +155,9 @@ class EpisodeRun(Base):
 
     # Running success rates at time of game completion (mirrors W&B logs)
     success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    error_adjusted_success_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_adjusted_success_rate: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
 
     # S3 Artifact Link (The Vault)
     chat_history_s3_key: Mapped[str | None] = mapped_column(

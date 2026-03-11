@@ -220,7 +220,10 @@ def create_echo_agent():
                 "Plain text responses are not valid.]"
             )
         if _state["last_obs"] is not None:
-            return True, f"[No new tool result — repeating last observation]: {_state['last_obs']}"
+            return (
+                True,
+                f"[No new tool result — repeating last observation]: {_state['last_obs']}",
+            )
         return True, "[Internal State Synchronized]"
 
     echo_agent.register_reply([ConversableAgent, None], relay_observation)

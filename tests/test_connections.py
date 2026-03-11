@@ -16,7 +16,9 @@ def test_all():
             with conn.cursor() as cur:
                 cur.execute("SELECT version();")
                 row = cur.fetchone()
-                print(f"✅ Postgres: Connected! ({row[0][:25] if row else 'unknown'}...)")
+                print(
+                    f"✅ Postgres: Connected! ({row[0][:25] if row else 'unknown'}...)"
+                )
     except Exception as e:
         print(f"❌ Postgres: Failed! {e}")
 

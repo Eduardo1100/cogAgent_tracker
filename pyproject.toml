@@ -52,6 +52,7 @@ dev = [
     "marimo>=0.13.0",
     "pandas>=2.0.0",
     "pre-commit>=4.5.1",
+    "pytest>=8.4.2",
     "ruff>=0.15.4",
     "ty>=0.0.21",
 ]
