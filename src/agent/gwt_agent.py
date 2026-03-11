@@ -213,6 +213,12 @@ class GWTAutogenAgent(AutogenAgent):
         "discover",
         "determine whether",
     )
+    _TASK_ARTIFACT_CREATION_HINTS = (
+        "create",
+        "make",
+        "produce",
+        "synthesize",
+    )
     _TASK_PROCEDURAL_HINTS = (
         "first",
         "then",
@@ -289,6 +295,14 @@ class GWTAutogenAgent(AutogenAgent):
         "next",
         "point",
         "which",
+    }
+    _ARTIFACT_CREATION_TASK_STOPWORDS = {
+        "chemistry",
+        "completely",
+        "done",
+        "part",
+        "way",
+        "when",
     }
     _TASK_ENTITY_STOPWORDS = _TASK_STOPWORDS | {
         "acceptable",
@@ -630,6 +644,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._candidate_states: dict[str, dict] = {}
         self._rejected_candidates: list[str] = []
         self._action_observation_signatures: dict[tuple[str, str, str], int] = {}
+        self._grounded_artifacts: dict[str, dict] = {}
         self._grounded_substances: dict[str, dict] = {}
         self._exhausted_container_targets: list[str] = []
         self._measurement_observations: list[dict] = []
@@ -665,6 +680,16 @@ class GWTAutogenAgent(AutogenAgent):
             measurement_branches,
         ) = self._extract_measurement_contract(task)
         measurement_task = bool(measurement_property and measurement_target)
+        role_phrases = self._extract_task_role_phrases(task)
+        (
+            artifact_type,
+            artifact_intermediate_targets,
+            artifact_final_targets,
+            artifact_descriptor_tokens,
+        ) = self._extract_artifact_creation_contract(task, role_phrases)
+        artifact_creation_task = bool(
+            artifact_type and not state_change_task and not measurement_task
+        )
         measurement_branch_tokens: set[str] = set()
         for branch_target in measurement_branch_targets:
             measurement_branch_tokens.update(
@@ -718,7 +743,6 @@ class GWTAutogenAgent(AutogenAgent):
                         )
                     )
 
-        role_phrases = self._extract_task_role_phrases(task)
         if measurement_task:
             role_phrases["primary_targets"] = [measurement_target]
             role_phrases["supporting_targets"] = []
@@ -757,6 +781,9 @@ class GWTAutogenAgent(AutogenAgent):
             "required_relations",
             "candidate_classes",
             "target_substances",
+            "artifact_type",
+            "artifact_intermediate_targets",
+            "artifact_final_targets",
             "measurement_target",
             "measurement_instrument",
             "destination_container",
@@ -767,6 +794,12 @@ class GWTAutogenAgent(AutogenAgent):
                 phrases = candidate_classes
             elif role == "target_substances":
                 phrases = target_substances
+            elif role == "artifact_type":
+                phrases = [artifact_type] if artifact_type else []
+            elif role == "artifact_intermediate_targets":
+                phrases = artifact_intermediate_targets
+            elif role == "artifact_final_targets":
+                phrases = artifact_final_targets
             elif role == "measurement_target":
                 phrases = [measurement_target] if measurement_target else []
             elif role == "measurement_instrument":
@@ -794,6 +827,11 @@ class GWTAutogenAgent(AutogenAgent):
                 | ordering_tokens
                 | transformation_tokens
                 | (self._STATE_CHANGE_TASK_STOPWORDS if state_change_task else set())
+                | (
+                    self._ARTIFACT_CREATION_TASK_STOPWORDS
+                    if artifact_creation_task
+                    else set()
+                )
                 | (self._MEASUREMENT_TASK_STOPWORDS if measurement_task else set())
                 | (measurement_branch_tokens if measurement_task else set())
                 | (measurement_numeric_tokens if measurement_task else set())
@@ -815,12 +853,17 @@ class GWTAutogenAgent(AutogenAgent):
             "procedural_sequence": procedural_sequence,
             "lifecycle_sequence": lifecycle_sequence,
             "state_change_task": state_change_task,
+            "artifact_creation_task": artifact_creation_task,
             "measurement_task": measurement_task,
             "search_mode": search_mode,
             "candidate_classes": candidate_classes,
             "primary_targets": role_phrases["primary_targets"],
             "supporting_targets": role_phrases["supporting_targets"],
             "target_substances": target_substances,
+            "artifact_type": [artifact_type] if artifact_type else [],
+            "artifact_intermediate_targets": artifact_intermediate_targets,
+            "artifact_final_targets": artifact_final_targets,
+            "artifact_descriptor_tokens": artifact_descriptor_tokens,
             "measurement_property": measurement_property,
             "measurement_target": [measurement_target] if measurement_target else [],
             "measurement_instrument": (
@@ -873,6 +916,9 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_property = task_contract.get("measurement_property")
         if measurement_property and measurement_property not in keywords:
             keywords.append(measurement_property)
+        for artifact_type in task_contract.get("artifact_type", []):
+            if artifact_type and artifact_type not in keywords:
+                keywords.append(artifact_type)
         if self._selected_measurement_branch_target:
             for token in self._extract_runtime_tokens(
                 self._selected_measurement_branch_target,
@@ -938,6 +984,85 @@ class GWTAutogenAgent(AutogenAgent):
                 break
 
         return target_substances[:2], desired_transformation, transformation_direction
+
+    def _extract_artifact_type_from_phrase(self, phrase: str) -> str:
+        tokens = self._extract_runtime_tokens(
+            phrase,
+            stopwords=(
+                self._TASK_ENTITY_STOPWORDS
+                | self._ACTION_COMMAND_STOPWORDS
+                | self._ARTIFACT_CREATION_TASK_STOPWORDS
+            ),
+            limit=6,
+        )
+        for token in reversed(tokens):
+            if token not in {"color", "intermediate", "secondary"}:
+                return token
+        return ""
+
+    def _extract_artifact_creation_contract(
+        self, task: str, role_phrases: dict[str, list[str]]
+    ) -> tuple[str, list[str], list[str], list[str]]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        if not any(
+            self._task_contains_hint(normalized_task, hint)
+            for hint in self._TASK_ARTIFACT_CREATION_HINTS
+        ):
+            return "", [], [], []
+
+        created_phrase = ""
+        for pattern in (
+            r"\b(?:create|make|produce|synthesize)\s+(.+?)(?=$|[.;,\n]|\bwhen\b|\bfirst\b|\bthen\b|\band then\b)",
+        ):
+            match = re.search(pattern, normalized_task)
+            if not match:
+                continue
+            created_phrase = self._normalize_task_phrase(
+                match.group(1), role="required_relations"
+            )
+            if created_phrase:
+                break
+
+        artifact_type = self._extract_artifact_type_from_phrase(created_phrase)
+        if not artifact_type:
+            return "", [], [], []
+
+        product_targets = [
+            phrase
+            for phrase in role_phrases.get("primary_targets", [])
+            if artifact_type
+            in self._extract_runtime_tokens(
+                phrase,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=6,
+            )
+        ]
+        if not product_targets:
+            return "", [], [], []
+
+        intermediate_targets = product_targets[:-1]
+        final_targets = product_targets[-1:]
+        descriptor_tokens: list[str] = []
+        for phrase in [created_phrase, *product_targets]:
+            for token in self._extract_runtime_tokens(
+                phrase,
+                stopwords=(
+                    self._TASK_ENTITY_STOPWORDS
+                    | self._ACTION_COMMAND_STOPWORDS
+                    | self._ARTIFACT_CREATION_TASK_STOPWORDS
+                    | {artifact_type}
+                ),
+                limit=6,
+            ):
+                if token not in descriptor_tokens:
+                    descriptor_tokens.append(token)
+
+        return (
+            artifact_type,
+            intermediate_targets[:2],
+            final_targets[:2],
+            descriptor_tokens[:6],
+        )
 
     def _normalize_measurement_phrase(self, phrase: str) -> str:
         normalized = self._normalize_runtime_text(phrase)
@@ -1075,6 +1200,10 @@ class GWTAutogenAgent(AutogenAgent):
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("state_change_task"))
 
+    def _is_artifact_creation_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("artifact_creation_task"))
+
     def _is_measurement_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("measurement_task"))
@@ -1178,6 +1307,121 @@ class GWTAutogenAgent(AutogenAgent):
                 },
             )
             entry["last_seen_timestep"] = self.num_actions_taken
+
+    def _normalize_grounded_artifact_label(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+
+        normalized = re.split(
+            r"\b(?:containing|filled with|contains?)\b",
+            normalized,
+            maxsplit=1,
+        )[-1]
+        normalized = re.split(
+            r"\b(?:that|which|where|because|since|until|while|then|and then)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:a|an|the|some)\s+", "", normalized)
+        normalized = normalized.strip(" .,:;()")
+        tokens = self._extract_runtime_tokens(
+            normalized,
+            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=5,
+        )
+        return " ".join(tokens[:5])
+
+    def _extract_grounded_artifact_mentions(self, observation: str) -> list[str]:
+        task_contract = self._get_task_contract()
+        if not self._is_artifact_creation_task(task_contract):
+            return []
+
+        artifact_types = task_contract.get("artifact_type", [])
+        if not artifact_types:
+            return []
+        artifact_type = artifact_types[0]
+        normalized_observation = self._normalize_runtime_text(observation)
+        if not normalized_observation:
+            return []
+
+        grounded_labels: list[str] = []
+        patterns = (
+            rf"\b(?:a|an|the|some)\s+([a-z0-9][a-z0-9\s-]{{0,40}}?\b{re.escape(artifact_type)}\b)(?=$|[).,;\n])",
+            rf"\bcontaining\s+([a-z0-9][a-z0-9\s-]{{0,40}}?\b{re.escape(artifact_type)}\b)(?=$|[).,;\n])",
+            rf"\byou\s+focus\s+on\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{{0,40}}?\b{re.escape(artifact_type)}\b)(?=$|[).,;\n])",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, normalized_observation):
+                label = self._normalize_grounded_artifact_label(match.group(1))
+                if label and label not in grounded_labels:
+                    grounded_labels.append(label)
+        return grounded_labels[:6]
+
+    def _update_artifact_creation_tracking(self, observation: str) -> None:
+        if not self._is_artifact_creation_task():
+            return
+        for label in self._extract_grounded_artifact_mentions(observation):
+            entry = self._grounded_artifacts.setdefault(
+                label,
+                {
+                    "label": label,
+                    "last_seen_timestep": self.num_actions_taken,
+                },
+            )
+            entry["last_seen_timestep"] = self.num_actions_taken
+
+    def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
+        if not self._grounded_artifacts:
+            return []
+        labels = sorted(
+            self._grounded_artifacts.values(),
+            key=lambda entry: (-entry["last_seen_timestep"], entry["label"]),
+        )
+        return [entry["label"] for entry in labels[:limit]]
+
+    def _get_grounded_artifact_token_sets(self) -> list[set[str]]:
+        token_sets: list[set[str]] = []
+        for label in self._get_grounded_artifact_labels(limit=6):
+            tokens = set(
+                self._extract_runtime_tokens(
+                    label,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                )
+            )
+            if tokens:
+                token_sets.append(tokens)
+        return token_sets
+
+    def _artifact_role_is_grounded(self, role_token_sets: list[set[str]]) -> bool:
+        grounded_artifact_token_sets = self._get_grounded_artifact_token_sets()
+        return any(
+            role_tokens and role_tokens.issubset(artifact_tokens)
+            for role_tokens in role_token_sets
+            for artifact_tokens in grounded_artifact_token_sets
+        )
+
+    def _get_artifact_creation_snapshot(self) -> dict:
+        if not self._is_artifact_creation_task():
+            return {}
+        task_contract = self._get_task_contract()
+        grounded_artifacts = self._get_grounded_artifact_labels(limit=4)
+        snapshot = {
+            "artifact_type": task_contract.get("artifact_type", [])[:1],
+            "grounded_artifacts": grounded_artifacts,
+            "missing_ingredient_gap": len(grounded_artifacts) <= 1,
+        }
+        if task_contract.get("artifact_intermediate_targets"):
+            snapshot["intermediate_targets"] = task_contract[
+                "artifact_intermediate_targets"
+            ][:2]
+        if task_contract.get("artifact_final_targets"):
+            snapshot["final_targets"] = task_contract["artifact_final_targets"][:2]
+        return snapshot
+
+    @staticmethod
+    def _artifact_creation_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
 
     def _get_grounded_substance_labels(self, *, limit: int = 6) -> list[str]:
         labels = sorted(
@@ -1684,6 +1928,50 @@ class GWTAutogenAgent(AutogenAgent):
             return None
         return candidates[0][2]
 
+    def _canonicalize_room_transition_action(
+        self, suggested_action: str, admissible_commands: list[str]
+    ) -> str | None:
+        family = self._classify_action_family(suggested_action)
+        normalized = self._normalize_runtime_text(suggested_action)
+        if family != "relocation" or not normalized.startswith(("go to ", "enter ")):
+            return None
+
+        room_signature = self._extract_action_primary_object_signature(
+            suggested_action, family=family
+        )
+        room_tokens = set(
+            self._extract_runtime_tokens(
+                room_signature,
+                stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            )
+        )
+        if not room_tokens:
+            return None
+
+        candidates: list[tuple[int, int, str]] = []
+        for command in admissible_commands:
+            if self._classify_action_family(command) != "device_control":
+                continue
+            command_tokens = set(
+                self._extract_action_content_tokens(command, family="device_control")
+            )
+            if "door" not in command_tokens or not room_tokens.issubset(command_tokens):
+                continue
+            bonus = (
+                4 if self._normalize_runtime_text(command).startswith("open ") else 0
+            )
+            extra = len(command_tokens - room_tokens)
+            candidates.append((bonus - extra, extra, command))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (-item[0], item[1], len(item[2]), item[2]))
+        if len(candidates) > 1 and candidates[0][:2] == candidates[1][:2]:
+            return None
+        return candidates[0][2]
+
     def _extract_stage_labels(self, text: str) -> list[str]:
         normalized = self._normalize_runtime_text(text)
         normalized = re.sub(r"\b(?:self watering )?flower pot\b", "pot", normalized)
@@ -1969,6 +2257,9 @@ class GWTAutogenAgent(AutogenAgent):
             "required_relations",
             "candidate_classes",
             "target_substances",
+            "artifact_type",
+            "artifact_intermediate_targets",
+            "artifact_final_targets",
             "measurement_target",
             "measurement_instrument",
             "measurement_branch_targets",
@@ -2084,6 +2375,15 @@ class GWTAutogenAgent(AutogenAgent):
                 tokens.append(label)
 
         for label in self._get_grounded_substance_labels(limit=4):
+            for token in self._extract_runtime_tokens(
+                label,
+                stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            ):
+                if token not in tokens:
+                    tokens.append(token)
+
+        for label in self._get_grounded_artifact_labels(limit=4):
             for token in self._extract_runtime_tokens(
                 label,
                 stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
@@ -2419,8 +2719,11 @@ class GWTAutogenAgent(AutogenAgent):
         stopwords = self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
         content_tokens = self._extract_runtime_tokens(action, stopwords=stopwords)
         if family == "device_control":
-            # Keeping "door" helps navigation/opening tasks stay grounded.
-            return content_tokens
+            # Keep door tokens for hierarchical navigation and opening tasks.
+            return self._extract_runtime_tokens(
+                action,
+                stopwords=(stopwords - {"door", "doors"}),
+            )
         return content_tokens
 
     def _get_action_referent_signature(
@@ -2557,6 +2860,45 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _get_shortlist_family_quotas(current_phase: str) -> dict[str, int]:
         quotas_by_phase = {
+            "locate_base_artifact": {
+                "inspect": 4,
+                "device_control": 3,
+                "relocation": 2,
+                "focus": 1,
+                "transfer_or_transform": 1,
+            },
+            "find_missing_ingredient_or_reagent": {
+                "inspect": 4,
+                "device_control": 3,
+                "relocation": 2,
+                "focus": 1,
+                "transfer_or_transform": 1,
+                "tool_application": 1,
+            },
+            "combine_or_transform": {
+                "transfer_or_transform": 3,
+                "tool_application": 3,
+                "inspect": 2,
+                "device_control": 2,
+                "focus": 2,
+                "relocation": 1,
+            },
+            "verify_intermediate": {
+                "focus": 2,
+                "inspect": 3,
+                "transfer_or_transform": 2,
+                "tool_application": 2,
+                "device_control": 1,
+                "relocation": 1,
+            },
+            "verify_final": {
+                "focus": 2,
+                "inspect": 3,
+                "transfer_or_transform": 2,
+                "tool_application": 2,
+                "device_control": 1,
+                "relocation": 1,
+            },
             "locate_instrument": {
                 "inspect": 3,
                 "focus": 2,
@@ -2670,6 +3012,61 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _get_family_priority(current_phase: str, family: str) -> int:
         priorities_by_phase = {
+            "locate_base_artifact": {
+                "inspect": 7,
+                "device_control": 6,
+                "relocation": 5,
+                "focus": 2,
+                "transfer_or_transform": -3,
+                "tool_application": -3,
+                "relation": -4,
+                "other": -2,
+                "idle": -5,
+            },
+            "find_missing_ingredient_or_reagent": {
+                "inspect": 8,
+                "device_control": 7,
+                "relocation": 5,
+                "focus": 2,
+                "transfer_or_transform": -4,
+                "tool_application": -4,
+                "relation": -4,
+                "other": -2,
+                "idle": -5,
+            },
+            "combine_or_transform": {
+                "transfer_or_transform": 8,
+                "tool_application": 7,
+                "inspect": 5,
+                "device_control": 4,
+                "focus": 4,
+                "relocation": 1,
+                "relation": -1,
+                "other": -2,
+                "idle": -5,
+            },
+            "verify_intermediate": {
+                "focus": 8,
+                "inspect": 7,
+                "transfer_or_transform": 4,
+                "tool_application": 4,
+                "device_control": 2,
+                "relocation": 1,
+                "relation": -2,
+                "other": -2,
+                "idle": -5,
+            },
+            "verify_final": {
+                "focus": 8,
+                "inspect": 7,
+                "transfer_or_transform": 4,
+                "tool_application": 4,
+                "device_control": 2,
+                "relocation": 1,
+                "relation": -2,
+                "other": -2,
+                "idle": -5,
+            },
             "locate_instrument": {
                 "focus": 7,
                 "inspect": 6,
@@ -2878,6 +3275,11 @@ class GWTAutogenAgent(AutogenAgent):
             candidates.append((score, extra, command))
 
         if not candidates:
+            room_transition_fallback = self._canonicalize_room_transition_action(
+                suggested_action, admissible_commands
+            )
+            if room_transition_fallback is not None:
+                return room_transition_fallback
             unsupported_substance_fallback = (
                 self._canonicalize_unsupported_substance_action(
                     suggested_action, admissible_commands
@@ -2890,6 +3292,11 @@ class GWTAutogenAgent(AutogenAgent):
         candidates.sort(key=lambda item: (-item[0], item[1], len(item[2]), item[2]))
         best_score, _, best_command = candidates[0]
         if best_score < 18:
+            room_transition_fallback = self._canonicalize_room_transition_action(
+                suggested_action, admissible_commands
+            )
+            if room_transition_fallback is not None:
+                return room_transition_fallback
             unsupported_substance_fallback = (
                 self._canonicalize_unsupported_substance_action(
                     suggested_action, admissible_commands
@@ -2899,6 +3306,11 @@ class GWTAutogenAgent(AutogenAgent):
                 return unsupported_substance_fallback
             return suggested_action
         if len(candidates) > 1 and best_score - candidates[1][0] < 4:
+            room_transition_fallback = self._canonicalize_room_transition_action(
+                suggested_action, admissible_commands
+            )
+            if room_transition_fallback is not None:
+                return room_transition_fallback
             unsupported_substance_fallback = (
                 self._canonicalize_unsupported_substance_action(
                     suggested_action, admissible_commands
@@ -3078,6 +3490,35 @@ class GWTAutogenAgent(AutogenAgent):
             and family in {"focus", "inspect"}
         ):
             signal = max(signal - 2, 0)
+
+        if self._is_artifact_creation_task(task_contract):
+            artifact_type_match = self._has_full_role_match(
+                combined_tokens, role_token_sets["artifact_type"]
+            )
+            intermediate_match = self._has_full_role_match(
+                combined_tokens, role_token_sets["artifact_intermediate_targets"]
+            )
+            final_match = self._has_full_role_match(
+                combined_tokens, role_token_sets["artifact_final_targets"]
+            )
+            descriptor_only = bool(
+                combined_tokens
+                & set(task_contract.get("artifact_descriptor_tokens", []))
+            ) and not (artifact_type_match or intermediate_match or final_match)
+            if artifact_type_match:
+                signal += 1
+            if intermediate_match or final_match:
+                signal += 2
+            if (
+                len(self._get_grounded_artifact_labels(limit=6)) <= 1
+                and family
+                in {"transfer_or_transform", "tool_application", "relocation"}
+                and artifact_type_match
+                and not (intermediate_match or final_match)
+            ):
+                signal = min(signal, 1)
+            if descriptor_only:
+                signal = min(signal, 1)
 
         if self._is_measurement_task(task_contract):
             direct_measurement = self._signature_matches_role(
@@ -3413,6 +3854,220 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score
 
+    def _score_artifact_creation_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        content_token_set: set[str],
+        grounded_token_set: set[str],
+        task_contract: dict,
+        role_token_sets: dict[str, list[set[str]]],
+        grounded_hits: int,
+        support_role_hits: int,
+    ) -> int:
+        if not self._is_artifact_creation_task(task_contract):
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        artifact_role_hits, _ = self._best_role_overlap(
+            content_token_set, role_token_sets["artifact_type"]
+        )
+        artifact_full_match = self._has_full_role_match(
+            content_token_set, role_token_sets["artifact_type"]
+        )
+        intermediate_hits, _ = self._best_role_overlap(
+            content_token_set, role_token_sets["artifact_intermediate_targets"]
+        )
+        intermediate_full_match = self._has_full_role_match(
+            content_token_set, role_token_sets["artifact_intermediate_targets"]
+        )
+        final_hits, _ = self._best_role_overlap(
+            content_token_set, role_token_sets["artifact_final_targets"]
+        )
+        final_full_match = self._has_full_role_match(
+            content_token_set, role_token_sets["artifact_final_targets"]
+        )
+        grounded_artifact_token_sets = self._get_grounded_artifact_token_sets()
+        grounded_artifact_hits, _ = self._best_role_overlap(
+            content_token_set, grounded_artifact_token_sets
+        )
+        grounded_artifact_match = self._has_full_role_match(
+            content_token_set, grounded_artifact_token_sets
+        )
+        grounded_artifact_count = len(self._get_grounded_artifact_labels(limit=6))
+        descriptor_hits = len(
+            content_token_set & set(task_contract.get("artifact_descriptor_tokens", []))
+        )
+        score = 0
+
+        if artifact_full_match:
+            score += 10
+        elif artifact_role_hits:
+            score += artifact_role_hits * 4
+        if grounded_artifact_match:
+            score += 8
+        elif grounded_artifact_hits:
+            score += grounded_artifact_hits * 3
+        if intermediate_full_match:
+            score += 10
+        elif intermediate_hits:
+            score += intermediate_hits * 4
+        if final_full_match:
+            score += 12
+        elif final_hits:
+            score += final_hits * 5
+
+        if current_phase == "locate_base_artifact":
+            if family == "inspect":
+                score += 10
+                if normalized.startswith(("look in ", "look around")):
+                    score += 3
+            elif family == "device_control":
+                score += 8
+                if normalized.startswith("open "):
+                    score += 2
+            elif family == "relocation":
+                score += 6
+            elif family == "focus":
+                score += (
+                    10
+                    if (
+                        artifact_full_match
+                        or grounded_artifact_match
+                        or intermediate_full_match
+                        or final_full_match
+                    )
+                    else -10
+                )
+            elif family in {
+                "transfer_or_transform",
+                "tool_application",
+                "relation",
+            }:
+                score -= 14
+
+        elif current_phase == "find_missing_ingredient_or_reagent":
+            if family in {"inspect", "device_control"}:
+                score += 8
+            elif family == "relocation":
+                score += 8
+                if grounded_artifact_count <= 1 and (
+                    artifact_full_match or grounded_artifact_match
+                ):
+                    score -= 78
+            elif family == "focus":
+                score += (
+                    10
+                    if (
+                        artifact_full_match
+                        or grounded_artifact_match
+                        or intermediate_full_match
+                        or final_full_match
+                    )
+                    else -12
+                )
+            elif family in {"transfer_or_transform", "tool_application"}:
+                if grounded_artifact_count <= 1 and (
+                    artifact_full_match or grounded_artifact_match
+                ):
+                    score -= 62
+                elif (
+                    artifact_full_match
+                    or grounded_artifact_match
+                    or intermediate_hits
+                    or final_hits
+                ):
+                    score += 6
+                else:
+                    score -= 10
+            elif family == "relation":
+                score -= 10
+
+        elif current_phase == "combine_or_transform":
+            if family in {"transfer_or_transform", "tool_application"}:
+                score += (
+                    12
+                    if (
+                        artifact_full_match
+                        or grounded_artifact_match
+                        or intermediate_hits
+                        or final_hits
+                    )
+                    else -8
+                )
+            elif family == "inspect":
+                score += 8 if artifact_role_hits or grounded_artifact_hits else 2
+            elif family == "focus":
+                score += (
+                    10
+                    if (
+                        grounded_artifact_match
+                        or intermediate_full_match
+                        or final_full_match
+                    )
+                    else -8
+                )
+            elif family == "device_control":
+                score += (
+                    4
+                    if artifact_role_hits or grounded_hits or support_role_hits
+                    else -4
+                )
+            elif family == "relocation" and not (
+                artifact_full_match or grounded_artifact_match or support_role_hits
+            ):
+                score -= 6
+
+        elif current_phase == "verify_intermediate":
+            if family == "focus":
+                score += (
+                    18 if intermediate_full_match else -8 if final_full_match else -10
+                )
+            elif family == "inspect":
+                score += 10 if intermediate_hits or grounded_artifact_hits else 2
+            elif family in {"transfer_or_transform", "tool_application"}:
+                score += 4 if grounded_artifact_match else -8
+
+        elif current_phase == "verify_final":
+            if family == "focus":
+                score += (
+                    18 if final_full_match else -8 if intermediate_full_match else -10
+                )
+            elif family == "inspect":
+                score += 10 if final_hits or grounded_artifact_hits else 2
+            elif family in {"transfer_or_transform", "tool_application"}:
+                score += 4 if grounded_artifact_match else -8
+
+        if descriptor_hits and not (
+            artifact_full_match
+            or grounded_artifact_match
+            or intermediate_hits
+            or final_hits
+        ):
+            score -= 18
+
+        if (
+            current_phase
+            in {"locate_base_artifact", "find_missing_ingredient_or_reagent"}
+            and grounded_artifact_count <= 1
+            and family in {"relocation", "transfer_or_transform"}
+            and grounded_artifact_match
+        ):
+            score -= 10
+
+        if (
+            family == "device_control"
+            and descriptor_hits
+            and not artifact_role_hits
+            and not grounded_artifact_hits
+            and not support_role_hits
+        ):
+            score -= 6
+
+        return score
+
     def _score_measurement_action(
         self,
         *,
@@ -3645,6 +4300,46 @@ class GWTAutogenAgent(AutogenAgent):
             if not mechanism_progress:
                 return "test_transformation"
             return "verify_outcome"
+        if self._is_artifact_creation_task(task_contract):
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            grounded_artifacts = self._get_grounded_artifact_labels(limit=6)
+            intermediate_targets = task_contract.get(
+                "artifact_intermediate_targets", []
+            )
+            final_targets = task_contract.get("artifact_final_targets", [])
+            intermediate_focused = self._role_focus_completed(
+                role_token_sets["artifact_intermediate_targets"]
+            )
+            final_focused = self._role_focus_completed(
+                role_token_sets["artifact_final_targets"]
+            )
+            intermediate_grounded = self._artifact_role_is_grounded(
+                role_token_sets["artifact_intermediate_targets"]
+            )
+            final_grounded = self._artifact_role_is_grounded(
+                role_token_sets["artifact_final_targets"]
+            )
+            mechanism_progress = any(
+                entry["observable_change_attempts"] > 0
+                for entry in self.episode_hypothesis_ledger.values()
+                if entry["family"]
+                in {"tool_application", "transfer_or_transform", "device_control"}
+            )
+            if not grounded_artifacts:
+                return "locate_base_artifact"
+            if intermediate_targets and not intermediate_focused:
+                if len(grounded_artifacts) <= 1 and not intermediate_grounded:
+                    return "find_missing_ingredient_or_reagent"
+                if intermediate_grounded:
+                    return "verify_intermediate"
+                return "combine_or_transform"
+            if final_targets and not final_focused:
+                if final_grounded:
+                    return "verify_final"
+                if len(grounded_artifacts) <= 1 and not mechanism_progress:
+                    return "find_missing_ingredient_or_reagent"
+                return "combine_or_transform"
+            return "combine_or_transform"
         inspect_evidence = any(
             entry["evidence_attempts"] > 0
             for entry in self.episode_hypothesis_ledger.values()
@@ -3735,6 +4430,7 @@ class GWTAutogenAgent(AutogenAgent):
             role_token_sets["primary_targets"]
         )
         state_change_task = self._is_state_change_task(task_contract)
+        artifact_creation_task = self._is_artifact_creation_task(task_contract)
         measurement_task = self._is_measurement_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
@@ -3947,6 +4643,18 @@ class GWTAutogenAgent(AutogenAgent):
                 task_contract=task_contract,
                 role_token_sets=role_token_sets,
             )
+        elif artifact_creation_task:
+            score += self._score_artifact_creation_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                content_token_set=content_token_set,
+                grounded_token_set=grounded_token_set,
+                task_contract=task_contract,
+                role_token_sets=role_token_sets,
+                grounded_hits=grounded_hits,
+                support_role_hits=support_role_hits,
+            )
         elif state_change_task:
             score += self._score_state_change_action(
                 action=action,
@@ -4110,6 +4818,7 @@ class GWTAutogenAgent(AutogenAgent):
             for entry in self.episode_hypothesis_ledger.values()
             if entry["status"] == "deprioritized"
         )
+        artifact_creation = self._get_artifact_creation_snapshot()
         substance_search = self._get_substance_search_snapshot(actions)
         measurement_tracking = self._get_measurement_tracking_snapshot()
 
@@ -4122,6 +4831,7 @@ class GWTAutogenAgent(AutogenAgent):
             "deprioritized_families": deprioritized_families,
             "candidate_tracking": self._get_candidate_tracking_snapshot(),
             "task_contract": task_contract,
+            "artifact_creation": artifact_creation,
             "substance_search": substance_search,
             "measurement_tracking": measurement_tracking,
         }
@@ -4169,6 +4879,13 @@ class GWTAutogenAgent(AutogenAgent):
                 + json.dumps(substance_search)
                 + "\n"
             )
+        artifact_creation = summary.get("artifact_creation", {})
+        if self._artifact_creation_has_signal(artifact_creation):
+            extra_context += (
+                "Artifact creation state this episode: "
+                + json.dumps(artifact_creation)
+                + "\n"
+            )
         measurement_tracking = summary.get("measurement_tracking", {})
         if self._measurement_tracking_has_signal(measurement_tracking):
             extra_context += (
@@ -4191,6 +4908,7 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
             + f"Task contract: {json.dumps(summary['task_contract'])}\n"
+            + f"Artifact creation snapshot: {json.dumps(summary['artifact_creation'])}\n"
             + f"Substance search snapshot: {json.dumps(summary['substance_search'])}\n"
             + f"Measurement tracking snapshot: {json.dumps(summary['measurement_tracking'])}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
@@ -4471,6 +5189,7 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
+        self._update_artifact_creation_tracking(self.adapter.observation)
         self._update_measurement_tracking(
             action=action,
             observation=self.adapter.observation,
@@ -4492,6 +5211,9 @@ class GWTAutogenAgent(AutogenAgent):
         substance_search = shared_action_context.get("substance_search", {})
         if self._substance_search_has_signal(substance_search):
             self.percept["substance_search"] = substance_search
+        artifact_creation = shared_action_context.get("artifact_creation", {})
+        if self._artifact_creation_has_signal(artifact_creation):
+            self.percept["artifact_creation"] = artifact_creation
         measurement_tracking = shared_action_context.get("measurement_tracking", {})
         if self._measurement_tracking_has_signal(measurement_tracking):
             self.percept["measurement_tracking"] = measurement_tracking
