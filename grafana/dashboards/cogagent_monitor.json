@@ -112,7 +112,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 2,
         "y": 1
       },
@@ -156,7 +156,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 16,
+        "x": 14,
         "y": 1
       },
       "id": 9,
@@ -201,7 +201,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 12,
+        "x": 10,
         "y": 1
       },
       "id": 3,
@@ -245,7 +245,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 14,
+        "x": 12,
         "y": 1
       },
       "id": 4,
@@ -286,8 +286,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 6,
+        "w": 3,
+        "x": 5,
         "y": 1
       },
       "id": 7,
@@ -330,7 +330,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 18,
+        "x": 16,
         "y": 1
       },
       "id": 8,
@@ -405,7 +405,7 @@
       "gridPos": {
         "h": 4,
         "w": 2,
-        "x": 10,
+        "x": 8,
         "y": 1
       },
       "id": 110,
@@ -490,8 +490,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 2,
-        "x": 20,
+        "w": 4,
+        "x": 18,
         "y": 1
       },
       "id": 5,
@@ -506,7 +506,7 @@
         "textMode": "value",
         "colorMode": "none"
       },
-      "title": "Git Branch",
+      "title": "Git Ref",
       "type": "stat",
       "targets": [
         {
@@ -516,7 +516,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(NULLIF(git_branch, ''), 'not set') as git_branch FROM experiment_runs WHERE id = ${experiment_id}",
+          "rawSql": "SELECT CASE\n  WHEN NULLIF(git_branch, '') IS NULL AND NULLIF(git_commit, '') IS NULL THEN 'not set'\n  WHEN NULLIF(git_branch, '') IS NULL THEN LEFT(git_commit, 7)\n  WHEN NULLIF(git_commit, '') IS NULL THEN git_branch\n  ELSE git_branch || ' @ ' || LEFT(git_commit, 7)\nEND AS git_ref\nFROM experiment_runs\nWHERE id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
