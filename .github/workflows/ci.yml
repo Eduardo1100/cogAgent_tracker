@@ -1,59 +1,64 @@
 name: CI
+
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  lint:
+  quality:
+    name: Ruff and Pytest
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Run Ruff Check
-        # This checks for bugs and logic errors
-        run: uvx ruff check .
-
-      - name: Run Ruff Format
-        # This ensures the code style is perfect
-        run: uvx ruff format --check .
-
-  test:
-    needs: lint # Only run tests if linting passes
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          enable-cache: true # This saves your .venv between runs!
+          enable-cache: true
+          python-version: "3.11.15"
 
-      - name: Set up Python
-        run: uv python install
+      - name: Sync dependencies
+        run: uv sync --frozen --group dev
 
-      - name: Run Tests
-        # uv run handles the environment automatically
-        run: uv run pytest
+      - name: Ruff check
+        run: uv run ruff check .
 
-  build-docker:
-    needs: test
+      - name: Ruff format check
+        run: uv run ruff format . --check
+
+      - name: Pytest
+        run: uv run pytest tests/
+
+  docker-build:
+    name: Docker build
+    needs: quality
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and Load
-        uses: docker/build-push-action@v5
+      - name: Build image
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: false # Set to true once you add Docker Hub/GHCR credentials
-          tags: my-ai-app:latest
+          file: ./Dockerfile
+          push: false
+          tags: cogagent-tracker:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
