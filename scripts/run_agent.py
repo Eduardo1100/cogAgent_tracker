@@ -585,9 +585,7 @@ def upload_chat_history_artifact(
 
 
 def extract_concepts(chat_text: str) -> list[str]:
-    concept_matches = re.findall(
-        r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
-    )
+    concept_matches = re.findall(r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL)
     concept_matches = [c.strip() for c in concept_matches]
     return [c for c in concept_matches if not c.upper().startswith("NO CONCEPT")]
 
@@ -614,7 +612,11 @@ def persist_episode_run(
     chat_history_s3_key: str | None,
 ) -> EpisodeRun:
     adapter = getattr(agent, "adapter", None)
-    task_type = adapter.infer_task_type() if adapter and hasattr(adapter, "infer_task_type") else None
+    task_type = (
+        adapter.infer_task_type()
+        if adapter and hasattr(adapter, "infer_task_type")
+        else None
+    )
     inadmissible_action_count = (
         adapter.count_inadmissible_actions(log_paths["history_path"])
         if adapter and hasattr(adapter, "count_inadmissible_actions")
@@ -1045,7 +1047,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                     [g for g in error_list if g not in success_list]
                 )
                 error_adjusted_success_rate = (
-                    num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
                 )
 
                 wandb.log(
@@ -1101,12 +1105,16 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 cumulative_runtime += elapsed_minutes
                 if game_no not in error_list:
                     error_list.append(game_no)
-                success_rate = num_successes / num_games_evaluated if num_games_evaluated else 0.0
+                success_rate = (
+                    num_successes / num_games_evaluated if num_games_evaluated else 0.0
+                )
                 num_games_no_error = num_games_evaluated - len(
                     [g for g in error_list if g not in success_list]
                 )
                 error_adjusted_success_rate = (
-                    num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
                 )
                 total_run_usage = persist_interrupted_episode_run(
                     db,
@@ -1120,7 +1128,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                     error_adjusted_success_rate=error_adjusted_success_rate,
                     error_message=f"Run interrupted: {exc}",
                 )
-                print(f"⚠️ Saved partial interrupted Game #{game_no} to PostgreSQL Database.")
+                print(
+                    f"⚠️ Saved partial interrupted Game #{game_no} to PostgreSQL Database."
+                )
                 raise
     except KeyboardInterrupt:
         finalize_experiment(
@@ -1417,8 +1427,8 @@ def main():
                                 )
                                 try:
                                     game_start_time = time.time()
-                                    chat_result, error_message, elapsed_minutes = run_game(
-                                        agent, i
+                                    chat_result, error_message, elapsed_minutes = (
+                                        run_game(agent, i)
                                     )
                                     chat_artifacts = persist_chat_artifacts(
                                         agent, chat_result=chat_result
@@ -1426,14 +1436,18 @@ def main():
                                     chat_text = chat_artifacts["chat_text"]
                                     transitions = chat_artifacts["transitions"]
                                     belief_matches = chat_artifacts["belief_matches"]
-                                    chat_round_list.append(chat_artifacts["chat_rounds"])
+                                    chat_round_list.append(
+                                        chat_artifacts["chat_rounds"]
+                                    )
                                     cumulative_runtime += elapsed_minutes
 
                                     current_usage_totals = get_agent_usage_totals(agent)
                                     game_usage = get_usage_delta(
                                         current_usage_totals, total_run_usage
                                     )
-                                    game_prompt_tokens = int(game_usage["prompt_tokens"])
+                                    game_prompt_tokens = int(
+                                        game_usage["prompt_tokens"]
+                                    )
                                     game_completion_tokens = int(
                                         game_usage["completion_tokens"]
                                     )
@@ -1441,7 +1455,8 @@ def main():
                                     game_total_cost = float(game_usage["total_cost"])
                                     total_run_usage = {
                                         key: max(
-                                            total_run_usage[key], current_usage_totals[key]
+                                            total_run_usage[key],
+                                            current_usage_totals[key],
                                         )
                                         for key in total_run_usage
                                     }
@@ -1490,30 +1505,35 @@ def main():
                                         )
                                         cumulative_successful_runtime += elapsed_minutes
                                         avg_actions_taken_per_successful_game = (
-                                            cumulative_successful_actions / num_successes
+                                            cumulative_successful_actions
+                                            / num_successes
                                         )
                                         avg_chat_rounds_per_successful_game = (
                                             cumulative_successful_chat_rounds
                                             / num_successes
                                         )
                                         avg_runtime_per_successful_game = (
-                                            cumulative_successful_runtime / num_successes
+                                            cumulative_successful_runtime
+                                            / num_successes
                                         )
                                     else:
-                                        num_failures = num_games_evaluated - num_successes
+                                        num_failures = (
+                                            num_games_evaluated - num_successes
+                                        )
                                         failure_list.append(i)
                                         cumulative_failing_actions += (
                                             agent.num_actions_taken
                                         )
-                                        cumulative_failing_chat_rounds += chat_round_list[
-                                            -1
-                                        ]
+                                        cumulative_failing_chat_rounds += (
+                                            chat_round_list[-1]
+                                        )
                                         cumulative_failing_runtime += elapsed_minutes
                                         avg_actions_taken_per_failing_game = (
                                             cumulative_failing_actions / num_failures
                                         )
                                         avg_chat_rounds_per_failing_game = (
-                                            cumulative_failing_chat_rounds / num_failures
+                                            cumulative_failing_chat_rounds
+                                            / num_failures
                                         )
                                         avg_runtime_per_failing_game = (
                                             cumulative_failing_runtime / num_failures
@@ -1604,7 +1624,9 @@ def main():
                                         f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
                                     )
                                 except KeyboardInterrupt as exc:
-                                    elapsed_minutes = (time.time() - game_start_time) / 60
+                                    elapsed_minutes = (
+                                        time.time() - game_start_time
+                                    ) / 60
                                     cumulative_runtime += elapsed_minutes
                                     if i not in error_list:
                                         error_list.append(i)

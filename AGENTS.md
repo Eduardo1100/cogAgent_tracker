@@ -52,7 +52,13 @@
   - Environment-specific agent memory now lives under [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory); preserve the `alfworld/` and `scienceworld/` split when changing memory logic or moving files.
   - ALFWorld bootstrap is handled by [scripts/bootstrap_alfworld.sh](/home/eduardo/Projects/cogAgent_tracker/scripts/bootstrap_alfworld.sh) and is expected by Docker-based flows.
   - For Docker-run evals, preserve the `exec env ... uv run python ...` pattern in [Makefile](/home/eduardo/Projects/cogAgent_tracker/Makefile) so `Ctrl+C` reaches Python instead of stopping in the shell wrapper.
-  - For iterative agent changes, prefer Graphite stacks with one focused branch per iteration. Current naming convention: `agent-iter-XX-<topic>`.
+  - For iterative agent changes, prefer Graphite stacks with one meaningful agent-behavior iteration per branch.
+  - Keep `main` for merged baseline work and cross-cutting fixes that are not themselves agent-behavior iterations, such as `Ctrl+C` persistence, observability repairs, docs, or branch hygiene.
+  - Keep the stack limited to branches that are worth independent review and rollback. Fold fixups, cleanup commits, and doc-only follow-ups into the nearest meaningful branch or into `main` instead of leaving them as separate stack entries.
+  - Preferred branch naming:
+    - `agent-iter-01-<topic>`
+    - `agent-iter-02-<topic>`
+  - Increment iteration numbers in review order and stack each new agent iteration on the previous one unless you are intentionally starting a separate line of work.
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.

@@ -109,12 +109,10 @@ def _install_gwt_import_stubs() -> None:
     sys.modules["autogen.agentchat"] = agentchat_module
     sys.modules["autogen.agentchat.contrib"] = contrib_module
     sys.modules["autogen.agentchat.contrib.capabilities"] = capabilities_module
-    sys.modules[
-        "autogen.agentchat.contrib.capabilities.transform_messages"
-    ] = transform_messages_module
-    sys.modules[
-        "autogen.agentchat.contrib.capabilities.transforms"
-    ] = transforms_module
+    sys.modules["autogen.agentchat.contrib.capabilities.transform_messages"] = (
+        transform_messages_module
+    )
+    sys.modules["autogen.agentchat.contrib.capabilities.transforms"] = transforms_module
 
     helpers_module = types.ModuleType("src.agent.helpers")
 
@@ -198,9 +196,7 @@ def test_register_log_paths_switches_to_adapter_environment(tmp_path):
     (alfworld_dir / "memory1.txt").write_text("alf concept\n")
     (alfworld_dir / "memory2.txt").write_text("alf cluster\n")
 
-    obs = [
-        "intro\n\nYou are in a kitchen.\n\nYour task is to: put apple on table."
-    ]
+    obs = ["intro\n\nYou are in a kitchen.\n\nYour task is to: put apple on table."]
     info = {"admissible_commands": [["look"]], "won": [False]}
     agent.adapter = env_adapter.ALFWorldAdapter(env=None, obs=obs, info=info)
 

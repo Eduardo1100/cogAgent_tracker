@@ -205,7 +205,10 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
     transition_path = game_dir / "transition_log.json"
 
     assert artifacts["chat_rounds"] == 2
-    assert "Recovered transcript from in-memory group chat state." in artifacts["chat_text"]
+    assert (
+        "Recovered transcript from in-memory group chat state."
+        in artifacts["chat_text"]
+    )
     assert "Belief_State_Agent" in chat_history_path.read_text()
     assert "focus on mouse" in chat_history_path.read_text()
     assert transition_path.exists()
@@ -299,7 +302,9 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
                 ]
             )
         )
-        (game_dir / "history.txt").write_text("action: 'focus on water'. observation: 'You focus on the water.'\n")
+        (game_dir / "history.txt").write_text(
+            "action: 'focus on water'. observation: 'You focus on the water.'\n"
+        )
 
         class FakeS3:
             def __init__(self):
@@ -343,11 +348,21 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
         )
 
         assert totals["total_tokens"] == 0
-        persisted_episode = db.query(EpisodeRun).filter(EpisodeRun.experiment_id == experiment.id).one()
+        persisted_episode = (
+            db.query(EpisodeRun).filter(EpisodeRun.experiment_id == experiment.id).one()
+        )
         assert persisted_episode.success is False
         assert persisted_episode.chat_rounds == 2
         assert persisted_episode.runtime_minutes == 1.25
         assert persisted_episode.error_message == "Run interrupted: Received signal 2"
-        assert persisted_episode.chat_history_s3_key == f"experiments/run_{experiment.id}/game_2_chat.txt"
-        assert persisted_episode.belief_state["memory"] == ["[I see water in the sink.]"]
-        assert fake_s3.calls[0]["Key"] == f"experiments/run_{experiment.id}/game_2_chat.txt"
+        assert (
+            persisted_episode.chat_history_s3_key
+            == f"experiments/run_{experiment.id}/game_2_chat.txt"
+        )
+        assert persisted_episode.belief_state["memory"] == [
+            "[I see water in the sink.]"
+        ]
+        assert (
+            fake_s3.calls[0]["Key"]
+            == f"experiments/run_{experiment.id}/game_2_chat.txt"
+        )
