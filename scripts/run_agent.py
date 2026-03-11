@@ -1,12 +1,9 @@
+import argparse
 import json
 import os
-import subprocess
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-import argparse
 import random
 import re
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +25,7 @@ from src.storage.database import SessionLocal
 from src.storage.models import EpisodeRun, ExperimentRun
 from src.storage.s3 import get_s3_client
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 load_dotenv()
 
 BUCKET_NAME = "alfworld-experiments"
