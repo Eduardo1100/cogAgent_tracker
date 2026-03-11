@@ -250,3 +250,104 @@ def test_run_game_persists_partial_chat_on_keyboard_interrupt(tmp_path):
     assert "Interrupted during run_chat" in chat_text
     assert "Belief_State_Agent" in chat_text
     assert "Run interrupted: Received signal 2" in error_text
+
+
+def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
+    tmp_path, monkeypatch
+):
+    from src.storage.models import Base, EpisodeRun, ExperimentRun
+
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    db_path = tmp_path / "interrupted_episode.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestingSessionLocal() as db:
+        experiment = ExperimentRun(
+            agent_name="GWTAutogenAgent",
+            llm_model="test-model",
+            eval_env_type="scienceworld",
+            max_actions_per_game=10,
+            max_chat_rounds=20,
+            status="RUNNING",
+        )
+        db.add(experiment)
+        db.commit()
+        db.refresh(experiment)
+
+        game_dir = tmp_path / "game_2"
+        chat_history_path = game_dir / "chat_history.txt"
+        chat_history_path.parent.mkdir(parents=True, exist_ok=True)
+        chat_history_path.write_text(
+            "\n".join(
+                [
+                    "NOTE: Interrupted during run_chat; recovered the latest partial transcript from in-memory group chat state.",
+                    "--------------------",
+                    "name: Belief_State_Agent",
+                    "role: assistant",
+                    "content:",
+                    "BELIEF STATE: [I see water in the sink.]",
+                    "--------------------",
+                    "name: Action_Agent",
+                    "role: assistant",
+                    "content:",
+                    "execute_action('focus on water')",
+                    "",
+                ]
+            )
+        )
+        (game_dir / "history.txt").write_text("action: 'focus on water'. observation: 'You focus on the water.'\n")
+
+        class FakeS3:
+            def __init__(self):
+                self.calls = []
+
+            def put_object(self, **kwargs):
+                self.calls.append(kwargs)
+
+        fake_s3 = FakeS3()
+        agent = types.SimpleNamespace(
+            log_paths={
+                "chat_history_path": str(chat_history_path),
+                "history_path": str(game_dir / "history.txt"),
+            },
+            group_chat=types.SimpleNamespace(agents=[]),
+            curr_episodic_memory=["memory"],
+            task="Change the state of matter of water.",
+            num_actions_taken=2,
+            adapter=types.SimpleNamespace(
+                infer_task_type=lambda: 4,
+                count_inadmissible_actions=lambda _path: 1,
+            ),
+        )
+
+        totals = run_agent.persist_interrupted_episode_run(
+            db,
+            experiment=experiment,
+            agent=agent,
+            game_number=2,
+            s3=fake_s3,
+            total_run_usage={
+                "total_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_cost": 0.0,
+            },
+            elapsed_minutes=1.25,
+            success_rate=0.0,
+            error_adjusted_success_rate=0.0,
+            error_message="Run interrupted: Received signal 2",
+        )
+
+        assert totals["total_tokens"] == 0
+        persisted_episode = db.query(EpisodeRun).filter(EpisodeRun.experiment_id == experiment.id).one()
+        assert persisted_episode.success is False
+        assert persisted_episode.chat_rounds == 2
+        assert persisted_episode.runtime_minutes == 1.25
+        assert persisted_episode.error_message == "Run interrupted: Received signal 2"
+        assert persisted_episode.chat_history_s3_key == f"experiments/run_{experiment.id}/game_2_chat.txt"
+        assert persisted_episode.belief_state["memory"] == ["[I see water in the sink.]"]
+        assert fake_s3.calls[0]["Key"] == f"experiments/run_{experiment.id}/game_2_chat.txt"

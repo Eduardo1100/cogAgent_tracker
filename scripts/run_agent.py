@@ -512,6 +512,197 @@ def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) 
     }
 
 
+def load_chat_artifacts_from_disk(chat_history_path: str) -> dict:
+    if not chat_history_path or not os.path.exists(chat_history_path):
+        return {
+            "chat_text": "",
+            "chat_rounds": -1,
+            "transitions": [],
+            "belief_matches": [],
+        }
+
+    chat_text = Path(chat_history_path).read_text()
+    transitions, belief_matches = extract_chat_metadata(chat_text)
+    chat_rounds = len(re.findall(r"^name:", chat_text, re.MULTILINE))
+    return {
+        "chat_text": chat_text,
+        "chat_rounds": chat_rounds if chat_rounds > 0 else -1,
+        "transitions": transitions,
+        "belief_matches": belief_matches,
+    }
+
+
+def ensure_chat_artifacts(
+    agent, *, chat_result=None, note: str | None = None, prefer_existing: bool = False
+) -> dict:
+    chat_history_path = (getattr(agent, "log_paths", {}) or {}).get("chat_history_path")
+    if prefer_existing and chat_history_path:
+        existing = load_chat_artifacts_from_disk(chat_history_path)
+        if existing["chat_text"]:
+            return existing
+    return persist_chat_artifacts(agent, chat_result=chat_result, note=note)
+
+
+def get_agent_usage_totals(agent) -> dict[str, float]:
+    group_chat = getattr(agent, "group_chat", None)
+    agents = getattr(group_chat, "agents", None) or []
+    return get_usage_totals(agents)
+
+
+def persist_experiment_usage_snapshot(
+    db, experiment: ExperimentRun, usage_totals: dict[str, float]
+) -> None:
+    try:
+        experiment.total_tokens = usage_totals["total_tokens"]
+        experiment.total_cost = usage_totals["total_cost"]
+        experiment.prompt_tokens = int(usage_totals["prompt_tokens"])
+        experiment.completion_tokens = int(usage_totals["completion_tokens"])
+        db.commit()
+    except Exception as exc:
+        print(f"⚠️ Database logging failed: {exc}")
+        db.rollback()
+
+
+def upload_chat_history_artifact(
+    s3, *, experiment_id: int, game_number: int, chat_text: str
+) -> str | None:
+    if not chat_text:
+        return None
+
+    s3_key = f"experiments/run_{experiment_id}/game_{game_number}_chat.txt"
+    try:
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=chat_text.encode("utf-8"),
+            ContentType="text/plain",
+        )
+        print(f"☁️ Uploaded chat history to S3: {s3_key}")
+        return s3_key
+    except Exception as exc:
+        print(f"⚠️ S3 upload failed: {exc}")
+        return None
+
+
+def extract_concepts(chat_text: str) -> list[str]:
+    concept_matches = re.findall(
+        r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
+    )
+    concept_matches = [c.strip() for c in concept_matches]
+    return [c for c in concept_matches if not c.upper().startswith("NO CONCEPT")]
+
+
+def persist_episode_run(
+    db,
+    *,
+    experiment: ExperimentRun,
+    game_number: int,
+    agent,
+    log_paths: dict,
+    success: bool,
+    chat_rounds: int,
+    runtime_minutes: float,
+    error_message: str | None,
+    transitions: list[dict],
+    belief_matches: list[str],
+    chat_text: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    episode_cost: float,
+    success_rate: float,
+    error_adjusted_success_rate: float,
+    chat_history_s3_key: str | None,
+) -> EpisodeRun:
+    adapter = getattr(agent, "adapter", None)
+    task_type = adapter.infer_task_type() if adapter and hasattr(adapter, "infer_task_type") else None
+    inadmissible_action_count = (
+        adapter.count_inadmissible_actions(log_paths["history_path"])
+        if adapter and hasattr(adapter, "count_inadmissible_actions")
+        else None
+    )
+    concepts_learned = extract_concepts(chat_text)
+
+    episode = EpisodeRun(
+        experiment_id=experiment.id,
+        game_number=game_number,
+        success=bool(success),
+        actions_taken=agent.num_actions_taken,
+        chat_rounds=chat_rounds,
+        runtime_minutes=runtime_minutes,
+        error_message=error_message,
+        transitions={"transitions": transitions},
+        belief_state={
+            "memory": belief_matches
+            if belief_matches
+            else getattr(agent, "curr_episodic_memory", [])
+        },
+        task=getattr(agent, "task", None),
+        task_type=task_type,
+        inadmissible_action_count=inadmissible_action_count,
+        concepts_learned=concepts_learned if concepts_learned else None,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        episode_cost=episode_cost,
+        success_rate=success_rate,
+        error_adjusted_success_rate=error_adjusted_success_rate,
+        chat_history_s3_key=chat_history_s3_key,
+    )
+    db.add(episode)
+    db.commit()
+    return episode
+
+
+def persist_interrupted_episode_run(
+    db,
+    *,
+    experiment: ExperimentRun,
+    agent,
+    game_number: int,
+    s3,
+    total_run_usage: dict[str, float],
+    elapsed_minutes: float,
+    success_rate: float,
+    error_adjusted_success_rate: float,
+    error_message: str,
+) -> dict[str, float]:
+    chat_artifacts = ensure_chat_artifacts(agent, prefer_existing=True)
+    current_usage_totals = get_agent_usage_totals(agent)
+    game_usage = get_usage_delta(current_usage_totals, total_run_usage)
+    updated_totals = {
+        key: max(total_run_usage[key], current_usage_totals[key])
+        for key in total_run_usage
+    }
+    persist_experiment_usage_snapshot(db, experiment, updated_totals)
+
+    s3_key = upload_chat_history_artifact(
+        s3,
+        experiment_id=experiment.id,
+        game_number=game_number,
+        chat_text=chat_artifacts["chat_text"],
+    )
+    persist_episode_run(
+        db,
+        experiment=experiment,
+        game_number=game_number,
+        agent=agent,
+        log_paths=getattr(agent, "log_paths", {}) or {},
+        success=False,
+        chat_rounds=chat_artifacts["chat_rounds"],
+        runtime_minutes=elapsed_minutes,
+        error_message=error_message,
+        transitions=chat_artifacts["transitions"],
+        belief_matches=chat_artifacts["belief_matches"],
+        chat_text=chat_artifacts["chat_text"],
+        prompt_tokens=int(game_usage["prompt_tokens"]),
+        completion_tokens=int(game_usage["completion_tokens"]),
+        episode_cost=float(game_usage["total_cost"]),
+        success_rate=success_rate,
+        error_adjusted_success_rate=error_adjusted_success_rate,
+        chat_history_s3_key=s3_key,
+    )
+    return updated_totals
+
+
 def extract_chat_metadata(chat_text: str):
     """Extract agent transitions and belief-state summaries from a chat log.
 
@@ -765,175 +956,172 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 f"\n[Running Game #{game_no}] "
                 f"({num_games_evaluated}/{total_games}) task={task_name} var={var_idx}"
             )
-            chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
-            chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
-            chat_text = chat_artifacts["chat_text"]
-            transitions = chat_artifacts["transitions"]
-            belief_matches = chat_artifacts["belief_matches"]
-            chat_round_list.append(chat_artifacts["chat_rounds"])
-            cumulative_runtime += elapsed_minutes
+            try:
+                game_start_time = time.time()
+                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
+                chat_text = chat_artifacts["chat_text"]
+                transitions = chat_artifacts["transitions"]
+                belief_matches = chat_artifacts["belief_matches"]
+                chat_round_list.append(chat_artifacts["chat_rounds"])
+                cumulative_runtime += elapsed_minutes
 
-            current_usage_totals = get_usage_totals(agent.group_chat.agents)
-            game_usage = get_usage_delta(current_usage_totals, total_run_usage)
-            game_prompt_tokens = int(game_usage["prompt_tokens"])
-            game_completion_tokens = int(game_usage["completion_tokens"])
-            game_total_tokens = int(game_usage["total_tokens"])
-            game_total_cost = float(game_usage["total_cost"])
-            total_run_usage = {
-                key: max(total_run_usage[key], current_usage_totals[key])
-                for key in total_run_usage
-            }
-            if any(value > 0 for value in game_usage.values()):
+                current_usage_totals = get_agent_usage_totals(agent)
+                game_usage = get_usage_delta(current_usage_totals, total_run_usage)
+                game_prompt_tokens = int(game_usage["prompt_tokens"])
+                game_completion_tokens = int(game_usage["completion_tokens"])
+                game_total_tokens = int(game_usage["total_tokens"])
+                game_total_cost = float(game_usage["total_cost"])
+                total_run_usage = {
+                    key: max(total_run_usage[key], current_usage_totals[key])
+                    for key in total_run_usage
+                }
+                if any(value > 0 for value in game_usage.values()):
+                    wandb.log(
+                        {
+                            "game/total_tokens": game_total_tokens,
+                            "game/cost": game_total_cost,
+                        },
+                        step=num_games_evaluated,
+                    )
+
+                if error_message:
+                    error_list.append(game_no)
+                    _append_text_file(
+                        log_paths["error_message_path"], f"Run Chat: {error_message}\n"
+                    )
+
+                agent.prev_episodic_memories.append(
+                    {
+                        "episode_number": num_games_evaluated,
+                        "task_outcome": agent.task_status,
+                        "memory": belief_matches
+                        if belief_matches
+                        else agent.curr_episodic_memory,
+                    }
+                )
+
+                s3_key = upload_chat_history_artifact(
+                    s3,
+                    experiment_id=experiment.id,
+                    game_number=game_no,
+                    chat_text=chat_text,
+                )
+
+                success = agent.success
+                if success:
+                    num_successes += 1
+                    success_list.append(game_no)
+                    cumulative_successful_actions += agent.num_actions_taken
+                    cumulative_successful_chat_rounds += chat_round_list[-1]
+                    cumulative_successful_runtime += elapsed_minutes
+                    avg_actions_taken_per_successful_game = (
+                        cumulative_successful_actions / num_successes
+                    )
+                    avg_chat_rounds_per_successful_game = (
+                        cumulative_successful_chat_rounds / num_successes
+                    )
+                    avg_runtime_per_successful_game = (
+                        cumulative_successful_runtime / num_successes
+                    )
+                else:
+                    num_failures = num_games_evaluated - num_successes
+                    failure_list.append(game_no)
+                    cumulative_failing_actions += agent.num_actions_taken
+                    cumulative_failing_chat_rounds += chat_round_list[-1]
+                    cumulative_failing_runtime += elapsed_minutes
+                    avg_actions_taken_per_failing_game = (
+                        cumulative_failing_actions / num_failures
+                    )
+                    avg_chat_rounds_per_failing_game = (
+                        cumulative_failing_chat_rounds / num_failures
+                    )
+                    avg_runtime_per_failing_game = (
+                        cumulative_failing_runtime / num_failures
+                    )
+
+                success_rate = num_successes / num_games_evaluated
+                num_games_no_error = num_games_evaluated - len(
+                    [g for g in error_list if g not in success_list]
+                )
+                error_adjusted_success_rate = (
+                    num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
+                )
+
                 wandb.log(
                     {
-                        "game/total_tokens": game_total_tokens,
-                        "game/cost": game_total_cost,
+                        "task_name": task_name,
+                        "var_idx": var_idx,
+                        "game_no": game_no,
+                        "success": int(success),
+                        "actions_taken": agent.num_actions_taken,
+                        "success_rate": success_rate,
+                        "runtime": elapsed_minutes,
+                        "cumulative_runtime": cumulative_runtime,
+                        "chat_rounds": chat_round_list[-1],
+                        "error_adjusted_success_rate": error_adjusted_success_rate,
+                        "final/total_tokens": total_run_usage["total_tokens"],
+                        "final/total_cost": total_run_usage["total_cost"],
                     },
                     step=num_games_evaluated,
                 )
 
-            if error_message:
-                error_list.append(game_no)
-                _append_text_file(
-                    log_paths["error_message_path"], f"Run Chat: {error_message}\n"
+                persist_experiment_usage_snapshot(db, experiment, total_run_usage)
+                persist_episode_run(
+                    db,
+                    experiment=experiment,
+                    game_number=game_no,
+                    agent=agent,
+                    log_paths=log_paths,
+                    success=success,
+                    chat_rounds=chat_round_list[-1],
+                    runtime_minutes=elapsed_minutes,
+                    error_message=str(error_message) if error_message else None,
+                    transitions=transitions,
+                    belief_matches=belief_matches,
+                    chat_text=chat_text,
+                    prompt_tokens=game_prompt_tokens,
+                    completion_tokens=game_completion_tokens,
+                    episode_cost=game_total_cost,
+                    success_rate=success_rate,
+                    error_adjusted_success_rate=error_adjusted_success_rate,
+                    chat_history_s3_key=s3_key,
                 )
+                print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
 
-            agent.prev_episodic_memories.append(
-                {
-                    "episode_number": num_games_evaluated,
-                    "task_outcome": agent.task_status,
-                    "memory": belief_matches
-                    if belief_matches
-                    else agent.curr_episodic_memory,
-                }
-            )
-
-            s3_key = None
-            try:
-                _s3_key = f"experiments/run_{experiment.id}/game_{game_no}_chat.txt"
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=_s3_key,
-                    Body=chat_text.encode("utf-8"),
-                    ContentType="text/plain",
+                print(f"[Ran Game #{game_no}] task={task_name} var={var_idx}")
+                print(
+                    f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m"
                 )
-                s3_key = _s3_key
-                print(f"☁️ Uploaded chat history to S3: {s3_key}")
-            except Exception as e:
-                print(f"⚠️ S3 upload failed: {e}")
-
-            success = agent.success
-            if success:
-                num_successes += 1
-                success_list.append(game_no)
-                cumulative_successful_actions += agent.num_actions_taken
-                cumulative_successful_chat_rounds += chat_round_list[-1]
-                cumulative_successful_runtime += elapsed_minutes
-                avg_actions_taken_per_successful_game = (
-                    cumulative_successful_actions / num_successes
+                print(
+                    f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
                 )
-                avg_chat_rounds_per_successful_game = (
-                    cumulative_successful_chat_rounds / num_successes
+            except KeyboardInterrupt as exc:
+                elapsed_minutes = (time.time() - game_start_time) / 60
+                cumulative_runtime += elapsed_minutes
+                if game_no not in error_list:
+                    error_list.append(game_no)
+                success_rate = num_successes / num_games_evaluated if num_games_evaluated else 0.0
+                num_games_no_error = num_games_evaluated - len(
+                    [g for g in error_list if g not in success_list]
                 )
-                avg_runtime_per_successful_game = (
-                    cumulative_successful_runtime / num_successes
+                error_adjusted_success_rate = (
+                    num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
                 )
-            else:
-                num_failures = num_games_evaluated - num_successes
-                failure_list.append(game_no)
-                cumulative_failing_actions += agent.num_actions_taken
-                cumulative_failing_chat_rounds += chat_round_list[-1]
-                cumulative_failing_runtime += elapsed_minutes
-                avg_actions_taken_per_failing_game = (
-                    cumulative_failing_actions / num_failures
+                total_run_usage = persist_interrupted_episode_run(
+                    db,
+                    experiment=experiment,
+                    agent=agent,
+                    game_number=game_no,
+                    s3=s3,
+                    total_run_usage=total_run_usage,
+                    elapsed_minutes=elapsed_minutes,
+                    success_rate=success_rate,
+                    error_adjusted_success_rate=error_adjusted_success_rate,
+                    error_message=f"Run interrupted: {exc}",
                 )
-                avg_chat_rounds_per_failing_game = (
-                    cumulative_failing_chat_rounds / num_failures
-                )
-                avg_runtime_per_failing_game = cumulative_failing_runtime / num_failures
-
-            success_rate = num_successes / num_games_evaluated
-            num_games_no_error = num_games_evaluated - len(
-                [g for g in error_list if g not in success_list]
-            )
-            error_adjusted_success_rate = (
-                num_successes / num_games_no_error if num_games_no_error > 0 else 0.0
-            )
-
-            wandb.log(
-                {
-                    "task_name": task_name,
-                    "var_idx": var_idx,
-                    "game_no": game_no,
-                    "success": int(success),
-                    "actions_taken": agent.num_actions_taken,
-                    "success_rate": success_rate,
-                    "runtime": elapsed_minutes,
-                    "cumulative_runtime": cumulative_runtime,
-                    "chat_rounds": chat_round_list[-1],
-                    "error_adjusted_success_rate": error_adjusted_success_rate,
-                    "final/total_tokens": total_run_usage["total_tokens"],
-                    "final/total_cost": total_run_usage["total_cost"],
-                },
-                step=num_games_evaluated,
-            )
-
-            concept_matches = re.findall(
-                r"CONCEPT DISCOVERED: \[(.*?)\]", chat_text, re.DOTALL
-            )
-            concept_matches = [c.strip() for c in concept_matches]
-            concept_matches = [
-                c for c in concept_matches if not c.upper().startswith("NO CONCEPT")
-            ]
-
-            try:
-                experiment.total_tokens = total_run_usage["total_tokens"]
-                experiment.total_cost = total_run_usage["total_cost"]
-                experiment.prompt_tokens = int(total_run_usage["prompt_tokens"])
-                experiment.completion_tokens = int(total_run_usage["completion_tokens"])
-                db.commit()
-            except Exception as e:
-                print(f"⚠️ Database logging failed: {e}")
-                db.rollback()
-
-            episode = EpisodeRun(
-                experiment_id=experiment.id,
-                game_number=game_no,
-                success=bool(success),
-                actions_taken=agent.num_actions_taken,
-                chat_rounds=chat_round_list[-1],
-                runtime_minutes=elapsed_minutes,
-                error_message=str(error_message) if error_message else None,
-                transitions={"transitions": transitions},
-                belief_state={
-                    "memory": belief_matches
-                    if belief_matches
-                    else agent.curr_episodic_memory
-                },
-                task=agent.task,
-                task_type=agent.adapter.infer_task_type(),
-                inadmissible_action_count=agent.adapter.count_inadmissible_actions(
-                    log_paths["history_path"]
-                ),
-                concepts_learned=concept_matches if concept_matches else None,
-                prompt_tokens=game_prompt_tokens,
-                completion_tokens=game_completion_tokens,
-                episode_cost=game_total_cost,
-                success_rate=success_rate,
-                error_adjusted_success_rate=error_adjusted_success_rate,
-                chat_history_s3_key=s3_key,
-            )
-            db.add(episode)
-            db.commit()
-            print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
-
-            print(f"[Ran Game #{game_no}] task={task_name} var={var_idx}")
-            print(
-                f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m"
-            )
-            print(
-                f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
-            )
+                print(f"⚠️ Saved partial interrupted Game #{game_no} to PostgreSQL Database.")
+                raise
     except KeyboardInterrupt:
         finalize_experiment(
             db,
@@ -1227,242 +1415,228 @@ def main():
                                 print(
                                     f"\n[Running Game #{i}] ({num_games_evaluated}/{num_games_to_evaluate})"
                                 )
-
-                                chat_result, error_message, elapsed_minutes = run_game(
-                                    agent, i
-                                )
-                                chat_artifacts = persist_chat_artifacts(
-                                    agent, chat_result=chat_result
-                                )
-                                chat_text = chat_artifacts["chat_text"]
-                                transitions = chat_artifacts["transitions"]
-                                belief_matches = chat_artifacts["belief_matches"]
-                                chat_round_list.append(chat_artifacts["chat_rounds"])
-                                cumulative_runtime += elapsed_minutes
-
-                                current_usage_totals = get_usage_totals(
-                                    agent.group_chat.agents
-                                )
-                                game_usage = get_usage_delta(
-                                    current_usage_totals, total_run_usage
-                                )
-                                game_prompt_tokens = int(game_usage["prompt_tokens"])
-                                game_completion_tokens = int(
-                                    game_usage["completion_tokens"]
-                                )
-                                game_total_tokens = int(game_usage["total_tokens"])
-                                game_total_cost = float(game_usage["total_cost"])
-                                total_run_usage = {
-                                    key: max(
-                                        total_run_usage[key], current_usage_totals[key]
+                                try:
+                                    game_start_time = time.time()
+                                    chat_result, error_message, elapsed_minutes = run_game(
+                                        agent, i
                                     )
-                                    for key in total_run_usage
-                                }
-                                if any(value > 0 for value in game_usage.values()):
+                                    chat_artifacts = persist_chat_artifacts(
+                                        agent, chat_result=chat_result
+                                    )
+                                    chat_text = chat_artifacts["chat_text"]
+                                    transitions = chat_artifacts["transitions"]
+                                    belief_matches = chat_artifacts["belief_matches"]
+                                    chat_round_list.append(chat_artifacts["chat_rounds"])
+                                    cumulative_runtime += elapsed_minutes
+
+                                    current_usage_totals = get_agent_usage_totals(agent)
+                                    game_usage = get_usage_delta(
+                                        current_usage_totals, total_run_usage
+                                    )
+                                    game_prompt_tokens = int(game_usage["prompt_tokens"])
+                                    game_completion_tokens = int(
+                                        game_usage["completion_tokens"]
+                                    )
+                                    game_total_tokens = int(game_usage["total_tokens"])
+                                    game_total_cost = float(game_usage["total_cost"])
+                                    total_run_usage = {
+                                        key: max(
+                                            total_run_usage[key], current_usage_totals[key]
+                                        )
+                                        for key in total_run_usage
+                                    }
+                                    if any(value > 0 for value in game_usage.values()):
+                                        wandb.log(
+                                            {
+                                                "game/total_tokens": game_total_tokens,
+                                                "game/cost": game_total_cost,
+                                            },
+                                            step=num_games_evaluated,
+                                        )
+
+                                    if error_message:
+                                        error_list.append(i)
+                                        _append_text_file(
+                                            log_paths["error_message_path"],
+                                            f"Run Chat: {error_message}\n",
+                                        )
+
+                                    agent.prev_episodic_memories.append(
+                                        {
+                                            "episode_number": num_games_evaluated,
+                                            "task_outcome": agent.task_status,
+                                            "memory": belief_matches
+                                            if belief_matches
+                                            else agent.curr_episodic_memory,
+                                        }
+                                    )
+
+                                    s3_key = upload_chat_history_artifact(
+                                        s3,
+                                        experiment_id=experiment.id,
+                                        game_number=i,
+                                        chat_text=chat_text,
+                                    )
+
+                                    success = agent.success
+                                    if success:
+                                        num_successes += 1
+                                        success_list.append(i)
+                                        cumulative_successful_actions += (
+                                            agent.num_actions_taken
+                                        )
+                                        cumulative_successful_chat_rounds += (
+                                            chat_round_list[-1]
+                                        )
+                                        cumulative_successful_runtime += elapsed_minutes
+                                        avg_actions_taken_per_successful_game = (
+                                            cumulative_successful_actions / num_successes
+                                        )
+                                        avg_chat_rounds_per_successful_game = (
+                                            cumulative_successful_chat_rounds
+                                            / num_successes
+                                        )
+                                        avg_runtime_per_successful_game = (
+                                            cumulative_successful_runtime / num_successes
+                                        )
+                                    else:
+                                        num_failures = num_games_evaluated - num_successes
+                                        failure_list.append(i)
+                                        cumulative_failing_actions += (
+                                            agent.num_actions_taken
+                                        )
+                                        cumulative_failing_chat_rounds += chat_round_list[
+                                            -1
+                                        ]
+                                        cumulative_failing_runtime += elapsed_minutes
+                                        avg_actions_taken_per_failing_game = (
+                                            cumulative_failing_actions / num_failures
+                                        )
+                                        avg_chat_rounds_per_failing_game = (
+                                            cumulative_failing_chat_rounds / num_failures
+                                        )
+                                        avg_runtime_per_failing_game = (
+                                            cumulative_failing_runtime / num_failures
+                                        )
+
+                                    success_rate = num_successes / num_games_evaluated
+                                    num_games_no_error = num_games_evaluated - len(
+                                        [g for g in error_list if g not in success_list]
+                                    )
+                                    error_adjusted_success_rate = (
+                                        num_successes / num_games_no_error
+                                        if num_games_no_error > 0
+                                        else 0.0
+                                    )
+                                    if num_games_no_error == 0:
+                                        print(
+                                            "No valid games completed due to errors. Success rate is 0."
+                                        )
+
                                     wandb.log(
                                         {
-                                            "game/total_tokens": game_total_tokens,
-                                            "game/cost": game_total_cost,
+                                            "split": split_name,
+                                            "game_no": i,
+                                            "success": int(success),
+                                            "actions_taken": agent.num_actions_taken,
+                                            "success_rate": success_rate,
+                                            "avg_actions_taken_per_successful_game": avg_actions_taken_per_successful_game,
+                                            "avg_chat_rounds_per_successful_game": avg_chat_rounds_per_successful_game,
+                                            "avg_runtime_per_successful_game": avg_runtime_per_successful_game,
+                                            "runtime": elapsed_minutes,
+                                            "cumulative_runtime": cumulative_runtime,
+                                            "chat_rounds": chat_round_list[-1],
+                                            "error_adjusted_success_rate": error_adjusted_success_rate,
+                                            "final/total_tokens": total_run_usage[
+                                                "total_tokens"
+                                            ],
+                                            "final/total_cost": total_run_usage[
+                                                "total_cost"
+                                            ],
+                                            "final/prompt_tokens": total_run_usage[
+                                                "prompt_tokens"
+                                            ],
+                                            "final/completion_tokens": total_run_usage[
+                                                "completion_tokens"
+                                            ],
                                         },
                                         step=num_games_evaluated,
                                     )
 
-                                if error_message:
-                                    error_list.append(i)
-                                    _append_text_file(
-                                        log_paths["error_message_path"],
-                                        f"Run Chat: {error_message}\n",
+                                    persist_experiment_usage_snapshot(
+                                        db, experiment, total_run_usage
                                     )
+                                    persist_episode_run(
+                                        db,
+                                        experiment=experiment,
+                                        game_number=i,
+                                        agent=agent,
+                                        log_paths=log_paths,
+                                        success=success,
+                                        chat_rounds=chat_round_list[-1],
+                                        runtime_minutes=elapsed_minutes,
+                                        error_message=str(error_message)
+                                        if error_message
+                                        else None,
+                                        transitions=transitions,
+                                        belief_matches=belief_matches,
+                                        chat_text=chat_text,
+                                        prompt_tokens=game_prompt_tokens,
+                                        completion_tokens=game_completion_tokens,
+                                        episode_cost=game_total_cost,
+                                        success_rate=success_rate,
+                                        error_adjusted_success_rate=error_adjusted_success_rate,
+                                        chat_history_s3_key=s3_key,
+                                    )
+                                    print(f"✅ Saved Game #{i} to PostgreSQL Database!")
 
-                                agent.prev_episodic_memories.append(
-                                    {
-                                        "episode_number": num_games_evaluated,
-                                        "task_outcome": agent.task_status,
-                                        "memory": belief_matches
-                                        if belief_matches
-                                        else agent.curr_episodic_memory,
-                                    }
-                                )
-
-                                s3_key = None
-                                try:
-                                    _s3_key = f"experiments/run_{experiment.id}/game_{i}_chat.txt"
-                                    s3.put_object(
-                                        Bucket=BUCKET_NAME,
-                                        Key=_s3_key,
-                                        Body=chat_text.encode("utf-8"),
-                                        ContentType="text/plain",
-                                    )
-                                    s3_key = _s3_key
-                                    print(f"☁️ Uploaded chat history to S3: {s3_key}")
-                                except Exception as e:
-                                    print(f"⚠️ S3 upload failed: {e}")
-
-                                success = agent.success
-                                if success:
-                                    num_successes += 1
-                                    success_list.append(i)
-                                    cumulative_successful_actions += (
-                                        agent.num_actions_taken
-                                    )
-                                    cumulative_successful_chat_rounds += (
-                                        chat_round_list[-1]
-                                    )
-                                    cumulative_successful_runtime += elapsed_minutes
-                                    avg_actions_taken_per_successful_game = (
-                                        cumulative_successful_actions / num_successes
-                                    )
-                                    avg_chat_rounds_per_successful_game = (
-                                        cumulative_successful_chat_rounds
-                                        / num_successes
-                                    )
-                                    avg_runtime_per_successful_game = (
-                                        cumulative_successful_runtime / num_successes
-                                    )
-                                else:
-                                    num_failures = num_games_evaluated - num_successes
-                                    failure_list.append(i)
-                                    cumulative_failing_actions += (
-                                        agent.num_actions_taken
-                                    )
-                                    cumulative_failing_chat_rounds += chat_round_list[
-                                        -1
-                                    ]
-                                    cumulative_failing_runtime += elapsed_minutes
-                                    avg_actions_taken_per_failing_game = (
-                                        cumulative_failing_actions / num_failures
-                                    )
-                                    avg_chat_rounds_per_failing_game = (
-                                        cumulative_failing_chat_rounds / num_failures
-                                    )
-                                    avg_runtime_per_failing_game = (
-                                        cumulative_failing_runtime / num_failures
-                                    )
-
-                                success_rate = num_successes / num_games_evaluated
-                                num_games_no_error = num_games_evaluated - len(
-                                    [g for g in error_list if g not in success_list]
-                                )
-                                error_adjusted_success_rate = (
-                                    num_successes / num_games_no_error
-                                    if num_games_no_error > 0
-                                    else 0.0
-                                )
-                                if num_games_no_error == 0:
+                                    print(f"[Ran Game #{i}]")
                                     print(
-                                        "No valid games completed due to errors. Success rate is 0."
+                                        f"Evaluation {num_games_evaluated} of {num_games_to_evaluate}"
                                     )
-
-                                wandb.log(
-                                    {
-                                        "split": split_name,
-                                        "game_no": i,
-                                        "success": int(success),
-                                        "actions_taken": agent.num_actions_taken,
-                                        "success_rate": success_rate,
-                                        "avg_actions_taken_per_successful_game": avg_actions_taken_per_successful_game,
-                                        "avg_chat_rounds_per_successful_game": avg_chat_rounds_per_successful_game,
-                                        "avg_runtime_per_successful_game": avg_runtime_per_successful_game,
-                                        "runtime": elapsed_minutes,
-                                        "cumulative_runtime": cumulative_runtime,
-                                        "chat_rounds": chat_round_list[-1],
-                                        "error_adjusted_success_rate": error_adjusted_success_rate,
-                                        "final/total_tokens": total_run_usage[
-                                            "total_tokens"
-                                        ],
-                                        "final/total_cost": total_run_usage[
-                                            "total_cost"
-                                        ],
-                                        "final/prompt_tokens": total_run_usage[
-                                            "prompt_tokens"
-                                        ],
-                                        "final/completion_tokens": total_run_usage[
-                                            "completion_tokens"
-                                        ],
-                                    },
-                                    step=num_games_evaluated,
-                                )
-
-                                try:
-                                    experiment.total_tokens = total_run_usage[
-                                        "total_tokens"
-                                    ]
-                                    experiment.total_cost = total_run_usage[
-                                        "total_cost"
-                                    ]
-                                    experiment.prompt_tokens = int(
-                                        total_run_usage["prompt_tokens"]
-                                    )
-                                    experiment.completion_tokens = int(
-                                        total_run_usage["completion_tokens"]
-                                    )
-                                    db.commit()
+                                    print(f"Success: {success}")
+                                    print(f"Runtime: {elapsed_minutes:.2f} minutes")
                                     print(
-                                        f"✅ Database updated for Run ID: {experiment.id}"
+                                        f"Actions Taken: {agent.num_actions_taken} out of {args.max_actions}"
                                     )
-                                except Exception as e:
-                                    print(f"⚠️ Database logging failed: {e}")
-                                    db.rollback()
-
-                                concept_matches = re.findall(
-                                    r"CONCEPT DISCOVERED: \[(.*?)\]",
-                                    chat_text,
-                                    re.DOTALL,
-                                )
-                                concept_matches = [c.strip() for c in concept_matches]
-                                concept_matches = [
-                                    c
-                                    for c in concept_matches
-                                    if not c.upper().startswith("NO CONCEPT")
-                                ]
-                                episode = EpisodeRun(
-                                    experiment_id=experiment.id,
-                                    game_number=i,
-                                    success=bool(success),
-                                    actions_taken=agent.num_actions_taken,
-                                    chat_rounds=chat_round_list[-1],
-                                    runtime_minutes=elapsed_minutes,
-                                    error_message=str(error_message)
-                                    if error_message
-                                    else None,
-                                    transitions={"transitions": transitions},
-                                    belief_state={
-                                        "memory": belief_matches
-                                        if belief_matches
-                                        else agent.curr_episodic_memory
-                                    },
-                                    task=agent.task,
-                                    task_type=agent.adapter.infer_task_type(),
-                                    inadmissible_action_count=agent.adapter.count_inadmissible_actions(
-                                        log_paths["history_path"]
-                                    ),
-                                    concepts_learned=concept_matches
-                                    if concept_matches
-                                    else None,
-                                    prompt_tokens=game_prompt_tokens,
-                                    completion_tokens=game_completion_tokens,
-                                    episode_cost=game_total_cost,
-                                    success_rate=success_rate,
-                                    error_adjusted_success_rate=error_adjusted_success_rate,
-                                    chat_history_s3_key=s3_key,
-                                )
-                                db.add(episode)
-                                db.commit()
-                                print(f"✅ Saved Game #{i} to PostgreSQL Database!")
-
-                                print(f"[Ran Game #{i}]")
-                                print(
-                                    f"Evaluation {num_games_evaluated} of {num_games_to_evaluate}"
-                                )
-                                print(f"Success: {success}")
-                                print(f"Runtime: {elapsed_minutes:.2f} minutes")
-                                print(
-                                    f"Actions Taken: {agent.num_actions_taken} out of {args.max_actions}"
-                                )
-                                print(f"Chat Rounds Taken: {chat_round_list[-1]}")
-                                print(
-                                    f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
-                                )
+                                    print(f"Chat Rounds Taken: {chat_round_list[-1]}")
+                                    print(
+                                        f"Success Rate: {num_successes}/{num_games_evaluated} = {100 * success_rate:.2f}%"
+                                    )
+                                except KeyboardInterrupt as exc:
+                                    elapsed_minutes = (time.time() - game_start_time) / 60
+                                    cumulative_runtime += elapsed_minutes
+                                    if i not in error_list:
+                                        error_list.append(i)
+                                    success_rate = (
+                                        num_successes / num_games_evaluated
+                                        if num_games_evaluated
+                                        else 0.0
+                                    )
+                                    num_games_no_error = num_games_evaluated - len(
+                                        [g for g in error_list if g not in success_list]
+                                    )
+                                    error_adjusted_success_rate = (
+                                        num_successes / num_games_no_error
+                                        if num_games_no_error > 0
+                                        else 0.0
+                                    )
+                                    total_run_usage = persist_interrupted_episode_run(
+                                        db,
+                                        experiment=experiment,
+                                        agent=agent,
+                                        game_number=i,
+                                        s3=s3,
+                                        total_run_usage=total_run_usage,
+                                        elapsed_minutes=elapsed_minutes,
+                                        success_rate=success_rate,
+                                        error_adjusted_success_rate=error_adjusted_success_rate,
+                                        error_message=f"Run interrupted: {exc}",
+                                    )
+                                    print(
+                                        f"⚠️ Saved partial interrupted Game #{i} to PostgreSQL Database."
+                                    )
+                                    raise
                                 print(
                                     f"Average Actions per Successful Game: {avg_actions_taken_per_successful_game:.2f} out of {args.max_actions}"
                                 )
