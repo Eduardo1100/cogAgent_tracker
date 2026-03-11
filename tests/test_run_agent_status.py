@@ -2,6 +2,7 @@ import importlib
 import signal
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -170,3 +171,82 @@ def test_signal_handler_marks_active_experiment_cancelled(tmp_path, monkeypatch)
         assert persisted.current_game_number is None
         assert persisted.current_game_label is None
         assert persisted.end_time is not None
+
+
+def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    game_dir = tmp_path / "game_1"
+    agent = types.SimpleNamespace(
+        log_paths={
+            "chat_history_path": str(game_dir / "chat_history.txt"),
+        },
+        group_chat=types.SimpleNamespace(
+            messages=[
+                {
+                    "name": "Belief_State_Agent",
+                    "role": "assistant",
+                    "content": "BELIEF STATE: [I see a mouse.]",
+                },
+                {
+                    "name": "Action_Agent",
+                    "role": "assistant",
+                    "content": "execute_action('focus on mouse')",
+                },
+            ]
+        ),
+        group_chat_manager=None,
+    )
+
+    artifacts = run_agent.persist_chat_artifacts(agent)
+
+    chat_history_path = Path(agent.log_paths["chat_history_path"])
+    transition_path = game_dir / "transition_log.json"
+
+    assert artifacts["chat_rounds"] == 2
+    assert "Recovered transcript from in-memory group chat state." in artifacts["chat_text"]
+    assert "Belief_State_Agent" in chat_history_path.read_text()
+    assert "focus on mouse" in chat_history_path.read_text()
+    assert transition_path.exists()
+    assert artifacts["transitions"][0]["from"] == "Belief_State_Agent"
+    assert artifacts["transitions"][0]["to"] == "Action_Agent"
+
+
+def test_run_game_persists_partial_chat_on_keyboard_interrupt(tmp_path):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    game_dir = tmp_path / "game_1"
+    agent = types.SimpleNamespace(
+        initial_message="start",
+        log_paths={
+            "chat_history_path": str(game_dir / "chat_history.txt"),
+            "error_message_path": str(game_dir / "error_message.txt"),
+        },
+        group_chat=types.SimpleNamespace(
+            messages=[
+                {
+                    "name": "Belief_State_Agent",
+                    "role": "assistant",
+                    "content": "BELIEF STATE: [I opened the closet and may need to inspect it.]",
+                }
+            ]
+        ),
+        group_chat_manager=None,
+    )
+
+    def _raise_interrupt(_message):
+        raise KeyboardInterrupt("Received signal 2")
+
+    agent.run_chat = _raise_interrupt
+
+    with pytest.raises(KeyboardInterrupt, match="Received signal 2"):
+        run_agent.run_game(agent, game_no=1)
+
+    chat_text = (game_dir / "chat_history.txt").read_text()
+    error_text = (game_dir / "error_message.txt").read_text()
+
+    assert "Interrupted during run_chat" in chat_text
+    assert "Belief_State_Agent" in chat_text
+    assert "Run interrupted: Received signal 2" in error_text

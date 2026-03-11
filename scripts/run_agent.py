@@ -385,6 +385,24 @@ def run_game(agent, game_no: int, max_retries: int = 3):
             print(f"🚀 [Attempt {retry_count + 1}] Starting Game #{game_no}...")
             chat_result, error_message = agent.run_chat(agent.initial_message)
             game_completed = True
+        except KeyboardInterrupt as exc:
+            try:
+                persist_chat_artifacts(
+                    agent,
+                    note=(
+                        "Interrupted during run_chat; recovered the latest partial "
+                        "transcript from in-memory group chat state."
+                    ),
+                )
+                error_path = agent.log_paths.get("error_message_path")
+                if error_path:
+                    _append_text_file(error_path, f"Run interrupted: {exc}\n")
+            except Exception as persist_exc:
+                print(
+                    "⚠️ Failed to persist partial chat transcript during interrupt: "
+                    f"{persist_exc}"
+                )
+            raise
         except Exception as e:
             error_msg = str(e).upper()
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
@@ -400,6 +418,98 @@ def run_game(agent, game_no: int, max_retries: int = 3):
 
     elapsed_minutes = (time.time() - start_time) / 60
     return chat_result, error_message, elapsed_minutes
+
+
+def _write_text_file(path: str, text: str, *, mode: str = "w") -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, mode) as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _append_text_file(path: str, text: str) -> None:
+    _write_text_file(path, text, mode="a")
+
+
+def _collect_chat_messages(agent, chat_result=None) -> tuple[list[dict], str]:
+    if chat_result and getattr(chat_result, "chat_history", None):
+        return list(chat_result.chat_history), "chat_result"
+
+    group_chat = getattr(agent, "group_chat", None)
+    if group_chat and getattr(group_chat, "messages", None):
+        return list(group_chat.messages), "group_chat"
+
+    group_chat_manager = getattr(agent, "group_chat_manager", None)
+    nested_group_chat = getattr(group_chat_manager, "groupchat", None)
+    if nested_group_chat and getattr(nested_group_chat, "messages", None):
+        return list(nested_group_chat.messages), "group_chat_manager"
+
+    return [], "none"
+
+
+def _format_chat_history(messages: list[dict], *, note: str | None = None) -> str:
+    lines: list[str] = []
+    if note:
+        lines.append(f"NOTE: {note}")
+
+    if not messages:
+        lines.append("Error Message: no chat history in chat result or in-memory state")
+        return "\n".join(lines) + "\n"
+
+    for message in messages:
+        lines.append("-" * 20)
+        if isinstance(message, dict):
+            for key in ["name", "role", "content"]:
+                if key in message:
+                    lines.append(
+                        f"{key}:\n{message[key]}"
+                        if key == "content"
+                        else f"{key}: {message[key]}"
+                    )
+            for key, value in message.items():
+                if key not in {"name", "role", "content"}:
+                    lines.append(f"{key}: {value}")
+            continue
+
+        lines.append("content:")
+        lines.append(str(message))
+
+    return "\n".join(lines) + "\n"
+
+
+def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) -> dict:
+    log_paths = getattr(agent, "log_paths", {}) or {}
+    chat_history_path = log_paths.get("chat_history_path")
+    if not chat_history_path:
+        return {
+            "chat_text": "",
+            "chat_rounds": -1,
+            "transitions": [],
+            "belief_matches": [],
+        }
+
+    messages, source = _collect_chat_messages(agent, chat_result=chat_result)
+    effective_note = note
+    if source != "chat_result" and messages and effective_note is None:
+        effective_note = "Recovered transcript from in-memory group chat state."
+
+    chat_text = _format_chat_history(messages, note=effective_note)
+    _write_text_file(chat_history_path, chat_text)
+
+    transitions, belief_matches = extract_chat_metadata(chat_text)
+    transition_path = os.path.join(
+        os.path.dirname(chat_history_path),
+        "transition_log.json",
+    )
+    _write_text_file(transition_path, json.dumps(transitions, indent=2))
+
+    return {
+        "chat_text": chat_text,
+        "chat_rounds": len(messages) if messages else -1,
+        "transitions": transitions,
+        "belief_matches": belief_matches,
+    }
 
 
 def extract_chat_metadata(chat_text: str):
@@ -656,6 +766,11 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 f"({num_games_evaluated}/{total_games}) task={task_name} var={var_idx}"
             )
             chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+            chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
+            chat_text = chat_artifacts["chat_text"]
+            transitions = chat_artifacts["transitions"]
+            belief_matches = chat_artifacts["belief_matches"]
+            chat_round_list.append(chat_artifacts["chat_rounds"])
             cumulative_runtime += elapsed_minutes
 
             current_usage_totals = get_usage_totals(agent.group_chat.agents)
@@ -679,40 +794,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
 
             if error_message:
                 error_list.append(game_no)
-                with open(log_paths["error_message_path"], "a") as f:
-                    f.write(f"Run Chat: {error_message}\n")
-
-            if chat_result and getattr(chat_result, "chat_history", []):
-                with open(log_paths["chat_history_path"], "w") as f:
-                    for message in chat_result.chat_history:
-                        f.write("-" * 20 + "\n")
-                        for key in ["name", "role", "content"]:
-                            if key in message:
-                                f.write(
-                                    f"{key}:\n{message[key]}\n"
-                                    if key == "content"
-                                    else f"{key}: {message[key]}\n"
-                                )
-                        for k, v in message.items():
-                            if k not in ["name", "role", "content"]:
-                                f.write(f"{k}: {v}\n")
-                chat_round_list.append(len(chat_result.chat_history))
-            else:
-                chat_round_list.append(-1)
-                with open(log_paths["chat_history_path"], "w") as f:
-                    f.write("Error Message: no chat history in chat result\n")
-
-            with open(log_paths["chat_history_path"]) as f:
-                chat_text = f.read()
-
-            transitions, belief_matches = extract_chat_metadata(chat_text)
-
-            transition_path = os.path.join(
-                os.path.dirname(log_paths["chat_history_path"]),
-                "transition_log.json",
-            )
-            with open(transition_path, "w") as f:
-                json.dump(transitions, f, indent=2)
+                _append_text_file(
+                    log_paths["error_message_path"], f"Run Chat: {error_message}\n"
+                )
 
             agent.prev_episodic_memories.append(
                 {
@@ -1147,6 +1231,13 @@ def main():
                                 chat_result, error_message, elapsed_minutes = run_game(
                                     agent, i
                                 )
+                                chat_artifacts = persist_chat_artifacts(
+                                    agent, chat_result=chat_result
+                                )
+                                chat_text = chat_artifacts["chat_text"]
+                                transitions = chat_artifacts["transitions"]
+                                belief_matches = chat_artifacts["belief_matches"]
+                                chat_round_list.append(chat_artifacts["chat_rounds"])
                                 cumulative_runtime += elapsed_minutes
 
                                 current_usage_totals = get_usage_totals(
@@ -1178,49 +1269,10 @@ def main():
 
                                 if error_message:
                                     error_list.append(i)
-                                    with open(
-                                        log_paths["error_message_path"], "a"
-                                    ) as f:
-                                        f.write(f"Run Chat: {error_message}\n")
-
-                                if chat_result and getattr(
-                                    chat_result, "chat_history", []
-                                ):
-                                    with open(log_paths["chat_history_path"], "w") as f:
-                                        for message in chat_result.chat_history:
-                                            f.write("-" * 20 + "\n")
-                                            for key in ["name", "role", "content"]:
-                                                if key in message:
-                                                    f.write(
-                                                        f"{key}:\n{message[key]}\n"
-                                                        if key == "content"
-                                                        else f"{key}: {message[key]}\n"
-                                                    )
-                                            for k, v in message.items():
-                                                if k not in ["name", "role", "content"]:
-                                                    f.write(f"{k}: {v}\n")
-                                    chat_round_list.append(
-                                        len(chat_result.chat_history)
+                                    _append_text_file(
+                                        log_paths["error_message_path"],
+                                        f"Run Chat: {error_message}\n",
                                     )
-                                else:
-                                    chat_round_list.append(-1)
-                                    with open(log_paths["chat_history_path"], "w") as f:
-                                        f.write(
-                                            "Error Message: no chat history in chat result\n"
-                                        )
-
-                                with open(log_paths["chat_history_path"]) as f:
-                                    chat_text = f.read()
-
-                                transitions, belief_matches = extract_chat_metadata(
-                                    chat_text
-                                )
-                                transition_path = os.path.join(
-                                    os.path.dirname(log_paths["chat_history_path"]),
-                                    "transition_log.json",
-                                )
-                                with open(transition_path, "w") as f:
-                                    json.dump(transitions, f, indent=2)
 
                                 agent.prev_episodic_memories.append(
                                     {
