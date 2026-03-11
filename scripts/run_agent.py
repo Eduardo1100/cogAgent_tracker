@@ -766,9 +766,7 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 avg_chat_rounds_per_failing_game = (
                     cumulative_failing_chat_rounds / num_failures
                 )
-                avg_runtime_per_failing_game = (
-                    cumulative_failing_runtime / num_failures
-                )
+                avg_runtime_per_failing_game = cumulative_failing_runtime / num_failures
 
             success_rate = num_successes / num_games_evaluated
             num_games_no_error = num_games_evaluated - len(

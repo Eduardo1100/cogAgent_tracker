@@ -12,8 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.storage.models import Base, ExperimentRun
-
 
 def _install_run_agent_stubs() -> None:
     autogen_module = types.ModuleType("autogen")
@@ -58,15 +56,17 @@ def _install_run_agent_stubs() -> None:
     sys.modules.setdefault("src.config.schema_health", schema_health_module)
 
 
-def test_finalize_experiment_persists_cancelled_after_session_commit_failure(tmp_path, monkeypatch):
+def test_finalize_experiment_persists_cancelled_after_session_commit_failure(
+    tmp_path, monkeypatch
+):
+    from src.storage.models import Base, ExperimentRun
+
     _install_run_agent_stubs()
     run_agent = importlib.import_module("scripts.run_agent")
 
     db_path = tmp_path / "status_retry.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
-    TestingSessionLocal = sessionmaker(
-        autocommit=False, autoflush=False, bind=engine
-    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
 
     monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
@@ -131,14 +131,14 @@ def test_sigterm_handler_routes_to_keyboard_interrupt():
 
 
 def test_signal_handler_marks_active_experiment_cancelled(tmp_path, monkeypatch):
+    from src.storage.models import Base, ExperimentRun
+
     _install_run_agent_stubs()
     run_agent = importlib.import_module("scripts.run_agent")
 
     db_path = tmp_path / "signal_cancel.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
-    TestingSessionLocal = sessionmaker(
-        autocommit=False, autoflush=False, bind=engine
-    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
 
     monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
