@@ -10,8 +10,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.automation.iteration import get_latest_experiment, summarize_experiment
-from src.storage.database import SessionLocal
+from src.storage.database import DATABASE_URL, SessionLocal
 
 RUNS_ROOT = REPO_ROOT / "runs"
 
@@ -57,6 +60,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def describe_database_target(database_url: str) -> str:
+    parsed = make_url(database_url)
+    host = parsed.host or "localhost"
+    port = parsed.port or 5432
+    database = parsed.database or "<unknown-db>"
+    return f"{host}:{port}/{database}"
+
+
+def build_db_unavailable_message(database_url: str) -> str:
+    return (
+        "Could not reach Postgres at "
+        f"{describe_database_target(database_url)}. "
+        "This helper loads DATABASE_URL from `.env` inside Python, so the shell "
+        "environment variable may still appear empty even when the script is configured."
+    )
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -84,6 +104,8 @@ def main() -> int:
         else:
             print(summary.to_json())
         return 0
+    except SQLAlchemyError:
+        parser.exit(2, f"{build_db_unavailable_message(DATABASE_URL)}\n")
     finally:
         db.close()
 

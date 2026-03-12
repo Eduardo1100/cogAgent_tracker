@@ -5,6 +5,10 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from scripts.get_latest_experiment import (
+    build_db_unavailable_message,
+    describe_database_target,
+)
 from scripts.iterate_scienceworld import (
     CODEX_MODEL,
     CODEX_REASONING_EFFORT,
@@ -188,3 +192,21 @@ def test_build_parser_accepts_ablation_mode():
     assert parsed.mode == "ablate"
     assert parsed.skip_debug is True
     assert parsed.prompt_only is True
+
+
+def test_describe_database_target_masks_to_host_port_and_db():
+    assert (
+        describe_database_target(
+            "postgresql+psycopg2://devuser:devpass@localhost:5432/devdb"
+        )
+        == "localhost:5432/devdb"
+    )
+
+
+def test_build_db_unavailable_message_mentions_dotenv_loading():
+    message = build_db_unavailable_message(
+        "postgresql+psycopg2://devuser:devpass@localhost:5432/devdb"
+    )
+
+    assert "localhost:5432/devdb" in message
+    assert "loads DATABASE_URL from `.env` inside Python" in message
