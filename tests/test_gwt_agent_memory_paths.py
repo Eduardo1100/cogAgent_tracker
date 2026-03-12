@@ -2590,6 +2590,98 @@ def test_artifact_creation_shortlist_prefers_missing_ingredient_search_to_empty_
     assert "move blue paint to wood cup" not in shortlist
 
 
+def test_artifact_creation_tracking_records_local_room_search_before_grounding(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'salt water'. "
+        "A recipe and some of the ingredients might be found near the kitchen. "
+        "When you are done, focus on the salt water."
+    )
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the kitchen. In it, you see a sink, a fridge, a "
+        "freezer, a glass jar (containing a substance called sodium chloride), "
+        "and a recipe titled instructions to make salt water. You also see: "
+        "A door to the hallway (that is open), A door to the bathroom "
+        "(that is closed), A door to the outside (that is closed)."
+    )
+
+    agent._update_artifact_creation_search_tracking(
+        action=None,
+        observation=observation,
+    )
+    agent._update_artifact_creation_search_tracking(
+        action="look in kitchen",
+        observation=observation,
+    )
+    agent._update_artifact_creation_search_tracking(
+        action="open fridge",
+        observation=observation,
+    )
+    agent._update_artifact_creation_search_tracking(
+        action="open door to bathroom",
+        observation=observation,
+    )
+
+    assert agent._search_location_states["kitchen"] == {
+        "local_exploration": 2,
+        "target_grounded": False,
+    }
+
+
+def test_artifact_creation_shortlist_reopens_room_frontier_after_local_search_stall(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'salt water'. "
+        "A recipe and some of the ingredients might be found near the kitchen. "
+        "When you are done, focus on the salt water."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._search_location_states["kitchen"] = {
+        "local_exploration": 3,
+        "target_grounded": False,
+    }
+    observation = (
+        "This room is called the kitchen. In it, you see a sink, a fridge, a "
+        "freezer, a glass cup (containing nothing), a glass jar (containing a "
+        "substance called sodium chloride), and a recipe titled instructions to "
+        "make salt water. You also see: A door to the hallway (that is open), "
+        "A door to the bathroom (that is closed), A door to the outside "
+        "(that is closed)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_artifact_creation_search_tracking(
+        action=None,
+        observation=observation,
+    )
+    agent.admissible_actions = [
+        "read instructions to make salt water",
+        "look in sink",
+        "open fridge",
+        "open freezer",
+        "look in cup containing nothing",
+        "open door to bathroom",
+        "look at door to bathroom",
+        "go to hallway",
+    ]
+
+    summary = agent._summarize_admissible_actions(
+        agent.admissible_actions,
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_base_artifact"
+    assert "open door to bathroom" in shortlist
+    assert "open fridge" not in shortlist
+    assert shortlist.index("open door to bathroom") < shortlist.index("look in sink")
+
+
 def test_artifact_creation_shortlist_downranks_wrong_type_color_distractors(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (

@@ -79,6 +79,7 @@
     - `agent-iter-16-state-change-target-grounding`
     - `agent-iter-17-state-change-room-frontier`
     - `agent-iter-18-measurement-instrument-search`
+    - `agent-iter-19-artifact-room-frontier`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.
@@ -161,6 +162,7 @@
 - Measurement tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now treat `locate_instrument` as a real search phase with episode-local room exploration. When changing this behavior, prefer local room scans and unopened-container checks before acting on the measured target, and only reintroduce room-frontier moves after repeated nonproductive local search.
 - Conditional trait-branch tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now retain an evidence target separately from final branch boxes. When changing this behavior, keep unresolved branch targets out of early shortlist pressure, preserve evidence-gathering on the trait-bearing referent, and only promote the final branch target after observation-level branch resolution.
 - Artifact-creation tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now preserve artifact type separately from descriptor tokens like colors. When changing creation-task behavior, keep ingredient-gap search distinct from combine/transform steps, and do not let adjective-only distractors of the wrong type outrank grounded artifact actions.
+- Artifact-creation search in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now reintroduces room-frontier pressure after repeated nonproductive local search before any base artifact is grounded. When changing this behavior, keep nearby exits and door-opening actions competitive before spending more actions on local containers or device toggles, and avoid hard-coding benchmark-specific room names or source locations.
 - Relation-mechanism tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now infer target search from missing named targets and maintain an episode-local `relation_frontier`. When changing relation-task behavior, keep search broad only until the primary target/source are grounded, then prune relation and device-control reasoning to the local mechanism instead of the full combinatorial action space.
 - [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py) is intentionally local-first. It expects a reachable Postgres instance and a working `codex` CLI; if the worktree is dirty it stops by default unless `--allow-dirty` / `ALLOW_DIRTY=1` is set.
 - The README is sparse and the project metadata still uses the placeholder name `production-template`. Prefer the actual repo structure over marketing text.

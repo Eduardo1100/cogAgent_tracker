@@ -1723,6 +1723,36 @@ class GWTAutogenAgent(AutogenAgent):
             )
             entry["last_seen_timestep"] = self.num_actions_taken
 
+    def _update_artifact_creation_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        if not self._is_artifact_creation_task():
+            return
+
+        room_signature = self._get_current_location_signature(observation)
+        target_grounded = bool(self._get_grounded_artifact_labels(limit=1))
+        if room_signature:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if target_grounded:
+                room_state["target_grounded"] = True
+
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+        if not room_signature or target_grounded:
+            return
+
+        family = self._classify_action_family(action)
+        if family in {"inspect", "device_control"} and not (
+            self._action_targets_room_frontier(action, observation, family=family)
+        ):
+            room_state["local_exploration"] += 1
+
     def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
         if not self._grounded_artifacts:
             return []
@@ -2563,6 +2593,26 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         room_state = self._search_location_states.get(current_room, {})
         return bool(room_state.get("local_exploration", 0) >= 2)
+
+    def _artifact_creation_room_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_artifact_creation_task(contract):
+            return False
+        if self._get_grounded_artifact_labels(limit=1):
+            return False
+        if visible_doors < 2 or not current_room:
+            return False
+        room_state = self._search_location_states.get(current_room, {})
+        return bool(
+            not room_state.get("target_grounded")
+            and room_state.get("local_exploration", 0) >= 2
+        )
 
     def _canonicalize_unsupported_substance_action(
         self, suggested_action: str, admissible_commands: list[str]
@@ -5347,6 +5397,8 @@ class GWTAutogenAgent(AutogenAgent):
         action: str,
         family: str,
         current_phase: str,
+        room_frontier_action: bool,
+        room_search_stalled: bool,
         content_token_set: set[str],
         grounded_token_set: set[str],
         task_contract: dict,
@@ -5552,6 +5604,36 @@ class GWTAutogenAgent(AutogenAgent):
             and not support_role_hits
         ):
             score -= 6
+
+        if (
+            room_search_stalled
+            and grounded_artifact_count == 0
+            and current_phase
+            in {"locate_base_artifact", "find_missing_ingredient_or_reagent"}
+        ):
+            if room_frontier_action:
+                if family == "inspect":
+                    score += 16
+                    if self._action_mentions_door(action, family=family):
+                        score += 6
+                    if normalized.startswith("look around"):
+                        score += 4
+                elif family == "device_control":
+                    score += 18
+                    if self._action_mentions_door(action, family=family):
+                        score += 8
+                elif family == "relocation":
+                    score += 10
+            elif family == "inspect" and self._is_container_like_action(
+                action, family=family
+            ):
+                score -= 18
+            elif family == "device_control" and self._is_container_like_action(
+                action, family=family
+            ):
+                score -= 18
+            elif family == "relocation":
+                score -= 10
 
         return score
 
@@ -6542,6 +6624,11 @@ class GWTAutogenAgent(AutogenAgent):
                 grounded_tokens=grounded_token_set,
             )
         )
+        artifact_room_search_stalled = self._artifact_creation_room_search_stalled(
+            current_room=current_room,
+            visible_doors=visible_doors,
+            task_contract=task_contract,
+        )
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -6869,6 +6956,8 @@ class GWTAutogenAgent(AutogenAgent):
                 action=action,
                 family=family,
                 current_phase=current_phase,
+                room_frontier_action=room_frontier_action,
+                room_search_stalled=artifact_room_search_stalled,
                 content_token_set=content_token_set,
                 grounded_token_set=grounded_token_set,
                 task_contract=task_contract,
@@ -7442,6 +7531,10 @@ class GWTAutogenAgent(AutogenAgent):
             observation=self.adapter.observation,
         )
         self._update_artifact_creation_tracking(self.adapter.observation)
+        self._update_artifact_creation_search_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
         self._update_measurement_search_tracking(
             action=action,
             observation=self.adapter.observation,
