@@ -1015,6 +1015,7 @@ class GWTAutogenAgent(AutogenAgent):
         normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
         desired_transformation = ""
         transformation_direction = ""
+        target_substances: list[str] = []
 
         for verb, metadata in self._TASK_STATE_CHANGE_HINTS.items():
             if self._task_contains_hint(normalized_task, verb):
@@ -1022,13 +1023,41 @@ class GWTAutogenAgent(AutogenAgent):
                 transformation_direction = metadata["direction"]
                 break
 
+        patterns: tuple[str, ...] = ()
+        if desired_transformation:
+            patterns = (
+                rf"\b{re.escape(desired_transformation)}(?:\s+up|\s+down)?\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+            )
+        else:
+            generic_patterns: tuple[tuple[str, str], ...] = (
+                (
+                    r"\bchange\s+(?:the\s+)?state\s+of\s+matter\s+of\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+                    "change state of matter",
+                ),
+                (
+                    r"\bchange\s+(?:the\s+)?phase\s+of\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+                    "change phase",
+                ),
+                (
+                    r"\bcause\s+(?:an?\s+|the\s+)?(.+?)\s+to\s+change\s+(?:its|the)\s+state\s+of\s+matter(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+                    "change state of matter",
+                ),
+                (
+                    r"\bcause\s+(?:an?\s+|the\s+)?(.+?)\s+to\s+change\s+(?:its|the)\s+phase(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+                    "change phase",
+                ),
+            )
+            for pattern, transformation in generic_patterns:
+                matches = list(re.finditer(pattern, normalized_task))
+                if not matches:
+                    continue
+                desired_transformation = transformation
+                patterns = (pattern,)
+                break
+
         if not desired_transformation:
             return [], "", ""
 
-        target_substances: list[str] = []
-        patterns = (
-            rf"\b{re.escape(desired_transformation)}(?:\s+up|\s+down)?\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
-        )
         for pattern in patterns:
             for match in re.finditer(pattern, normalized_task):
                 phrase = self._normalize_task_phrase(

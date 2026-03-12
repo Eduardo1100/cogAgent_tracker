@@ -1162,6 +1162,23 @@ def test_state_change_task_contract_separates_substance_from_transformation(tmp_
     assert "also" not in contract["target_entities"]
 
 
+def test_generic_state_change_task_contract_parses_state_of_matter_goal(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to change the state of matter of water. First, focus on the "
+        "substance. Then, take actions that will cause it to change its state of matter."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["state_change_task"] is True
+    assert contract["target_substances"] == ["water"]
+    assert contract["desired_transformation"] == "change state of matter"
+    assert contract["transformation_direction"] == ""
+    assert "water" in contract["primary_targets"]
+    assert "water" in contract["target_entities"]
+
+
 def test_state_change_phase_moves_from_search_to_focus_to_transformation(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
@@ -1186,6 +1203,37 @@ def test_state_change_phase_moves_from_search_to_focus_to_transformation(tmp_pat
 
     agent._completed_focus_targets = ["water"]
     assert agent._get_current_phase() == "test_transformation"
+
+
+def test_generic_state_change_task_enters_locate_substance_phase(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to change the state of matter of water. First, focus on the "
+        "substance. Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see the agent, a picture, "
+            "and doors to the art studio and the kitchen."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open art studio door",
+            "open door to kitchen",
+            "look around",
+            "focus on agent",
+            "mix agent",
+        ],
+        shortlist_limit=3,
+    )
+
+    assert summary["current_phase"] == "locate_substance"
+    assert "open door to kitchen" in summary["task_relevant_action_shortlist"]
+    assert "focus on agent" not in summary["task_relevant_action_shortlist"]
+    assert "mix agent" not in summary["task_relevant_action_shortlist"]
 
 
 def test_state_change_shortlist_suppresses_irrelevant_object_manipulation(tmp_path):
