@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug iterate-scienceworld test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
+.PHONY: help setup dev train eval debug iterate-scienceworld ablate-scienceworld test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +32,9 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld. ALFWorld: GAM
 
 iterate-scienceworld: ## Run one random ScienceWorld debug episode, then hand the resulting experiment to Codex. Optional: SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
 	uv run python scripts/iterate_scienceworld.py $(if $(SKIP_DEBUG),--skip-debug,) $(if $(ALLOW_DIRTY),--allow-dirty,) $(if $(PROMPT_ONLY),--prompt-only,) $(if $(DANGEROUS),--dangerous,)
+
+ablate-scienceworld: ## Reuse the latest ScienceWorld experiment for a consolidation/ablation Codex pass. Optional: RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+	uv run python scripts/iterate_scienceworld.py --mode ablate $(if $(RUN_DEBUG),,--skip-debug) $(if $(ALLOW_DIRTY),--allow-dirty,) $(if $(PROMPT_ONLY),--prompt-only,) $(if $(DANGEROUS),--dangerous,)
 
 test: ## Run tests with pytest
 	uv run pytest tests/

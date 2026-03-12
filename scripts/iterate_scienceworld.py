@@ -24,7 +24,12 @@ from src.storage.models import ExperimentRun
 
 
 RUNS_ROOT = REPO_ROOT / "runs"
-PROMPT_TEMPLATE_PATH = REPO_ROOT / "prompts" / "iterate_scienceworld_prompt.txt"
+PROMPT_TEMPLATE_PATHS = {
+    "iterate": REPO_ROOT / "prompts" / "iterate_scienceworld_prompt.txt",
+    "ablate": REPO_ROOT / "prompts" / "ablate_scienceworld_prompt.txt",
+}
+CODEX_MODEL = "gpt-5.4"
+CODEX_REASONING_EFFORT = "xhigh"
 
 
 class IterationWorkflowError(RuntimeError):
@@ -92,10 +97,11 @@ def get_dirty_paths() -> list[str]:
     return paths
 
 
-def load_prompt_template() -> str:
-    if not PROMPT_TEMPLATE_PATH.exists():
-        raise FileNotFoundError(f"Prompt template not found: {PROMPT_TEMPLATE_PATH}")
-    return PROMPT_TEMPLATE_PATH.read_text()
+def load_prompt_template(mode: str) -> str:
+    template_path = PROMPT_TEMPLATE_PATHS[mode]
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text()
 
 
 def wait_for_experiment(
@@ -128,7 +134,19 @@ def wait_for_experiment(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run a random ScienceWorld debug episode and hand the resulting experiment to Codex."
+        description=(
+            "Run or reuse a ScienceWorld debug episode and hand the resulting "
+            "experiment to Codex for either a new iteration or a consolidation pass."
+        )
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("iterate", "ablate"),
+        default="iterate",
+        help=(
+            "Iteration mode. `iterate` asks Codex for a new improvement iteration; "
+            "`ablate` asks Codex to simplify or consolidate recent changes."
+        ),
     )
     parser.add_argument(
         "--env",
@@ -168,6 +186,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="How long to wait for a new experiment row after `make debug`.",
     )
     return parser
+
+
+def build_codex_command(*, dangerous: bool) -> list[str]:
+    command = [
+        "codex",
+        "exec",
+        "--full-auto",
+        "--model",
+        CODEX_MODEL,
+        "--config",
+        f'model_reasoning_effort="{CODEX_REASONING_EFFORT}"',
+    ]
+    if dangerous:
+        command.append("--dangerously-bypass-approvals-and-sandbox")
+    command.extend(["-C", str(REPO_ROOT), "-"])
+    return command
 
 
 def main() -> int:
@@ -246,7 +280,7 @@ def main() -> int:
         raise db_unavailable_error() from exc
 
     next_iteration = next_agent_iteration_number(get_branch_names())
-    template_text = load_prompt_template()
+    template_text = load_prompt_template(args.mode)
     prompt = render_iteration_prompt(
         template_text,
         experiment_id=summary.experiment_id,
@@ -260,12 +294,8 @@ def main() -> int:
         print(prompt)
         return 0
 
-    codex_command = ["codex", "exec", "--full-auto"]
-    if args.dangerous:
-        codex_command.append("--dangerously-bypass-approvals-and-sandbox")
-    codex_command.extend(["-C", str(REPO_ROOT), "-"])
     return subprocess.run(
-        codex_command,
+        build_codex_command(dangerous=args.dangerous),
         cwd=REPO_ROOT,
         text=True,
         input=prompt,

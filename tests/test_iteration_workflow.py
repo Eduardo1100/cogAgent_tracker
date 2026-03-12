@@ -5,6 +5,13 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from scripts.iterate_scienceworld import (
+    CODEX_MODEL,
+    CODEX_REASONING_EFFORT,
+    build_codex_command,
+    build_parser,
+    load_prompt_template,
+)
 from src.automation.iteration import (
     get_latest_experiment,
     next_agent_iteration_number,
@@ -147,3 +154,37 @@ def test_render_iteration_prompt_replaces_template_fields(tmp_path):
     assert "12" in prompt
     assert '{"status": "CONCLUDED"}' in prompt
     assert str(tmp_path) in prompt
+
+
+def test_build_codex_command_pins_model_and_reasoning_effort():
+    command = build_codex_command(dangerous=False)
+
+    assert command[:5] == ["codex", "exec", "--full-auto", "--model", CODEX_MODEL]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+    assert "--config" in command
+    assert f'model_reasoning_effort="{CODEX_REASONING_EFFORT}"' in command
+
+
+def test_build_codex_command_includes_dangerous_flag_when_requested():
+    command = build_codex_command(dangerous=True)
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+
+
+def test_load_prompt_template_supports_iteration_and_ablation_modes():
+    iterate_template = load_prompt_template("iterate")
+    ablate_template = load_prompt_template("ablate")
+
+    assert "continuing the cognitive-agent iteration workflow" in iterate_template
+    assert "continuing the cognitive-agent consolidation workflow" in ablate_template
+    assert "agent-iter-{next_iteration}-consolidate-<topic>" in ablate_template
+
+
+def test_build_parser_accepts_ablation_mode():
+    parser = build_parser()
+
+    parsed = parser.parse_args(["--mode", "ablate", "--skip-debug", "--prompt-only"])
+
+    assert parsed.mode == "ablate"
+    assert parsed.skip_debug is True
+    assert parsed.prompt_only is True

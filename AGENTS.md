@@ -31,7 +31,7 @@
 - [src/config/schema_health.py](/home/eduardo/Projects/cogAgent_tracker/src/config/schema_health.py): Alembic head/current revision enforcement.
 - [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py): primary evaluation runner. It logs experiment metadata, token usage, cost, S3 artifacts, and W&B data. On `Ctrl+C`, it now attempts to persist partial chat transcripts locally and save interrupted episode metadata to storage/DB before the experiment is marked `CANCELLED`.
 - [scripts/get_latest_experiment.py](/home/eduardo/Projects/cogAgent_tracker/scripts/get_latest_experiment.py): local helper for resolving the latest experiment row and emitting a compact JSON summary from Postgres.
-- [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py): local iteration driver that can run `make debug ENV=scienceworld`, resolve the resulting experiment, render a Codex prompt, and optionally invoke `codex exec` to continue the agent-improvement loop.
+- [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py): local iteration driver that can run `make debug ENV=scienceworld`, resolve the resulting experiment, render a Codex prompt, and optionally invoke `codex exec` to continue the agent-improvement loop. It pins Codex to `gpt-5.4` with `model_reasoning_effort="xhigh"`.
 - [scripts/backfill_experiment_metrics.py](/home/eduardo/Projects/cogAgent_tracker/scripts/backfill_experiment_metrics.py): repair utility for historical metrics and git metadata.
 - [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py): cognitive multi-agent runtime, including long-term memory path registration, task contracts, referent grounding, episode-local stage-aware progression for ordered focus tasks, candidate-pivoting logic for search/placement tasks, state-change task control for substance search plus transformation, generic state-of-matter parsing for substance goals, measurement-and-branch task control with hidden-referent containment plus property-aware branch gating, artifact-creation task control for ingredient search plus type-consistent product grounding, and inferred target-search plus relation-frontier control for local mechanism tasks.
 - [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory): tracked memory store split by environment (`alfworld/`, `scienceworld/`) with `memory1.txt` and `memory2.txt` per environment.
@@ -51,12 +51,14 @@
 - Agent/eval work:
   - Main runner is [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py).
   - Default evaluation commands are `make train`, `make eval`, and `make debug`.
-  - For the local ScienceWorld iteration loop, prefer `make iterate-scienceworld`. It runs a random `make debug ENV=scienceworld`, resolves the latest experiment for the current branch, renders the Codex iteration prompt, and by default invokes `codex exec --full-auto`. Use `PROMPT_ONLY=1` to preview the prompt or `SKIP_DEBUG=1` to reuse the latest local experiment.
+  - For the local ScienceWorld iteration loop, prefer `make iterate-scienceworld`. It runs a random `make debug ENV=scienceworld`, resolves the latest experiment for the current branch, renders the Codex iteration prompt, and by default invokes `codex exec --full-auto --model gpt-5.4 --config model_reasoning_effort="xhigh"`. Use `PROMPT_ONLY=1` to preview the prompt or `SKIP_DEBUG=1` to reuse the latest local experiment.
+  - For consolidation / ablation passes, prefer `make ablate-scienceworld`. It reuses the latest local ScienceWorld experiment by default (`--skip-debug`) so you can remove redundant heuristics or shrink prompts without paying for a fresh random run. Use `RUN_DEBUG=1` only when you intentionally want a new regression anchor first.
   - Environment-specific agent memory now lives under [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory); preserve the `alfworld/` and `scienceworld/` split when changing memory logic or moving files.
   - ALFWorld bootstrap is handled by [scripts/bootstrap_alfworld.sh](/home/eduardo/Projects/cogAgent_tracker/scripts/bootstrap_alfworld.sh) and is expected by Docker-based flows.
   - For Docker-run evals, preserve the `exec env ... uv run python ...` pattern in [Makefile](/home/eduardo/Projects/cogAgent_tracker/Makefile) so `Ctrl+C` reaches Python instead of stopping in the shell wrapper.
   - For iterative agent changes, prefer Graphite stacks with one focused branch per iteration. Current naming convention: `agent-iter-XX-<topic>`.
   - Keep only meaningful agent-behavior iterations in the stack. Fold doc-only, fixup, or cleanup-only changes into the nearest meaningful iteration or directly into `main`.
+  - Consolidation / ablation work should still stay in the same linear `agent-iter-XX-<topic>` stack. Prefer names like `agent-iter-36-consolidate-shortlist` so rollback order stays obvious.
   - Use `main` for merged baseline and cross-cutting fixes such as persistence, observability, docs, or cleanup that should not stay as agent-iteration branches.
   - Current preferred review order for the agent stack:
     - `agent-iter-01-runtime-reasoning`
@@ -94,7 +96,8 @@
   - actions to success
   - chat rounds
   - tokens per successful episode
-- Prefer random-task evaluation for the main signal. Use hand-picked tasks mainly to reproduce a known failure mode and verify a targeted fix.
+  - Prefer random-task evaluation for the main signal. Use hand-picked tasks mainly to reproduce a known failure mode and verify a targeted fix.
+  - Every few agent iterations, prefer one explicit consolidation pass that removes overlapping heuristics, merges duplicate frontier logic, or trims model-facing context. Keep those consolidation passes tied to the same random-run workflow and evaluate them against the latest local experiment before keeping them.
 
 ## Environment And Secrets
 - Copy [.env.example](/home/eduardo/Projects/cogAgent_tracker/.env.example) to `.env`; do not commit real secrets.
