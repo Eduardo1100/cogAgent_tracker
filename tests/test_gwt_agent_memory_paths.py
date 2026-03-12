@@ -952,3 +952,179 @@ def test_numeric_ambiguity_choice_resolves_to_semantic_action(tmp_path):
         "resolved_action": "look at flower (in apple tree, in self watering flower pot 7, in outside)",
     }
     assert agent._classify_action_family(resolved_action) == "inspect"
+
+
+def test_task_contract_separates_candidate_class_and_destination_roles(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert "focus" in contract["required_families"]
+    assert "relocation" in contract["required_families"]
+    assert "inspect" not in contract["required_families"]
+    assert contract["support_families"] == ["inspect"]
+    assert contract["candidate_classes"] == ["non living thing"]
+    assert contract["destination_container"] == ["red box"]
+    assert contract["destination_room"] == ["kitchen"]
+
+
+def test_support_entities_do_not_count_as_completed_focus_targets(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_ordered_target_progress(
+        executed_action="focus on picture",
+        observation="You focus on the picture.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on red box",
+        observation="You focus on the red box.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on kitchen",
+        observation="You focus on the kitchen.",
+    )
+
+    assert agent._get_ordered_target_snapshot()["completed_focus_targets"] == [
+        "picture"
+    ]
+
+
+def test_repeated_support_confirmation_becomes_stalled_not_new_evidence(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    observation = "a red box (containing a picture)"
+    agent.percept = {
+        "resulting_observation": observation,
+        "newly_admissible_actions": [],
+        "no_longer_admissible_actions": [],
+    }
+    agent._record_action_observation_signature(
+        "look at red box", observation, family="inspect"
+    )
+
+    outcome, evidence = agent._classify_hypothesis_outcome(
+        family="inspect",
+        executed_action="look at red box",
+        observation=observation,
+        previous_observation="You focus on the red box.",
+    )
+
+    assert outcome == "stalled"
+    assert "Repeated confirmation" in evidence
+
+
+def test_candidate_tracking_rejects_stale_candidate_after_repeated_confirmation(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    agent._update_candidate_tracking(
+        executed_action="focus on picture",
+        observation="You focus on the picture.",
+        previous_observation="a picture of a farm.",
+    )
+
+    for previous_observation in (
+        "You focus on the red box.",
+        "a red box (containing a picture)",
+        "a red box (containing a picture)",
+    ):
+        observation = "a red box (containing a picture)"
+        agent._update_candidate_tracking(
+            executed_action="look at red box",
+            observation=observation,
+            previous_observation=previous_observation,
+        )
+        agent.percept = {
+            "resulting_observation": observation,
+            "newly_admissible_actions": [],
+            "no_longer_admissible_actions": [],
+        }
+        agent._update_episode_hypothesis_ledger(
+            suggested_action="look at red box",
+            executed_action="look at red box",
+            previous_observation=previous_observation,
+        )
+
+    snapshot = agent._get_candidate_tracking_snapshot()
+    assert snapshot["rejected_candidates"] == ["picture"]
+    assert "active_candidate" not in snapshot
+
+
+def test_shortlist_pivots_to_new_grounded_candidate_after_rejection(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._rejected_candidates = ["picture"]
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a picture, a painting, "
+            "a lighter, and a red box."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on picture",
+            "look at picture",
+            "focus on red box",
+            "look at painting",
+            "focus on painting",
+            "look at lighter",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "look at painting" in shortlist
+    assert "focus on painting" in shortlist
+    assert "focus on red box" not in shortlist
+    assert "focus on picture" not in shortlist
+
+
+def test_custom_speaker_selection_repairs_malformed_thinking_output(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.thinking_agent = object()
+    agent.action_agent = object()
+    agent.echo_agent = object()
+    agent.learning_agent = object()
+    agent.belief_state_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.allowed_transitions = {agent.thinking_agent: [agent.action_agent]}
+    agent._reset_episode_reasoning_state()
+    agent._active_candidate = "picture"
+
+    groupchat = SimpleNamespace(messages=[{"content": "[Observation]: stale replay"}])
+
+    next_speaker = agent.custom_speaker_selection(agent.thinking_agent, groupchat)
+
+    assert next_speaker is agent.action_agent
+    assert groupchat.messages[-1]["content"].startswith("STRATEGY:")
+    assert "support entities" in groupchat.messages[-1]["content"]

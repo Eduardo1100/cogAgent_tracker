@@ -175,7 +175,7 @@ class GWTAutogenAgent(AutogenAgent):
     }
     _TASK_FAMILY_HINTS = {
         "focus": ("focus",),
-        "inspect": ("inspect", "examine", "look at", "find", "identify", "locate"),
+        "inspect": ("inspect", "examine", "look at"),
         "relation": (
             "connect",
             "link",
@@ -186,7 +186,7 @@ class GWTAutogenAgent(AutogenAgent):
             "anode",
             "cathode",
         ),
-        "relocation": ("go to", "enter", "move to", "bring", "carry", "transport"),
+        "relocation": ("go to", "enter", "move", "bring", "carry", "transport"),
         "transfer_or_transform": (
             "fill",
             "pour",
@@ -206,6 +206,13 @@ class GWTAutogenAgent(AutogenAgent):
         ),
         "tool_application": ("use", "heat", "cool", "boil", "cook", "measure", "test"),
     }
+    _TASK_SEARCH_HINTS = (
+        "find",
+        "locate",
+        "identify",
+        "discover",
+        "determine whether",
+    )
     _TASK_ORDERING_HINTS = {
         "ordered_sequence": (
             "earliest",
@@ -273,6 +280,39 @@ class GWTAutogenAgent(AutogenAgent):
         "starting",
         "whether",
     }
+    _GENERIC_PRIMARY_TARGET_TOKENS = {
+        "thing",
+        "object",
+        "item",
+        "target",
+        "entity",
+    }
+    _NON_CANDIDATE_REFERENT_TOKENS = {
+        "agent",
+        "air",
+        "inventory",
+        "hallway",
+        "kitchen",
+        "bathroom",
+        "bedroom",
+        "greenhouse",
+        "outside",
+        "workshop",
+        "living",
+        "room",
+        "studio",
+        "door",
+    }
+    _THINKING_PREFIXES = (
+        "IDEA:",
+        "STRATEGY:",
+        "HYPOTHESIS:",
+        "INSIGHT:",
+        "QUESTION:",
+        "THEORY:",
+        "EXPLANATION:",
+        "TACTIC:",
+    )
     _LIFECYCLE_STAGE_PATTERNS = (
         ("egg", (r"\begg\b",)),
         ("seed", (r"\bseed\b",)),
@@ -537,12 +577,20 @@ class GWTAutogenAgent(AutogenAgent):
         self._observed_stage_labels: list[str] = []
         self._stage_evidence_by_referent: dict[str, list[str]] = {}
         self._referent_resolution_events: list[dict] = []
+        self._active_candidate: str | None = None
+        self._candidate_states: dict[str, dict] = {}
+        self._rejected_candidates: list[str] = []
+        self._action_observation_signatures: dict[tuple[str, str, str], int] = {}
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
         lifecycle_sequence = any(
             self._task_contains_hint(task_lower, hint)
             for hint in self._LIFECYCLE_TASK_HINTS
+        )
+        search_mode = any(
+            self._task_contains_hint(task_lower, hint)
+            for hint in self._TASK_SEARCH_HINTS
         )
         required_families: list[str] = []
         family_hint_tokens: set[str] = set()
@@ -557,6 +605,10 @@ class GWTAutogenAgent(AutogenAgent):
                             | self._ACTION_COMMAND_STOPWORDS,
                         )
                     )
+
+        support_families: list[str] = []
+        if search_mode and "inspect" not in required_families:
+            support_families.append("inspect")
 
         ordering_cues: list[str] = []
         ordering_tokens: set[str] = set()
@@ -573,9 +625,35 @@ class GWTAutogenAgent(AutogenAgent):
                     )
 
         role_phrases = self._extract_task_role_phrases(task)
+        candidate_classes = self._extract_candidate_classes(task)
+        destination_container, destination_room = self._extract_destination_roles(task)
+        if (
+            destination_container
+            and destination_container not in role_phrases["supporting_targets"]
+        ):
+            role_phrases["supporting_targets"].append(destination_container)
+        if (
+            destination_room
+            and destination_room not in role_phrases["supporting_targets"]
+        ):
+            role_phrases["supporting_targets"].append(destination_room)
         target_entities: list[str] = []
-        for role in ("primary_targets", "supporting_targets", "required_relations"):
-            for phrase in role_phrases[role]:
+        for role in (
+            "primary_targets",
+            "supporting_targets",
+            "required_relations",
+            "candidate_classes",
+            "destination_container",
+            "destination_room",
+        ):
+            phrases = role_phrases.get(role, [])
+            if role == "candidate_classes":
+                phrases = candidate_classes
+            elif role == "destination_container":
+                phrases = [destination_container] if destination_container else []
+            elif role == "destination_room":
+                phrases = [destination_room] if destination_room else []
+            for phrase in phrases:
                 for token in self._extract_runtime_tokens(
                     phrase,
                     stopwords=self._TASK_ENTITY_STOPWORDS
@@ -602,11 +680,18 @@ class GWTAutogenAgent(AutogenAgent):
 
         return {
             "required_families": required_families,
+            "support_families": support_families,
             "target_entities": target_entities,
             "ordering_cues": ordering_cues,
             "lifecycle_sequence": lifecycle_sequence,
+            "search_mode": search_mode,
+            "candidate_classes": candidate_classes,
             "primary_targets": role_phrases["primary_targets"],
             "supporting_targets": role_phrases["supporting_targets"],
+            "destination_container": (
+                [destination_container] if destination_container else []
+            ),
+            "destination_room": [destination_room] if destination_room else [],
             "required_relations": role_phrases["required_relations"],
         }
 
@@ -888,6 +973,41 @@ class GWTAutogenAgent(AutogenAgent):
         )
         return " ".join(phrase_tokens[:4])
 
+    def _extract_candidate_classes(self, task: str) -> list[str]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        candidate_classes: list[str] = []
+        patterns = (
+            r"\b(?:find|locate|identify|discover)\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, normalized_task):
+                phrase = self._normalize_task_phrase(
+                    match.group(1), role="primary_targets"
+                )
+                if phrase and phrase not in candidate_classes:
+                    candidate_classes.append(phrase)
+        return candidate_classes[:3]
+
+    def _extract_destination_roles(self, task: str) -> tuple[str, str]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        patterns = (
+            r"\b(?:move|bring|carry)\s+.+?\s+\bto\b\s+(?:the\s+)?(.+?)(?:\s+\bin\b\s+(?:the\s+)?(.+?))?(?=$|[.;,\n]|\bthen\b|\band then\b)",
+            r"\b(?:put|place)\s+.+?\s+\b(?:in|into|on)\b\s+(?:the\s+)?(.+?)(?:\s+\bin\b\s+(?:the\s+)?(.+?))?(?=$|[.;,\n]|\bthen\b|\band then\b)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, normalized_task)
+            if not match:
+                continue
+            container = self._normalize_task_phrase(
+                match.group(1), role="supporting_targets"
+            )
+            room = self._normalize_task_phrase(
+                match.group(2) if match.lastindex and match.group(2) else "",
+                role="supporting_targets",
+            )
+            return container, room
+        return "", ""
+
     def _extract_task_role_phrases(self, task: str) -> dict[str, list[str]]:
         normalized_task = self._normalize_runtime_text(task)
         role_phrases = {
@@ -910,7 +1030,14 @@ class GWTAutogenAgent(AutogenAgent):
     def _get_task_role_token_sets(self, task_contract: dict | None = None) -> dict:
         contract = task_contract or self._get_task_contract()
         role_token_sets: dict[str, list[set[str]]] = {}
-        for role in ("primary_targets", "supporting_targets", "required_relations"):
+        for role in (
+            "primary_targets",
+            "supporting_targets",
+            "required_relations",
+            "candidate_classes",
+            "destination_container",
+            "destination_room",
+        ):
             role_token_sets[role] = []
             for phrase in contract.get(role, []):
                 phrase_tokens = set(
@@ -971,6 +1098,22 @@ class GWTAutogenAgent(AutogenAgent):
                     return True
         return False
 
+    def _count_recent_referent_repeats(
+        self, *, family: str, referent_signature: str
+    ) -> int:
+        if not referent_signature:
+            return 0
+        repeats = 0
+        for test in self.recent_hypothesis_tests:
+            if test["family"] != family:
+                continue
+            prior_referent = self._get_action_referent_signature(
+                test["action"], family=family
+            )
+            if prior_referent == referent_signature:
+                repeats += 1
+        return repeats
+
     def _extract_current_location_tokens(self, observation: str) -> list[str]:
         patterns = (
             r"\b(?:room|location)\s+is\s+called\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
@@ -1024,6 +1167,297 @@ class GWTAutogenAgent(AutogenAgent):
                 break
 
         return tokens[:12]
+
+    def _is_candidate_search_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("search_mode") or contract.get("candidate_classes"))
+
+    def _matches_any_role(
+        self, token_set: set[str], role_token_sets: list[set[str]]
+    ) -> bool:
+        return any(tokens and tokens.issubset(token_set) for tokens in role_token_sets)
+
+    def _is_support_referent(
+        self, referent: str, task_contract: dict | None = None
+    ) -> bool:
+        if not referent:
+            return False
+        contract = task_contract or self._get_task_contract()
+        role_token_sets = self._get_task_role_token_sets(contract)
+        referent_tokens = set(
+            self._extract_runtime_tokens(
+                referent,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            )
+        )
+        if not referent_tokens:
+            return False
+        return any(
+            self._matches_any_role(referent_tokens, role_token_sets[role])
+            for role in (
+                "supporting_targets",
+                "destination_container",
+                "destination_room",
+            )
+        )
+
+    def _extract_action_primary_object_signature(
+        self, action: str, *, family: str | None = None
+    ) -> str:
+        family = family or self._classify_action_family(action)
+        normalized = self._normalize_runtime_text(action)
+        if not normalized:
+            return ""
+
+        content = normalized
+        for prefix in (
+            "focus on ",
+            "look at ",
+            "look in ",
+            "inspect ",
+            "examine ",
+            "check ",
+            "read ",
+            "move ",
+            "bring ",
+            "carry ",
+            "pick up ",
+            "take ",
+            "grab ",
+            "put down ",
+            "drop ",
+            "pour ",
+            "fill ",
+            "mix ",
+            "insert ",
+            "place ",
+            "open ",
+            "close ",
+            "activate ",
+            "deactivate ",
+            "turn on ",
+            "turn off ",
+            "use ",
+            "heat ",
+            "cool ",
+            "boil ",
+            "cook ",
+            "connect ",
+            "disconnect ",
+            "go to ",
+            "enter ",
+        ):
+            if normalized.startswith(prefix):
+                content = normalized[len(prefix) :]
+                break
+
+        primary_segment = re.split(
+            r"\b(?:to|into|in|on|with|from)\b", content, maxsplit=1
+        )[0]
+        primary_tokens = self._extract_runtime_tokens(
+            primary_segment,
+            stopwords=self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(primary_tokens[:6])
+
+    def _get_candidate_action_target(
+        self,
+        action: str,
+        *,
+        family: str | None = None,
+        task_contract: dict | None = None,
+    ) -> str:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_candidate_search_task(contract):
+            return ""
+
+        family = family or self._classify_action_family(action)
+        if family not in {"focus", "inspect", "relocation", "transfer_or_transform"}:
+            return ""
+
+        candidate = self._extract_action_primary_object_signature(action, family=family)
+        if not candidate:
+            candidate = self._get_action_referent_signature(action, family=family)
+        if not candidate:
+            return ""
+
+        candidate_tokens = set(self._extract_runtime_tokens(candidate, limit=6))
+        if not candidate_tokens or candidate_tokens.issubset(
+            self._NON_CANDIDATE_REFERENT_TOKENS
+        ):
+            return ""
+        if self._is_support_referent(candidate, contract):
+            return ""
+        return candidate
+
+    def _get_candidate_state(self, candidate: str) -> dict:
+        state = self._candidate_states.get(candidate)
+        if state is not None:
+            return state
+        state = {
+            "focused": False,
+            "relocated": False,
+            "support_confirmed": False,
+            "stalled_confirmations": 0,
+            "status": "active",
+        }
+        self._candidate_states[candidate] = state
+        return state
+
+    @staticmethod
+    def _normalize_observation_signature(observation: str) -> str:
+        return re.sub(r"\s+", " ", (observation or "").strip().lower())
+
+    def _get_action_observation_signature(
+        self, action: str | None, observation: str, *, family: str | None = None
+    ) -> tuple[str, str, str] | None:
+        if not action:
+            return None
+        family = family or self._classify_action_family(action)
+        referent = self._get_action_referent_signature(action, family=family)
+        observation_signature = self._normalize_observation_signature(observation)
+        if not referent or not observation_signature:
+            return None
+        return family, referent, observation_signature
+
+    def _is_repeated_action_observation(
+        self, action: str | None, observation: str, *, family: str | None = None
+    ) -> bool:
+        signature = self._get_action_observation_signature(
+            action, observation, family=family
+        )
+        if signature is None:
+            return False
+        return self._action_observation_signatures.get(signature, 0) > 0
+
+    def _record_action_observation_signature(
+        self, action: str | None, observation: str, *, family: str | None = None
+    ) -> None:
+        signature = self._get_action_observation_signature(
+            action, observation, family=family
+        )
+        if signature is None:
+            return
+        self._action_observation_signatures[signature] = (
+            self._action_observation_signatures.get(signature, 0) + 1
+        )
+
+    def _observation_confirms_candidate_destination(
+        self, candidate: str, observation: str, task_contract: dict | None = None
+    ) -> bool:
+        if not candidate:
+            return False
+        contract = task_contract or self._get_task_contract()
+        observation_tokens = set(self._extract_runtime_tokens(observation, limit=32))
+        candidate_tokens = set(self._extract_runtime_tokens(candidate, limit=6))
+        if not candidate_tokens or not candidate_tokens.issubset(observation_tokens):
+            return False
+
+        role_token_sets = self._get_task_role_token_sets(contract)
+        if self._matches_any_role(
+            observation_tokens, role_token_sets["destination_container"]
+        ):
+            return True
+        current_location_tokens = set(
+            self._extract_current_location_tokens(observation)
+        )
+        return self._matches_any_role(
+            current_location_tokens, role_token_sets["destination_room"]
+        )
+
+    def _update_candidate_tracking(
+        self,
+        *,
+        executed_action: str | None,
+        observation: str,
+        previous_observation: str,
+    ) -> None:
+        if not executed_action or not self._is_candidate_search_task():
+            return
+
+        family = self._classify_action_family(executed_action)
+        referent = self._get_action_referent_signature(executed_action, family=family)
+        candidate = self._get_candidate_action_target(executed_action, family=family)
+        normalized_observation = self._normalize_observation_signature(observation)
+        previous_signature = self._normalize_observation_signature(previous_observation)
+        observation_stalled = normalized_observation == previous_signature
+
+        if family == "focus" and candidate:
+            state = self._get_candidate_state(candidate)
+            state["focused"] = True
+            if candidate not in self._rejected_candidates:
+                self._active_candidate = candidate
+
+        active_candidate = self._active_candidate or candidate
+        if not active_candidate:
+            return
+
+        active_state = self._get_candidate_state(active_candidate)
+        active_candidate_tokens = set(
+            self._extract_runtime_tokens(active_candidate, limit=6)
+        )
+        action_tokens = set(self._extract_runtime_tokens(executed_action, limit=12))
+        if (
+            family in {"relocation", "transfer_or_transform"}
+            and active_candidate_tokens
+            and active_candidate_tokens.issubset(action_tokens)
+        ):
+            if self._observation_confirms_candidate_destination(
+                active_candidate, observation
+            ):
+                active_state["relocated"] = True
+
+        if self._observation_confirms_candidate_destination(
+            active_candidate, observation
+        ):
+            active_state["support_confirmed"] = True
+
+        repeated_confirmation = self._is_repeated_action_observation(
+            executed_action, observation, family=family
+        )
+        support_referent = self._is_support_referent(referent)
+        if family in {"focus", "inspect"} and (
+            referent == active_candidate or support_referent
+        ):
+            if active_state["support_confirmed"] and (
+                repeated_confirmation or observation_stalled
+            ):
+                active_state["stalled_confirmations"] += 1
+
+        if (
+            active_state["focused"]
+            and active_state["support_confirmed"]
+            and self.task_status != "COMPLETED"
+            and active_state["stalled_confirmations"] >= 2
+        ):
+            active_state["status"] = "rejected"
+            if active_candidate not in self._rejected_candidates:
+                self._rejected_candidates.append(active_candidate)
+                self._rejected_candidates = self._rejected_candidates[-4:]
+            if self._active_candidate == active_candidate:
+                self._active_candidate = None
+
+    def _get_candidate_tracking_snapshot(self) -> dict:
+        task_contract = self._get_task_contract()
+        snapshot = {}
+        if task_contract.get("candidate_classes"):
+            snapshot["candidate_classes"] = task_contract["candidate_classes"][:2]
+        if task_contract.get("destination_container"):
+            snapshot["destination_container"] = task_contract["destination_container"][
+                :1
+            ]
+        if task_contract.get("destination_room"):
+            snapshot["destination_room"] = task_contract["destination_room"][:1]
+        if self._active_candidate:
+            snapshot["active_candidate"] = self._active_candidate
+        if self._rejected_candidates:
+            snapshot["rejected_candidates"] = self._rejected_candidates[-3:]
+        return snapshot
+
+    @staticmethod
+    def _candidate_tracking_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
 
     def _extract_action_content_tokens(
         self, action: str, family: str | None = None
@@ -1104,6 +1538,9 @@ class GWTAutogenAgent(AutogenAgent):
                 if label not in self._focused_stage_labels:
                     self._focused_stage_labels.append(label)
             self._focused_stage_labels = self._focused_stage_labels[-6:]
+            return
+
+        if self._is_candidate_search_task() and self._is_support_referent(referent):
             return
 
         if referent and referent not in self._completed_focus_targets:
@@ -1337,6 +1774,13 @@ class GWTAutogenAgent(AutogenAgent):
 
         if executed_action is None or self._HARD_FAILURE_RE.search(observation):
             return "invalid", "The attempted action failed or was inadmissible."
+        if family in {"focus", "inspect"} and self._is_repeated_action_observation(
+            executed_action, observation, family=family
+        ):
+            return (
+                "stalled",
+                "Repeated confirmation produced no new task-relevant evidence.",
+            )
         if family == "inspect" and observation_changed:
             if progress_signal >= 2:
                 return "evidence", "Inspection produced task-relevant evidence."
@@ -1391,9 +1835,23 @@ class GWTAutogenAgent(AutogenAgent):
         combined_tokens = action_tokens | observation_tokens
         target_entity_set = set(task_contract.get("target_entities", []))
         required_families = set(task_contract.get("required_families", []))
+        support_families = set(task_contract.get("support_families", []))
+        referent_signature = self._get_action_referent_signature(
+            executed_action or "", family=family
+        )
+        support_referent = self._is_support_referent(referent_signature, task_contract)
+        candidate_target = self._get_candidate_action_target(
+            executed_action or "", family=family, task_contract=task_contract
+        )
 
         signal = 0
-        if family in required_families:
+        if family in required_families and not (
+            self._is_candidate_search_task(task_contract)
+            and family == "focus"
+            and support_referent
+        ):
+            signal += 1
+        elif family in support_families:
             signal += 1
         if combined_tokens & target_entity_set:
             signal += 1
@@ -1425,6 +1883,18 @@ class GWTAutogenAgent(AutogenAgent):
             combined_tokens, role_token_sets["supporting_targets"]
         )[0]:
             signal += 1
+        if (
+            self._is_candidate_search_task(task_contract)
+            and candidate_target
+            and candidate_target in self._rejected_candidates
+        ):
+            signal = 0
+        elif (
+            self._is_candidate_search_task(task_contract)
+            and support_referent
+            and family in {"focus", "inspect"}
+        ):
+            signal = max(signal - 2, 0)
 
         for command in self.percept.get("newly_admissible_actions", []):
             command_tokens = set(
@@ -1504,6 +1974,11 @@ class GWTAutogenAgent(AutogenAgent):
             }
         )
         self.recent_hypothesis_tests = self.recent_hypothesis_tests[-6:]
+        self._record_action_observation_signature(
+            executed_action or suggested_action,
+            observation,
+            family=family,
+        )
 
     def _get_episode_hypothesis_snapshot(
         self,
@@ -1540,6 +2015,8 @@ class GWTAutogenAgent(AutogenAgent):
         }
 
     def _get_current_phase(self) -> str:
+        if self._is_candidate_search_task() and self._rejected_candidates:
+            return "gather_evidence"
         inspect_evidence = any(
             entry["evidence_attempts"] > 0
             for entry in self.episode_hypothesis_ledger.values()
@@ -1588,6 +2065,7 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         role_token_sets = self._get_task_role_token_sets(task_contract)
         required_families = set(task_contract.get("required_families", []))
+        support_families = set(task_contract.get("support_families", []))
         target_entity_set = set(task_contract.get("target_entities", []))
         current_location_tokens = set(
             self._extract_current_location_tokens(
@@ -1599,6 +2077,14 @@ class GWTAutogenAgent(AutogenAgent):
         ) - current_location_tokens
         ordered_sequence = "ordered_sequence" in task_contract.get("ordering_cues", [])
         referent_signature = self._get_action_referent_signature(action, family=family)
+        candidate_search_task = self._is_candidate_search_task(task_contract)
+        candidate_target = self._get_candidate_action_target(
+            action, family=family, task_contract=task_contract
+        )
+        support_referent = self._is_support_referent(referent_signature, task_contract)
+        recent_repeat_count = self._count_recent_referent_repeats(
+            family=family, referent_signature=referent_signature
+        )
         primary_role_hits, _ = self._best_role_overlap(
             content_token_set, role_token_sets["primary_targets"]
         )
@@ -1662,7 +2148,9 @@ class GWTAutogenAgent(AutogenAgent):
         family_priority = self._get_family_priority(current_phase, family)
         score += family_priority
 
-        if family in required_families:
+        if family in required_families and not (
+            candidate_search_task and family == "focus" and support_referent
+        ):
             score += 7
             if grounded_hits:
                 score += 4
@@ -1674,6 +2162,8 @@ class GWTAutogenAgent(AutogenAgent):
                 score += 8
             if family == "focus" and primary_target_grounded:
                 score += 3
+        elif family in support_families:
+            score += 4
 
         if family == "inspect" and (keyword_hits or grounded_hits):
             score += 5
@@ -1735,6 +2225,10 @@ class GWTAutogenAgent(AutogenAgent):
                 score -= 2
         if family == "other":
             score -= 2
+        if recent_repeat_count >= 2 and family in {"focus", "inspect"}:
+            score -= 10
+        elif recent_repeat_count >= 1 and family in {"focus", "inspect"}:
+            score -= 4
 
         if lifecycle_task:
             if family == "focus":
@@ -1776,6 +2270,40 @@ class GWTAutogenAgent(AutogenAgent):
                 and not (target_hits or primary_role_hits)
             ):
                 score -= 4
+        elif candidate_search_task:
+            active_candidate_state = (
+                self._candidate_states.get(self._active_candidate, {})
+                if self._active_candidate
+                else {}
+            )
+            if family == "focus" and support_referent:
+                score -= 24
+            elif family == "inspect" and support_referent:
+                score -= 8
+
+            if candidate_target:
+                if candidate_target in self._rejected_candidates:
+                    score -= 18
+                elif (
+                    self._rejected_candidates
+                    and candidate_target != self._active_candidate
+                ):
+                    if family in {"inspect", "focus", "relocation"}:
+                        score += 10
+                    if family == "focus":
+                        score += 6
+                elif family == "inspect" and grounded_hits:
+                    score += 3
+
+            if (
+                self._active_candidate
+                and active_candidate_state.get("support_confirmed")
+                and family in {"focus", "inspect"}
+            ):
+                if candidate_target == self._active_candidate:
+                    score -= 12
+                if support_referent:
+                    score -= 10
 
         if primary_target_focused and family == "relation":
             score += 8
@@ -1891,6 +2419,12 @@ class GWTAutogenAgent(AutogenAgent):
             quotas["relation"] = max(2, quotas.get("relation", 0))
             if quotas.get("focus", 0) > 0:
                 quotas["focus"] -= 1
+        if self._is_candidate_search_task(task_contract):
+            quotas = dict(quotas)
+            quotas["inspect"] = max(2, quotas.get("inspect", 0))
+            if self._rejected_candidates:
+                quotas["focus"] = max(2, quotas.get("focus", 0))
+                quotas["relocation"] = max(2, quotas.get("relocation", 0))
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}
@@ -1927,6 +2461,7 @@ class GWTAutogenAgent(AutogenAgent):
             "salient_entities": grounded_tokens[:8],
             "task_relevant_action_shortlist": shortlist,
             "deprioritized_families": deprioritized_families,
+            "candidate_tracking": self._get_candidate_tracking_snapshot(),
             "task_contract": task_contract,
         }
 
@@ -1957,6 +2492,13 @@ class GWTAutogenAgent(AutogenAgent):
             extra_context += (
                 "Ordered focus progress this episode: "
                 + json.dumps(ordered_progress)
+                + "\n"
+            )
+        candidate_tracking = summary.get("candidate_tracking", {})
+        if self._candidate_tracking_has_signal(candidate_tracking):
+            extra_context += (
+                "Candidate tracking this episode: "
+                + json.dumps(candidate_tracking)
                 + "\n"
             )
         if self.percept.get("referent_resolution"):
@@ -2027,6 +2569,46 @@ class GWTAutogenAgent(AutogenAgent):
             )
 
         return "BELIEF STATE: [" + " ".join(parts) + "]"
+
+    def _is_valid_thinking_output(self, content: str) -> bool:
+        normalized = (content or "").lstrip().upper()
+        if not normalized:
+            return False
+        if normalized.startswith("[OBSERVATION]:") or normalized.startswith("ACTION:"):
+            return False
+        return normalized.startswith(self._THINKING_PREFIXES)
+
+    def _synthesize_thinking_fallback(self, malformed_content: str) -> str:
+        candidate_tracking = self._get_candidate_tracking_snapshot()
+        active_candidate = candidate_tracking.get("active_candidate")
+        rejected_candidates = candidate_tracking.get("rejected_candidates", [])
+        task_contract = self._get_task_contract()
+        if active_candidate and not rejected_candidates:
+            idea = (
+                f"STRATEGY: Re-anchor on the explicit task contract. Treat {active_candidate!r} "
+                "as the current candidate only, not the destination support entities. "
+                "If one grounded confirmation step still leaves the task incomplete, pivot to a new grounded candidate instead of repeating support focus or inspection."
+            )
+        elif rejected_candidates:
+            idea = (
+                "STRATEGY: The latest grounded candidate has already satisfied the visible task semantics without completing the task. "
+                "Pivot to a different grounded candidate from the same task class and avoid repeating support-entity focus loops."
+            )
+        elif task_contract.get("destination_container") or task_contract.get(
+            "destination_room"
+        ):
+            idea = (
+                "STRATEGY: Separate the primary candidate from destination support entities. "
+                "Use focus on the candidate only when required by the task, and treat the destination room/container as placement context rather than extra focus targets."
+            )
+        else:
+            idea = (
+                "STRATEGY: Re-anchor on the latest percept and task contract. "
+                "Avoid repeating unchanged confirmation steps; prefer one grounded diagnostic or a pivot to a distinct grounded candidate."
+            )
+        if malformed_content.strip():
+            idea += " Ignore the malformed prior reasoning and continue from confirmed perceptual state only."
+        return idea
 
     @staticmethod
     def _is_provider_quota_error(error: Exception) -> bool:
@@ -2228,6 +2810,9 @@ class GWTAutogenAgent(AutogenAgent):
         ordered_progress = self._get_ordered_target_snapshot()
         if self._ordered_progress_has_signal(ordered_progress):
             self.percept["ordered_target_progress"] = ordered_progress
+        candidate_tracking = self._get_candidate_tracking_snapshot()
+        if self._candidate_tracking_has_signal(candidate_tracking):
+            self.percept["candidate_tracking"] = candidate_tracking
         if self.num_actions_taken > 0:
             if shared_action_context["newly_relevant_actions"]:
                 self.percept["newly_relevant_actions"] = shared_action_context[
@@ -2752,6 +3337,11 @@ class GWTAutogenAgent(AutogenAgent):
                     executed_action=reasoning_action,
                     observation=self.adapter.observation,
                 )
+                self._update_candidate_tracking(
+                    executed_action=reasoning_action,
+                    observation=self.adapter.observation,
+                    previous_observation=previous_observation,
+                )
 
             attempted_action = (
                 canonical_suggested_action if executed_action else suggested_action
@@ -3054,6 +3644,7 @@ class GWTAutogenAgent(AutogenAgent):
                     "current_episode_memory": self.curr_episodic_memory,
                     "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
                     "ordered_target_progress": self._get_ordered_target_snapshot(),
+                    "candidate_tracking": self._get_candidate_tracking_snapshot(),
                 },
             )
             + "\n\n"
@@ -3063,7 +3654,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         final_prompt = (
             "Begin cognitive deliberation. Coordinate through structured, grounded reasoning. "
-            "Use prior knowledge when relevant, minimize communication and actions, and confirm task completion explicitly through perceptual feedback."
+            "Use prior knowledge when relevant, maximize communication efficiency, and confirm task completion explicitly through perceptual feedback."
         )
         return (
             intro
@@ -3103,6 +3694,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "current_episode_memory": self.curr_episodic_memory,
                 "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
                 "ordered_target_progress": self._get_ordered_target_snapshot(),
+                "candidate_tracking": self._get_candidate_tracking_snapshot(),
             },
         )
         return self.memory
@@ -3206,6 +3798,16 @@ class GWTAutogenAgent(AutogenAgent):
                 return self.thinking_agent
             self._last_belief_content = ""
             self._consecutive_thinking_count = 0
+            return self.action_agent
+
+        if (
+            last_speaker is self.thinking_agent
+            and self.action_agent in possible_speakers
+            and not self._is_valid_thinking_output(last_msg.get("content") or "")
+        ):
+            last_msg["content"] = self._synthesize_thinking_fallback(
+                last_msg.get("content") or ""
+            )
             return self.action_agent
 
         # Safety valve: if the task is done and the conversation is still
