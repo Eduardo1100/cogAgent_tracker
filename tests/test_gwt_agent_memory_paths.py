@@ -2841,6 +2841,53 @@ def test_artifact_creation_shortlist_prefers_missing_ingredient_search_to_empty_
     assert "move blue paint to wood cup" not in shortlist
 
 
+def test_artifact_creation_focus_grounding_from_action_advances_to_combine_phase(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create green paint. "
+        "When you are done, focus on the green paint."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    agent.num_actions_taken = 1
+    agent._update_artifact_creation_tracking(
+        "You focus on the wood cup.",
+        action="focus on cup containing blue paint in art studio",
+    )
+    agent.num_actions_taken = 2
+    agent._update_artifact_creation_tracking(
+        "You focus on the wood cup.",
+        action="focus on cup containing yellow paint in art studio",
+    )
+
+    assert agent._get_grounded_artifact_labels(limit=3) == [
+        "yellow paint",
+        "blue paint",
+    ]
+
+    agent.percept = {"resulting_observation": "The drawer is now open."}
+    summary = agent._summarize_admissible_actions(
+        [
+            "move cup containing blue paint in art studio to drawer in paint cupboard",
+            "pour yellow paint in cup containing yellow paint into cup containing blue paint in art studio",
+            "look in cup containing blue paint in art studio",
+            "open drawer in paint cupboard",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    combine_action = (
+        "pour yellow paint in cup containing yellow paint into "
+        "cup containing blue paint in art studio"
+    )
+    assert summary["current_phase"] == "combine_or_transform"
+    assert shortlist[0] == combine_action
+
+
 def test_artifact_creation_tracking_records_local_room_search_before_grounding(
     tmp_path,
 ):
