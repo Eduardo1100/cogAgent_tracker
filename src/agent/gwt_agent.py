@@ -718,6 +718,9 @@ class GWTAutogenAgent(AutogenAgent):
         self._measurement_observations: list[dict] = []
         self._selected_measurement_branch_target: str | None = None
         self._measurement_property_event_observed = False
+        self._comparison_observations: dict[str, dict] = {}
+        self._selected_comparison_target: str | None = None
+        self._comparison_resolution: dict[str, object] = {}
         self._selected_conditional_branch_target: str | None = None
         self._conditional_branch_resolution: dict[str, object] = {}
         self._containment_by_object: dict[str, str] = {}
@@ -760,6 +763,12 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_property_type = self._get_measurement_property_type(
             measurement_property
         )
+        (
+            comparison_subject,
+            comparison_property,
+            comparison_direction,
+            comparison_targets,
+        ) = self._extract_comparison_contract(task)
         role_phrases = self._extract_task_role_phrases(task)
         candidate_classes = self._extract_candidate_classes(task)
         (
@@ -777,12 +786,20 @@ class GWTAutogenAgent(AutogenAgent):
         artifact_creation_task = bool(
             artifact_type and not state_change_task and not measurement_task
         )
+        comparison_task = bool(
+            comparison_property
+            and len(comparison_targets) >= 2
+            and not state_change_task
+            and not artifact_creation_task
+            and not measurement_task
+        )
         conditional_branch_task = bool(
             conditional_branch_targets
             and conditional_branches
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
+            and not comparison_task
         )
         if not conditional_branch_task:
             conditional_branch_subject = ""
@@ -809,6 +826,7 @@ class GWTAutogenAgent(AutogenAgent):
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
+            and not comparison_task
             and not conditional_branch_task
         )
         measurement_branch_tokens: set[str] = set()
@@ -852,6 +870,7 @@ class GWTAutogenAgent(AutogenAgent):
             or inferred_search_mode
             or growth_task
             or state_change_task
+            or comparison_task
             or conditional_branch_task
         ) and "inspect" not in required_families:
             support_families.append("inspect")
@@ -875,6 +894,17 @@ class GWTAutogenAgent(AutogenAgent):
             role_phrases["supporting_targets"] = []
             if measurement_instrument:
                 role_phrases["supporting_targets"].append(measurement_instrument)
+        if comparison_task:
+            role_phrases["primary_targets"] = (
+                [comparison_subject]
+                if comparison_subject
+                else role_phrases["primary_targets"]
+            )
+            role_phrases["supporting_targets"] = [
+                phrase
+                for phrase in role_phrases["supporting_targets"]
+                if phrase not in comparison_targets
+            ]
         if conditional_branch_task:
             role_phrases["primary_targets"] = []
             if conditional_branch_evidence_target:
@@ -925,6 +955,7 @@ class GWTAutogenAgent(AutogenAgent):
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
+            and not comparison_task
             and not conditional_branch_task
         )
         target_entities: list[str] = []
@@ -939,6 +970,8 @@ class GWTAutogenAgent(AutogenAgent):
             "artifact_final_targets",
             "measurement_target",
             "measurement_instrument",
+            "comparison_subject",
+            "comparison_targets",
             "conditional_branch_subject",
             "conditional_branch_evidence_target",
             "conditional_branch_targets",
@@ -960,6 +993,10 @@ class GWTAutogenAgent(AutogenAgent):
                 phrases = [measurement_target] if measurement_target else []
             elif role == "measurement_instrument":
                 phrases = [measurement_instrument] if measurement_instrument else []
+            elif role == "comparison_subject":
+                phrases = [comparison_subject] if comparison_subject else []
+            elif role == "comparison_targets":
+                phrases = comparison_targets
             elif role == "conditional_branch_subject":
                 phrases = (
                     [conditional_branch_subject] if conditional_branch_subject else []
@@ -1028,6 +1065,7 @@ class GWTAutogenAgent(AutogenAgent):
             "state_change_task": state_change_task,
             "artifact_creation_task": artifact_creation_task,
             "measurement_task": measurement_task,
+            "comparison_task": comparison_task,
             "search_mode": explicit_search_mode,
             "inferred_search_mode": inferred_search_mode,
             "relation_mechanism_task": relation_mechanism_task,
@@ -1048,6 +1086,10 @@ class GWTAutogenAgent(AutogenAgent):
             ),
             "measurement_branch_targets": measurement_branch_targets,
             "measurement_branches": measurement_branches,
+            "comparison_subject": ([comparison_subject] if comparison_subject else []),
+            "comparison_property": comparison_property,
+            "comparison_direction": comparison_direction,
+            "comparison_targets": comparison_targets,
             "conditional_branch_subject": (
                 [conditional_branch_subject] if conditional_branch_subject else []
             ),
@@ -1114,6 +1156,14 @@ class GWTAutogenAgent(AutogenAgent):
             ):
                 if token not in keywords:
                     keywords.append(token)
+        if self._selected_comparison_target:
+            for token in self._extract_runtime_tokens(
+                self._selected_comparison_target,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            ):
+                if token not in keywords:
+                    keywords.append(token)
         if self._selected_conditional_branch_target:
             for token in self._extract_runtime_tokens(
                 self._selected_conditional_branch_target,
@@ -1144,6 +1194,43 @@ class GWTAutogenAgent(AutogenAgent):
                 break
         return tokens
 
+    def _extract_comparison_tokens(
+        self, text: str, *, limit: int | None = None
+    ) -> list[str]:
+        tokens: list[str] = []
+        raw_tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+        stopwords = self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
+        for index, token in enumerate(raw_tokens):
+            previous_token = raw_tokens[index - 1] if index > 0 else ""
+            if token in stopwords:
+                continue
+            if (
+                len(token) < 3
+                and not token.isdigit()
+                and previous_token not in {"material"}
+            ):
+                continue
+            if token not in tokens:
+                tokens.append(token)
+            if limit is not None and len(tokens) >= limit:
+                break
+        return tokens
+
+    def _normalize_comparison_target_phrase(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+
+        normalized = re.split(
+            r"\b(?:that|which|who|where|because|since|until|while|so that)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:a|an|the)\s+", "", normalized)
+        normalized = normalized.strip(" .,:;")
+        tokens = self._extract_comparison_tokens(normalized, limit=6)
+        return " ".join(tokens[:4])
+
     def _is_lifecycle_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("lifecycle_sequence"))
@@ -1151,6 +1238,10 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_growth_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("growth_task"))
+
+    def _is_comparison_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("comparison_task"))
 
     def _extract_state_change_goal(self, task: str) -> tuple[list[str], str, str]:
         normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
@@ -1436,6 +1527,53 @@ class GWTAutogenAgent(AutogenAgent):
             measurement_branch_targets[:2],
             measurement_branches[:2],
         )
+
+    def _extract_comparison_contract(
+        self, task: str
+    ) -> tuple[str, str, str, list[str]]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        patterns = (
+            r"\b(?:determine|identify|find)\s+which\s+of\s+(?:the\s+)?(?:two\s+)?"
+            r"(.+?)\s*\((.+?)\)\s+has\s+(?:the\s+)?"
+            r"(most|least|highest|lowest)\s+(.+?)(?=$|[.;,\n])",
+        )
+        direction_map = {
+            "most": "max",
+            "highest": "max",
+            "least": "min",
+            "lowest": "min",
+        }
+
+        for pattern in patterns:
+            match = re.search(pattern, normalized_task)
+            if not match:
+                continue
+            subject = self._normalize_task_phrase(
+                match.group(1), role="primary_targets"
+            )
+            candidate_block = match.group(2)
+            property_name = self._normalize_measurement_phrase(match.group(4))
+            direction = direction_map.get(match.group(3), "")
+            raw_candidates = re.split(
+                r"\s*,\s*|\s+\band\b\s+|\s+\bor\b\s+",
+                candidate_block,
+            )
+            comparison_targets: list[str] = []
+            for candidate in raw_candidates:
+                normalized_candidate = self._normalize_comparison_target_phrase(
+                    candidate
+                )
+                if (
+                    normalized_candidate
+                    and normalized_candidate not in comparison_targets
+                ):
+                    comparison_targets.append(normalized_candidate)
+                if len(comparison_targets) >= 2:
+                    break
+            if subject and property_name and len(comparison_targets) >= 2 and direction:
+                return subject, property_name, direction, comparison_targets[:2]
+
+        return "", "", "", []
 
     def _normalize_conditional_branch_subject(self, phrase: str) -> str:
         normalized = self._normalize_task_phrase(phrase, role="primary_targets")
@@ -2566,6 +2704,249 @@ class GWTAutogenAgent(AutogenAgent):
     def _measurement_tracking_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
 
+    def _extract_comparison_primary_signature(self, action: str) -> str:
+        normalized = self._normalize_runtime_text(action)
+        if not normalized:
+            return ""
+
+        content = normalized
+        for prefix in (
+            "focus on ",
+            "look at ",
+            "look in ",
+            "inspect ",
+            "examine ",
+            "check ",
+            "read ",
+            "move ",
+            "bring ",
+            "carry ",
+            "pick up ",
+            "take ",
+            "grab ",
+            "put down ",
+            "drop ",
+            "pour ",
+            "fill ",
+            "mix ",
+            "insert ",
+            "place ",
+            "open ",
+            "close ",
+            "activate ",
+            "deactivate ",
+            "turn on ",
+            "turn off ",
+            "use ",
+            "heat ",
+            "cool ",
+            "boil ",
+            "cook ",
+            "connect ",
+            "disconnect ",
+            "go to ",
+            "enter ",
+        ):
+            if normalized.startswith(prefix):
+                content = normalized[len(prefix) :]
+                break
+
+        primary_segment = re.split(
+            r"\b(?:to|into|in|on|with|from)\b", content, maxsplit=1
+        )[0]
+        primary_tokens = self._extract_comparison_tokens(primary_segment, limit=6)
+        return " ".join(primary_tokens[:6])
+
+    def _extract_comparison_destination_signature(self, action: str) -> str:
+        normalized = self._normalize_runtime_text(action)
+        if not normalized:
+            return ""
+
+        destination_matches = list(
+            re.finditer(
+                r"\b(?:to|into|in|on)\b\s+([a-z0-9][a-z0-9\s-]{0,60}?)(?=\s+\b(?:to|into|in|on)\b|$)",
+                normalized,
+            )
+        )
+        if not destination_matches:
+            return ""
+        destination_tokens = self._extract_comparison_tokens(
+            destination_matches[-1].group(1),
+            limit=6,
+        )
+        return " ".join(destination_tokens[:6])
+
+    def _get_comparison_target_signatures(
+        self, task_contract: dict | None = None
+    ) -> list[str]:
+        contract = task_contract or self._get_task_contract()
+        signatures: list[str] = []
+        for target in contract.get("comparison_targets", []):
+            signature = self._normalize_comparison_target_phrase(target)
+            if signature and signature not in signatures:
+                signatures.append(signature)
+        return signatures
+
+    def _resolve_comparison_target_from_context(
+        self,
+        *,
+        action: str | None,
+        observation: str,
+        task_contract: dict | None = None,
+    ) -> str:
+        contract = task_contract or self._get_task_contract()
+        comparison_targets = contract.get("comparison_targets", [])
+        if not comparison_targets:
+            return ""
+
+        action_tokens: set[str] = set()
+        if action and action != "None":
+            action_tokens = set(self._extract_comparison_tokens(action, limit=24))
+
+        observation_tokens = set(self._extract_comparison_tokens(observation, limit=36))
+        matches: list[str] = []
+        for target in comparison_targets:
+            target_tokens = set(self._extract_comparison_tokens(target, limit=6))
+            if not target_tokens:
+                continue
+            if action_tokens and target_tokens.issubset(action_tokens):
+                matches.append(target)
+                continue
+            if target_tokens.issubset(observation_tokens):
+                matches.append(target)
+
+        if len(matches) == 1:
+            return matches[0]
+        return ""
+
+    def _parse_comparison_observation(
+        self, observation: str, *, task_contract: dict | None = None
+    ) -> tuple[float | None, str]:
+        contract = task_contract or self._get_task_contract()
+        property_text = self._normalize_runtime_text(
+            contract.get("comparison_property", "")
+        )
+        observation_lower = self._normalize_runtime_text(observation)
+
+        if "friction" in property_text:
+            match = re.search(
+                r"\bapproximately\s+(-?\d+(?:\.\d+)?)%\s+down\s+the\s+plane\b",
+                observation_lower,
+            )
+            if match:
+                return float(match.group(1)), "percent_down_plane"
+
+        return None, ""
+
+    def _comparison_prefers_lower_value(
+        self, *, property_text: str, metric: str, direction: str
+    ) -> bool | None:
+        normalized_property = self._normalize_runtime_text(property_text)
+        if metric == "percent_down_plane" and "friction" in normalized_property:
+            return direction == "max"
+        return None
+
+    def _update_comparison_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        if not self._is_comparison_task():
+            return
+
+        task_contract = self._get_task_contract()
+        target = self._resolve_comparison_target_from_context(
+            action=action,
+            observation=observation,
+            task_contract=task_contract,
+        )
+        if not target:
+            return
+
+        value, metric = self._parse_comparison_observation(
+            observation, task_contract=task_contract
+        )
+        if value is None or not metric:
+            return
+
+        self._comparison_observations[target] = {
+            "value": value,
+            "metric": metric,
+            "evidence_action": action or "None",
+            "timestep": self.num_actions_taken,
+        }
+
+        if len(self._comparison_observations) < len(
+            task_contract.get("comparison_targets", [])
+        ):
+            return
+
+        direction = task_contract.get("comparison_direction", "")
+        property_text = task_contract.get("comparison_property", "")
+        prefer_lower = self._comparison_prefers_lower_value(
+            property_text=property_text,
+            metric=metric,
+            direction=direction,
+        )
+        if prefer_lower is None:
+            return
+
+        ranked = sorted(
+            (
+                (
+                    target_name,
+                    observation_entry["value"],
+                    observation_entry["metric"],
+                )
+                for target_name, observation_entry in self._comparison_observations.items()
+                if observation_entry.get("metric") == metric
+            ),
+            key=lambda item: item[1],
+            reverse=not prefer_lower,
+        )
+        if len(ranked) < 2 or ranked[0][1] == ranked[1][1]:
+            return
+
+        selected_target = ranked[0][0]
+        self._selected_comparison_target = selected_target
+        self._comparison_resolution = {
+            "comparison_property": property_text,
+            "comparison_direction": direction,
+            "branch_target": selected_target,
+            "evidence_metric": metric,
+            "evidence_action": action or "None",
+            "timestep": self.num_actions_taken,
+        }
+
+    def _get_comparison_tracking_snapshot(self) -> dict:
+        if not self._is_comparison_task():
+            return {}
+
+        task_contract = self._get_task_contract()
+        snapshot = {
+            "comparison_subject": task_contract.get("comparison_subject", [])[:1],
+            "comparison_property": task_contract.get("comparison_property", ""),
+            "comparison_direction": task_contract.get("comparison_direction", ""),
+            "comparison_targets": task_contract.get("comparison_targets", [])[:2],
+            "branch_target": (
+                [self._selected_comparison_target]
+                if self._selected_comparison_target
+                else []
+            ),
+            "branch_ready": bool(self._selected_comparison_target),
+        }
+        if self._comparison_observations:
+            snapshot["observations"] = {
+                target: {
+                    "value": entry["value"],
+                    "metric": entry["metric"],
+                }
+                for target, entry in self._comparison_observations.items()
+            }
+        return snapshot
+
+    @staticmethod
+    def _comparison_tracking_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
+
     def _update_conditional_branch_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -3159,6 +3540,8 @@ class GWTAutogenAgent(AutogenAgent):
             "measurement_target",
             "measurement_instrument",
             "measurement_branch_targets",
+            "comparison_subject",
+            "comparison_targets",
             "conditional_branch_subject",
             "conditional_branch_evidence_target",
             "conditional_branch_targets",
@@ -3167,13 +3550,18 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             role_token_sets[role] = []
             for phrase in contract.get(role, []):
-                phrase_tokens = set(
-                    self._extract_runtime_tokens(
-                        phrase,
-                        stopwords=self._TASK_ENTITY_STOPWORDS
-                        | self._ACTION_COMMAND_STOPWORDS,
+                if role in {"comparison_subject", "comparison_targets"}:
+                    phrase_tokens = set(
+                        self._extract_comparison_tokens(phrase, limit=6)
                     )
-                )
+                else:
+                    phrase_tokens = set(
+                        self._extract_runtime_tokens(
+                            phrase,
+                            stopwords=self._TASK_ENTITY_STOPWORDS
+                            | self._ACTION_COMMAND_STOPWORDS,
+                        )
+                    )
                 if phrase_tokens:
                     role_token_sets[role].append(phrase_tokens)
         return role_token_sets
@@ -6107,6 +6495,139 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score
 
+    def _score_comparison_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        content_token_set: set[str],
+        task_contract: dict,
+        role_token_sets: dict[str, list[set[str]]],
+        primary_role_hits: int,
+        support_role_hits: int,
+    ) -> int:
+        if not self._is_comparison_task(task_contract):
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        comparison_action_token_set = set(self._extract_comparison_tokens(action))
+        primary_signature = self._extract_comparison_primary_signature(action)
+        destination_signature = self._extract_comparison_destination_signature(action)
+        primary_token_set = set(self._extract_comparison_tokens(primary_signature))
+        destination_token_set = set(
+            self._extract_comparison_tokens(destination_signature)
+        )
+        target_role_hits, _ = self._best_role_overlap(
+            comparison_action_token_set, role_token_sets["comparison_targets"]
+        )
+        action_matches_target = self._matches_any_role(
+            comparison_action_token_set, role_token_sets["comparison_targets"]
+        )
+        primary_matches_target = self._matches_any_role(
+            primary_token_set, role_token_sets["comparison_targets"]
+        )
+        destination_matches_target = self._matches_any_role(
+            destination_token_set, role_token_sets["comparison_targets"]
+        )
+        selected_target_match = bool(
+            self._selected_comparison_target
+            and set(
+                self._extract_comparison_tokens(self._selected_comparison_target)
+            ).issubset(comparison_action_token_set)
+        )
+        selected_primary_match = bool(
+            self._selected_comparison_target
+            and set(
+                self._extract_comparison_tokens(self._selected_comparison_target)
+            ).issubset(primary_token_set)
+        )
+        score = 0
+
+        if current_phase == "locate_primary_target":
+            if family == "inspect":
+                if target_role_hits or primary_role_hits or support_role_hits:
+                    score += 12
+                elif normalized.startswith("look around"):
+                    score += 8
+            elif family == "device_control":
+                score += 16 if self._action_mentions_door(action, family=family) else -6
+            elif family == "relocation":
+                score += (
+                    8 if self._is_agent_navigation_action(action, family=family) else -6
+                )
+            elif family == "focus":
+                score -= 16 if target_role_hits else 0
+
+        elif current_phase == "gather_branch_evidence":
+            if family == "inspect":
+                if action_matches_target or primary_matches_target or target_role_hits:
+                    if normalized.startswith("look at "):
+                        score += 24
+                    elif normalized.startswith("look in "):
+                        score -= 30
+                    else:
+                        score += 8
+                elif normalized.startswith("look around"):
+                    score += 10
+            elif family == "relocation":
+                if destination_matches_target and not (
+                    action_matches_target and primary_matches_target
+                ):
+                    score += 22
+                elif primary_matches_target:
+                    score -= 28
+            elif family == "transfer_or_transform":
+                if destination_matches_target and not (
+                    action_matches_target and primary_matches_target
+                ):
+                    score += 14
+                elif primary_matches_target:
+                    score -= 16
+            elif family == "focus":
+                if action_matches_target or primary_matches_target or target_role_hits:
+                    score -= 120
+                else:
+                    score -= 12
+            elif family == "device_control":
+                if self._action_mentions_door(action, family=family):
+                    score += 8
+                else:
+                    score -= 6
+            elif family in {"relation", "tool_application"}:
+                score -= 14
+
+        elif current_phase == "execute_branch":
+            if family == "focus":
+                score += (
+                    150
+                    if selected_target_match
+                    else 142
+                    if selected_primary_match
+                    else -90
+                    if action_matches_target or primary_matches_target
+                    else -18
+                )
+            elif (
+                action_matches_target
+                or primary_matches_target
+                or destination_matches_target
+            ):
+                score -= 20
+
+        if (
+            self._selected_comparison_target
+            and (
+                action_matches_target
+                or primary_matches_target
+                or destination_matches_target
+            )
+            and not (selected_target_match or selected_primary_match)
+        ):
+            score -= 36
+
+        return score
+
     def _score_conditional_branch_action(
         self,
         *,
@@ -6602,6 +7123,27 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
+        if self._is_comparison_task(task_contract):
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            comparison_observation_tokens = set(
+                self._extract_comparison_tokens(
+                    (self.percept or {}).get("resulting_observation", ""),
+                    limit=48,
+                )
+            )
+            comparison_target_grounded = any(
+                target_tokens and target_tokens.issubset(comparison_observation_tokens)
+                for target_tokens in role_token_sets["comparison_targets"]
+            )
+            if not (
+                self._primary_target_is_grounded(task_contract, grounded_tokens)
+                or comparison_target_grounded
+            ):
+                return "locate_primary_target"
+            if self._selected_comparison_target:
+                return "execute_branch"
+            return "gather_branch_evidence"
         if self._is_conditional_branch_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             if task_contract.get(
@@ -6888,6 +7430,7 @@ class GWTAutogenAgent(AutogenAgent):
             task_contract
         )
         measurement_task = self._is_measurement_task(task_contract)
+        comparison_task = self._is_comparison_task(task_contract)
         conditional_branch_task = self._is_conditional_branch_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
@@ -7269,6 +7812,17 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+        elif comparison_task:
+            score += self._score_comparison_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                content_token_set=content_token_set,
+                task_contract=task_contract,
+                role_token_sets=role_token_sets,
+                primary_role_hits=primary_role_hits,
+                support_role_hits=support_role_hits,
+            )
         elif conditional_branch_task:
             score += self._score_conditional_branch_action(
                 action=action,
@@ -7531,6 +8085,7 @@ class GWTAutogenAgent(AutogenAgent):
         artifact_creation = self._get_artifact_creation_snapshot()
         substance_search = self._get_substance_search_snapshot(actions)
         measurement_tracking = self._get_measurement_tracking_snapshot()
+        comparison_tracking = self._get_comparison_tracking_snapshot()
         conditional_branch_tracking = self._get_conditional_branch_tracking_snapshot()
 
         return {
@@ -7547,6 +8102,7 @@ class GWTAutogenAgent(AutogenAgent):
             "artifact_creation": artifact_creation,
             "substance_search": substance_search,
             "measurement_tracking": measurement_tracking,
+            "comparison_tracking": comparison_tracking,
             "conditional_branch_tracking": conditional_branch_tracking,
         }
 
@@ -7592,6 +8148,9 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_tracking = summary.get("measurement_tracking", {})
         if self._measurement_tracking_has_signal(measurement_tracking):
             snapshots["measurement_tracking"] = measurement_tracking
+        comparison_tracking = summary.get("comparison_tracking", {})
+        if self._comparison_tracking_has_signal(comparison_tracking):
+            snapshots["comparison_tracking"] = comparison_tracking
         conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
         if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
             snapshots["conditional_branch_tracking"] = conditional_branch_tracking
@@ -7947,6 +8506,10 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
+        self._update_comparison_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
         self._update_conditional_branch_tracking(
             action=action,
             observation=self.adapter.observation,
@@ -7993,6 +8556,9 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_tracking = shared_action_context.get("measurement_tracking", {})
         if self._measurement_tracking_has_signal(measurement_tracking):
             self.percept["measurement_tracking"] = measurement_tracking
+        comparison_tracking = shared_action_context.get("comparison_tracking", {})
+        if self._comparison_tracking_has_signal(comparison_tracking):
+            self.percept["comparison_tracking"] = comparison_tracking
         conditional_branch_tracking = shared_action_context.get(
             "conditional_branch_tracking", {}
         )
