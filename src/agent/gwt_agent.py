@@ -724,6 +724,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._invalid_exact_actions: dict[str, int] = {}
         self._invalid_referent_attempts: dict[tuple[str, str], int] = {}
         self._relation_frontier_referents: list[str] = []
+        self._remote_room_signals: dict[str, dict] = {}
         self._search_location_states: dict[str, dict] = {}
         self._target_status_by_referent: dict[str, str] = {}
         self._admissible_summary_cache: dict[tuple[tuple[str, ...], int], dict] = {}
@@ -3620,6 +3621,103 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _relation_frontier_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
+
+    def _extract_remote_inspected_room_signature(
+        self,
+        *,
+        action: str | None,
+        observation: str,
+        previous_observation: str,
+    ) -> str:
+        if not action:
+            return ""
+
+        family = self._classify_action_family(action)
+        normalized = self._normalize_runtime_text(action)
+        if family != "inspect" or not normalized.startswith("look in "):
+            return ""
+
+        referent = self._get_action_referent_signature(action, family=family)
+        previous_room = self._get_current_location_signature(previous_observation)
+        if not referent or referent == previous_room or referent == "inventory":
+            return ""
+
+        if not self._signature_looks_like_room(
+            referent, observation, previous_observation
+        ):
+            return ""
+
+        return referent
+
+    def _update_remote_room_signal(
+        self,
+        *,
+        action: str | None,
+        observation: str,
+        previous_observation: str,
+    ) -> None:
+        family = self._classify_action_family(action) if action else ""
+        current_room = self._get_current_location_signature(observation)
+        if (
+            current_room
+            and action
+            and family == "relocation"
+            and self._is_agent_navigation_action(action, family=family)
+        ):
+            self._remote_room_signals.pop(current_room, None)
+
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+
+        inspected_room = self._extract_remote_inspected_room_signature(
+            action=action,
+            observation=observation,
+            previous_observation=previous_observation,
+        )
+        if not inspected_room:
+            return
+
+        task_contract = self._get_task_contract()
+        observation_tokens = set(self._extract_runtime_tokens(observation, limit=40))
+        signal_tokens = sorted(
+            (
+                observation_tokens
+                & (
+                    set(task_contract.get("target_entities", []))
+                    | set(task_contract.get("candidate_classes", []))
+                )
+            )
+            - self._referent_tokens(inspected_room)
+        )
+        if not signal_tokens:
+            return
+
+        self._remote_room_signals[inspected_room] = {
+            "signal_tokens": signal_tokens[:4],
+            "last_seen_timestep": self.num_actions_taken,
+        }
+
+    def _get_remote_room_signal_snapshot(self) -> dict:
+        if not self._remote_room_signals:
+            return {}
+
+        room, entry = max(
+            self._remote_room_signals.items(),
+            key=lambda item: (
+                item[1].get("last_seen_timestep", -1),
+                len(item[1].get("signal_tokens", [])),
+                item[0],
+            ),
+        )
+        snapshot = {"room": room}
+        signal_tokens = entry.get("signal_tokens", [])
+        if signal_tokens:
+            snapshot["signal_tokens"] = signal_tokens[:4]
+        return snapshot
+
+    @staticmethod
+    def _remote_room_signal_has_signal(snapshot: dict) -> bool:
+        return bool(snapshot.get("room"))
 
     def _matches_any_role(
         self, token_set: set[str], role_token_sets: list[set[str]]
@@ -6692,6 +6790,11 @@ class GWTAutogenAgent(AutogenAgent):
             self._extract_current_location_tokens(current_observation)
         )
         current_room = self._get_current_location_signature(current_observation)
+        remote_room_signal = self._get_remote_room_signal_snapshot()
+        remote_room = remote_room_signal.get("room", "")
+        remote_room_tokens = (
+            self._referent_tokens(remote_room) if remote_room else set()
+        )
         room_state = self._search_location_states.get(current_room, {})
         visible_doors = self._count_visible_doors(current_observation)
         visible_nonlocation_targets = (
@@ -6745,6 +6848,17 @@ class GWTAutogenAgent(AutogenAgent):
         )
         agent_navigation_action = self._is_agent_navigation_action(
             action, family=family
+        )
+        remote_room_match = bool(
+            remote_room_tokens and remote_room_tokens.issubset(content_token_set)
+        )
+        remote_room_navigation_action = bool(
+            remote_room_match and agent_navigation_action
+        )
+        remote_room_door_action = bool(
+            remote_room_match
+            and family == "device_control"
+            and self._action_mentions_door(action, family=family)
         )
         frontier_room_target = (
             self._get_room_frontier_target(action, current_observation, family=family)
@@ -7027,6 +7141,34 @@ class GWTAutogenAgent(AutogenAgent):
                 active_candidate_room_tokens
                 and active_candidate_room_tokens.issubset(content_token_set)
             )
+            if self._remote_room_signal_has_signal(remote_room_signal):
+                if family == "relocation":
+                    if remote_room_navigation_action:
+                        score += 40
+                    elif agent_navigation_action:
+                        score -= 12
+                    else:
+                        score -= 16
+                elif family == "device_control":
+                    if remote_room_door_action:
+                        score += 22
+                    elif self._action_mentions_door(action, family=family):
+                        score -= 10
+                elif family == "inspect":
+                    if normalized.startswith("look in ") and remote_room_match:
+                        score -= 14
+                    elif remote_room_match:
+                        score -= 10
+                    elif not support_referent:
+                        score -= 10
+                elif family == "focus":
+                    score -= 12 if remote_room_match else 18
+                elif family in {
+                    "relation",
+                    "transfer_or_transform",
+                    "tool_application",
+                }:
+                    score -= 16
             if family == "focus" and support_referent:
                 score -= 24
             elif family == "inspect" and support_referent:
@@ -7208,6 +7350,7 @@ class GWTAutogenAgent(AutogenAgent):
         task_keywords = self._extract_task_keywords()
         grounded_tokens = self._get_observation_grounded_tokens()
         task_contract = self._get_task_contract()
+        remote_room_signal = self._get_remote_room_signal_snapshot()
         scored_actions = []
 
         for action in actions:
@@ -7263,6 +7406,12 @@ class GWTAutogenAgent(AutogenAgent):
             if self._rejected_candidates:
                 quotas["focus"] = max(2, quotas.get("focus", 0))
                 quotas["relocation"] = max(2, quotas.get("relocation", 0))
+        if self._remote_room_signal_has_signal(remote_room_signal):
+            quotas = dict(quotas)
+            quotas["relocation"] = max(1, quotas.get("relocation", 0))
+            quotas["device_control"] = max(1, quotas.get("device_control", 0))
+            if quotas.get("focus", 0) > 0:
+                quotas["focus"] -= 1
         lifecycle_search_mode = False
         if self._is_lifecycle_task(task_contract):
             current_observation = (self.percept or {}).get("resulting_observation", "")
@@ -7343,6 +7492,7 @@ class GWTAutogenAgent(AutogenAgent):
             "deprioritized_families": deprioritized_families,
             "candidate_tracking": self._get_candidate_tracking_snapshot(),
             "task_contract": task_contract,
+            "remote_room_signal": remote_room_signal,
             "relation_frontier": relation_frontier,
             "artifact_creation": artifact_creation,
             "substance_search": substance_search,
@@ -7395,6 +7545,9 @@ class GWTAutogenAgent(AutogenAgent):
         conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
         if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
             snapshots["conditional_branch_tracking"] = conditional_branch_tracking
+        remote_room_signal = summary.get("remote_room_signal", {})
+        if self._remote_room_signal_has_signal(remote_room_signal):
+            snapshots["remote_room_signal"] = remote_room_signal
         if self.percept.get("referent_resolution"):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
         return snapshots
@@ -7711,7 +7864,7 @@ class GWTAutogenAgent(AutogenAgent):
             f.write(f"{self.admissible_actions}\n")
 
     def update_percept(self, action):
-
+        previous_observation = (self.percept or {}).get("resulting_observation", "")
         curr_admissible = self.adapter.admissible_actions
         no_longer = sorted(set(self.admissible_actions) - set(curr_admissible))
         newly_added = sorted(set(curr_admissible) - set(self.admissible_actions))
@@ -7753,6 +7906,11 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
+        self._update_remote_room_signal(
+            action=action,
+            observation=self.adapter.observation,
+            previous_observation=previous_observation,
+        )
         self._invalidate_action_summary_cache()
         task_contract = self._get_task_contract()
         if any(task_contract.values()):
@@ -7790,6 +7948,9 @@ class GWTAutogenAgent(AutogenAgent):
         relation_frontier = shared_action_context.get("relation_frontier", {})
         if self._relation_frontier_has_signal(relation_frontier):
             self.percept["relation_frontier"] = relation_frontier
+        remote_room_signal = shared_action_context.get("remote_room_signal", {})
+        if self._remote_room_signal_has_signal(remote_room_signal):
+            self.percept["remote_room_signal"] = remote_room_signal
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
         ]

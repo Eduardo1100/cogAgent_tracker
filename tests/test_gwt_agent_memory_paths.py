@@ -706,6 +706,54 @@ def test_room_frontier_relocation_requires_agent_navigation(tmp_path):
     )
 
 
+def test_remote_room_signal_prefers_entering_inspected_room(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find the animal with the shortest life span. "
+        "The animals are in the 'outside' location. "
+        "Focus on the animal with the shortest life span."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    previous_observation = (
+        "This room is called the hallway. In it, you see the agent. "
+        "You also see: A door to the art studio (that is open), "
+        "A door to the greenhouse (that is open)."
+    )
+    observation = (
+        "Inside the greenhouse is: a substance called air, a bee hive. "
+        "The bee hive door is closed. You also see: "
+        "A door to the outside (that is closed), "
+        "A door to the hallway (that is open)."
+    )
+    agent._update_remote_room_signal(
+        action="look in greenhouse",
+        observation=observation,
+        previous_observation=previous_observation,
+    )
+    agent.percept = {"resulting_observation": observation}
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at art studio",
+            "look in art studio",
+            "focus on art studio",
+            "open art studio door",
+            "open door to greenhouse",
+            "go to greenhouse",
+            "focus on greenhouse",
+            "look in greenhouse",
+        ],
+        shortlist_limit=3,
+    )
+
+    assert summary["remote_room_signal"]["room"] == "greenhouse"
+    assert summary["task_relevant_action_shortlist"][0] == "go to greenhouse"
+    assert "open door to greenhouse" in summary["task_relevant_action_shortlist"]
+    assert "look at art studio" not in summary["task_relevant_action_shortlist"]
+
+
 def test_lifecycle_search_prefers_doors_over_object_transport_before_entry(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
