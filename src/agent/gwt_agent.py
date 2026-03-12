@@ -680,6 +680,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._exhausted_container_targets: list[str] = []
         self._measurement_observations: list[dict] = []
         self._selected_measurement_branch_target: str | None = None
+        self._measurement_property_event_observed = False
         self._containment_by_object: dict[str, str] = {}
         self._invalid_exact_actions: dict[str, int] = {}
         self._invalid_referent_attempts: dict[tuple[str, str], int] = {}
@@ -715,6 +716,9 @@ class GWTAutogenAgent(AutogenAgent):
             measurement_branches,
         ) = self._extract_measurement_contract(task)
         measurement_task = bool(measurement_property and measurement_target)
+        measurement_property_type = self._get_measurement_property_type(
+            measurement_property
+        )
         role_phrases = self._extract_task_role_phrases(task)
         candidate_classes = self._extract_candidate_classes(task)
         (
@@ -923,6 +927,7 @@ class GWTAutogenAgent(AutogenAgent):
             "artifact_final_targets": artifact_final_targets,
             "artifact_descriptor_tokens": artifact_descriptor_tokens,
             "measurement_property": measurement_property,
+            "measurement_property_type": measurement_property_type,
             "measurement_target": [measurement_target] if measurement_target else [],
             "measurement_instrument": (
                 [measurement_instrument] if measurement_instrument else []
@@ -1169,6 +1174,19 @@ class GWTAutogenAgent(AutogenAgent):
             limit=6,
         )
         return " ".join(tokens[:4])
+
+    def _get_measurement_property_type(
+        self, property_text: str | None = None, task_contract: dict | None = None
+    ) -> str:
+        if property_text is None:
+            contract = task_contract or self._get_task_contract()
+            property_text = contract.get("measurement_property", "")
+        normalized = self._normalize_runtime_text(property_text or "")
+        if not normalized:
+            return ""
+        if "point" in normalized:
+            return "stable_threshold_property"
+        return "instantaneous_state"
 
     def _normalize_measurement_target_phrase(self, phrase: str) -> str:
         normalized = self._normalize_runtime_text(phrase)
@@ -1797,10 +1815,10 @@ class GWTAutogenAgent(AutogenAgent):
         self, task_contract: dict | None = None
     ) -> bool:
         contract = task_contract or self._get_task_contract()
-        property_text = self._normalize_runtime_text(
-            contract.get("measurement_property", "")
+        return (
+            self._get_measurement_property_type(task_contract=contract)
+            == "stable_threshold_property"
         )
-        return "point" in property_text
 
     def _measurement_property_event_detected(
         self, observation: str, task_contract: dict | None = None
@@ -1822,11 +1840,76 @@ class GWTAutogenAgent(AutogenAgent):
             event_patterns.extend((r"\bfreez(?:e|es|ing|ed)\b", r"\bice\b"))
         return any(re.search(pattern, observation_lower) for pattern in event_patterns)
 
+    def _measurement_event_relates_to_target(
+        self, *, action: str | None, observation: str, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        measurement_target = self._get_measurement_target_signature(contract)
+        active_enclosure = self._resolve_enclosing_referent(measurement_target)
+        target_tokens = self._referent_tokens(measurement_target)
+        observation_tokens = set(self._extract_runtime_tokens(observation, limit=48))
+        if target_tokens and target_tokens.issubset(observation_tokens):
+            return True
+        if not action:
+            return False
+        family = self._classify_action_family(action)
+        touched_signatures = {
+            self._get_action_referent_signature(action, family=family),
+            self._extract_action_primary_object_signature(action, family=family),
+            self._extract_action_destination_signature(action, family=family),
+            self._extract_measurement_subject_signature(action, family=family),
+        }
+        touched_signatures.discard("")
+        if measurement_target and measurement_target in touched_signatures:
+            return True
+        return bool(active_enclosure and active_enclosure in touched_signatures)
+
+    def _measurement_property_is_resolved(
+        self, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        latest_direct = self._get_latest_measurement(direct=True)
+        if latest_direct is None:
+            return False
+        if not self._measurement_property_requires_event(contract):
+            return True
+        return any(
+            entry["direct"] and entry.get("property_relevant")
+            for entry in self._measurement_observations
+        )
+
+    def _get_measurement_property_resolution_status(
+        self, task_contract: dict | None = None
+    ) -> str:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_measurement_task(contract):
+            return ""
+        if self._measurement_property_is_resolved(contract):
+            return "resolved"
+        if self._get_latest_measurement(direct=True) is None:
+            return "needs_direct_measurement"
+        if self._measurement_property_requires_event(contract):
+            if self._measurement_property_event_observed:
+                return "needs_confirming_measurement"
+            return "needs_transition_evidence"
+        return "needs_direct_measurement"
+
     def _update_measurement_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
         self._update_containment_tracking(action, observation)
-        if not self._is_measurement_task() or not action or action == "None":
+        if not self._is_measurement_task():
+            return
+        task_contract = self._get_task_contract()
+        if (
+            self._measurement_property_requires_event(task_contract)
+            and self._measurement_property_event_detected(observation, task_contract)
+            and self._measurement_event_relates_to_target(
+                action=action, observation=observation, task_contract=task_contract
+            )
+        ):
+            self._measurement_property_event_observed = True
+        if not action or action == "None":
             return
 
         family = self._classify_action_family(action)
@@ -1836,7 +1919,6 @@ class GWTAutogenAgent(AutogenAgent):
         if measurement_value is None or family != "tool_application":
             return
 
-        task_contract = self._get_task_contract()
         role_token_sets = self._get_task_role_token_sets(task_contract)
         subject_signature = self._extract_measurement_subject_signature(
             action, family=family
@@ -1857,8 +1939,19 @@ class GWTAutogenAgent(AutogenAgent):
             and active_enclosure
             and subject_signature == active_enclosure
         )
-        event_confirmed = self._measurement_property_event_detected(
-            observation, task_contract
+        event_confirmed = bool(
+            self._measurement_property_event_detected(observation, task_contract)
+            and self._measurement_event_relates_to_target(
+                action=action, observation=observation, task_contract=task_contract
+            )
+        )
+        property_relevant = bool(
+            direct_measurement
+            and (
+                not self._measurement_property_requires_event(task_contract)
+                or event_confirmed
+                or self._measurement_property_event_observed
+            )
         )
         measurement_entry = {
             "value": measurement_value,
@@ -1867,6 +1960,7 @@ class GWTAutogenAgent(AutogenAgent):
             "direct": direct_measurement,
             "proxy": proxy_measurement,
             "event_confirmed": event_confirmed,
+            "property_relevant": property_relevant,
             "timestep": self.num_actions_taken,
         }
         self._measurement_observations.append(measurement_entry)
@@ -1876,15 +1970,12 @@ class GWTAutogenAgent(AutogenAgent):
             return
         if self._selected_measurement_branch_target:
             return
+        if not property_relevant:
+            return
 
         for branch in task_contract.get("measurement_branches", []):
             operator = branch["operator"]
             threshold = branch["threshold"]
-            if (
-                self._measurement_property_requires_event(task_contract)
-                and not event_confirmed
-            ):
-                continue
             if operator == "above" and measurement_value > threshold:
                 self._selected_measurement_branch_target = branch["target"]
                 break
@@ -1892,10 +1983,21 @@ class GWTAutogenAgent(AutogenAgent):
                 self._selected_measurement_branch_target = branch["target"]
                 break
 
-    def _get_latest_measurement(self, *, direct: bool | None = None) -> dict | None:
+    def _get_latest_measurement(
+        self,
+        *,
+        direct: bool | None = None,
+        property_relevant: bool | None = None,
+    ) -> dict | None:
         for entry in reversed(self._measurement_observations):
-            if direct is None or entry["direct"] is direct:
-                return entry
+            if direct is not None and entry["direct"] is not direct:
+                continue
+            if (
+                property_relevant is not None
+                and entry.get("property_relevant") is not property_relevant
+            ):
+                continue
+            return entry
         return None
 
     def _get_measurement_tracking_snapshot(self) -> dict:
@@ -1907,6 +2009,12 @@ class GWTAutogenAgent(AutogenAgent):
             "measurement_instrument": task_contract.get("measurement_instrument", [])[
                 :1
             ],
+            "measurement_property_type": task_contract.get(
+                "measurement_property_type", ""
+            ),
+            "property_resolution_status": self._get_measurement_property_resolution_status(
+                task_contract
+            ),
             "branch_target": (
                 [self._selected_measurement_branch_target]
                 if self._selected_measurement_branch_target
@@ -1915,11 +2023,20 @@ class GWTAutogenAgent(AutogenAgent):
         }
         latest_direct = self._get_latest_measurement(direct=True)
         latest_proxy = self._get_latest_measurement(direct=False)
+        latest_property = self._get_latest_measurement(
+            direct=True, property_relevant=True
+        )
         if latest_direct:
             snapshot["latest_direct_measurement"] = {
                 "value": latest_direct["value"],
                 "unit": latest_direct["unit"],
                 "subject": latest_direct["subject"],
+            }
+        if latest_property:
+            snapshot["latest_property_measurement"] = {
+                "value": latest_property["value"],
+                "unit": latest_property["unit"],
+                "subject": latest_property["subject"],
             }
         if latest_proxy:
             snapshot["latest_proxy_measurement"] = {
@@ -1931,6 +2048,8 @@ class GWTAutogenAgent(AutogenAgent):
         active_enclosure = self._resolve_enclosing_referent(measurement_target)
         if active_enclosure and not self._referent_is_visible(measurement_target):
             snapshot["active_enclosure"] = [active_enclosure]
+        if self._measurement_property_requires_event(task_contract):
+            snapshot["transition_observed"] = self._measurement_property_event_observed
         if task_contract.get("measurement_branch_targets"):
             snapshot["branch_ready"] = bool(self._selected_measurement_branch_target)
         return snapshot
@@ -3331,6 +3450,21 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "relocation": 1,
             },
+            "induce_property_change": {
+                "tool_application": 3,
+                "device_control": 3,
+                "inspect": 2,
+                "transfer_or_transform": 2,
+                "relocation": 1,
+                "focus": 1,
+            },
+            "verify_transition": {
+                "tool_application": 3,
+                "inspect": 3,
+                "device_control": 2,
+                "focus": 1,
+                "relocation": 1,
+            },
             "resolve_branch": {
                 "tool_application": 3,
                 "inspect": 3,
@@ -3561,6 +3695,28 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 5,
                 "device_control": 4,
                 "relocation": 2,
+                "transfer_or_transform": 1,
+                "relation": -3,
+                "other": -2,
+                "idle": -5,
+            },
+            "induce_property_change": {
+                "tool_application": 7,
+                "device_control": 7,
+                "inspect": 5,
+                "transfer_or_transform": 5,
+                "relocation": 2,
+                "focus": 1,
+                "relation": -3,
+                "other": -2,
+                "idle": -5,
+            },
+            "verify_transition": {
+                "tool_application": 8,
+                "inspect": 7,
+                "device_control": 5,
+                "focus": 2,
+                "relocation": 1,
                 "transfer_or_transform": 1,
                 "relation": -3,
                 "other": -2,
@@ -3904,6 +4060,9 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_subject = self._extract_measurement_subject_signature(
             executed_action or "", family=family
         )
+        destination_signature = self._extract_action_destination_signature(
+            executed_action or "", family=family
+        )
 
         signal = 0
         if family in required_families and not (
@@ -3992,10 +4151,14 @@ class GWTAutogenAgent(AutogenAgent):
             )
             branch_target_action = self._signature_matches_role(
                 referent_signature, role_token_sets["measurement_branch_targets"]
+            ) or self._signature_matches_role(
+                destination_signature,
+                role_token_sets["measurement_branch_targets"],
             )
-            selected_branch_action = (
-                referent_signature == self._selected_measurement_branch_target
-                and bool(self._selected_measurement_branch_target)
+            selected_branch_action = bool(
+                self._selected_measurement_branch_target
+                and self._selected_measurement_branch_target
+                in {referent_signature, destination_signature}
             )
             direct_value_entry = self._get_latest_measurement(direct=True)
             if family == "tool_application":
@@ -4003,6 +4166,12 @@ class GWTAutogenAgent(AutogenAgent):
                     signal += 2
                 elif measurement_subject:
                     signal = min(signal, 1)
+            if (
+                self._measurement_property_requires_event(task_contract)
+                and direct_measurement
+                and not self._measurement_property_is_resolved(task_contract)
+            ):
+                signal = min(signal, 1)
             if branch_target_action and not self._selected_measurement_branch_target:
                 signal = 0
             elif branch_target_action and selected_branch_action:
@@ -4778,6 +4947,9 @@ class GWTAutogenAgent(AutogenAgent):
         primary_signature = self._extract_action_primary_object_signature(
             action, family=family
         )
+        destination_signature = self._extract_action_destination_signature(
+            action, family=family
+        )
         measurement_subject = self._extract_measurement_subject_signature(
             action, family=family
         )
@@ -4810,9 +4982,16 @@ class GWTAutogenAgent(AutogenAgent):
         branch_referent_match = self._signature_matches_role(
             referent_signature, role_token_sets["measurement_branch_targets"]
         )
+        branch_destination_match = self._signature_matches_role(
+            destination_signature, role_token_sets["measurement_branch_targets"]
+        )
         selected_branch_match = bool(
             self._selected_measurement_branch_target
             and referent_signature == self._selected_measurement_branch_target
+        )
+        selected_branch_destination_match = bool(
+            self._selected_measurement_branch_target
+            and destination_signature == self._selected_measurement_branch_target
         )
         touches_active_enclosure = bool(
             active_enclosure
@@ -4821,10 +5000,12 @@ class GWTAutogenAgent(AutogenAgent):
                 referent_signature,
                 measurement_subject,
                 primary_signature,
+                destination_signature,
             }
         )
         latest_direct_measurement = self._get_latest_measurement(direct=True)
         direct_measurement_ready = latest_direct_measurement is not None
+        property_resolved = self._measurement_property_is_resolved(task_contract)
         score = 0
 
         if current_phase == "locate_instrument":
@@ -4866,6 +5047,69 @@ class GWTAutogenAgent(AutogenAgent):
                 if referent_matches_target or touches_active_enclosure:
                     score += 8
 
+        elif current_phase == "induce_property_change":
+            if family == "tool_application":
+                if subject_matches_target and instrument_primary_match:
+                    score += 4
+                    if target_hidden:
+                        score -= 30
+                elif subject_matches_target or touches_active_enclosure:
+                    score += 14
+                else:
+                    score -= 8
+            elif family == "device_control":
+                if self._action_mentions_door(action, family=family):
+                    score -= 8
+                elif referent_matches_target or touches_active_enclosure:
+                    score += 12
+                else:
+                    score += 6
+            elif family in {"transfer_or_transform", "relocation"}:
+                if (
+                    referent_matches_target
+                    or primary_matches_target
+                    or touches_active_enclosure
+                ):
+                    score += 10
+                else:
+                    score -= 6
+            elif family == "inspect":
+                if referent_matches_target or touches_active_enclosure:
+                    score += 10
+                else:
+                    score += 2
+            elif family == "focus":
+                score += (
+                    4 if referent_matches_target or instrument_referent_match else -8
+                )
+
+        elif current_phase == "verify_transition":
+            if family == "tool_application":
+                if subject_matches_target and instrument_primary_match:
+                    score += 24
+                    if target_hidden:
+                        score -= 30
+                elif touches_active_enclosure and instrument_primary_match:
+                    score += 10
+                else:
+                    score -= 8
+            elif family == "inspect":
+                if referent_matches_target or touches_active_enclosure:
+                    score += 10
+            elif family in {"device_control", "transfer_or_transform", "relocation"}:
+                if (
+                    referent_matches_target
+                    or primary_matches_target
+                    or touches_active_enclosure
+                ):
+                    score += 6
+                else:
+                    score -= 6
+            elif family == "focus":
+                score += (
+                    4 if referent_matches_target or instrument_referent_match else -8
+                )
+
         elif current_phase == "resolve_branch":
             if family == "tool_application":
                 if subject_matches_target and instrument_primary_match:
@@ -4895,16 +5139,27 @@ class GWTAutogenAgent(AutogenAgent):
                     18 if selected_branch_match else -10 if branch_referent_match else 0
                 )
             elif family in {"inspect", "relocation", "transfer_or_transform"}:
-                score += (
-                    12 if selected_branch_match else -8 if branch_referent_match else 0
-                )
-            elif branch_referent_match:
+                if selected_branch_match or selected_branch_destination_match:
+                    score += 12
+                elif branch_referent_match or branch_destination_match:
+                    score -= 8
+            elif branch_referent_match or branch_destination_match:
                 score -= 6
 
-        if branch_referent_match and not self._selected_measurement_branch_target:
+        if (
+            branch_referent_match or branch_destination_match
+        ) and not self._selected_measurement_branch_target:
             score -= 18
-        if branch_referent_match and not selected_branch_match:
+        if (branch_referent_match or branch_destination_match) and not (
+            selected_branch_match or selected_branch_destination_match
+        ):
             score -= 10
+        if (
+            self._measurement_property_requires_event(task_contract)
+            and not property_resolved
+            and (branch_referent_match or branch_destination_match)
+        ):
+            score -= 36
 
         if (
             target_hidden
@@ -4987,6 +5242,11 @@ class GWTAutogenAgent(AutogenAgent):
                 return "locate_measured_target"
             if self._get_latest_measurement(direct=True) is None:
                 return "measure_target"
+            if self._measurement_property_requires_event(task_contract):
+                if not self._measurement_property_event_observed:
+                    return "induce_property_change"
+                if not self._measurement_property_is_resolved(task_contract):
+                    return "verify_transition"
             if task_contract.get("measurement_branch_targets"):
                 if self._selected_measurement_branch_target:
                     return "execute_branch"

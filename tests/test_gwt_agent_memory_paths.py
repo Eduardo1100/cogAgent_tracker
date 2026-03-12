@@ -1480,6 +1480,7 @@ def test_measurement_task_contract_extracts_measurement_roles_and_cleans_tokens(
 
     assert contract["measurement_task"] is True
     assert contract["measurement_property"] == "melting point"
+    assert contract["measurement_property_type"] == "stable_threshold_property"
     assert contract["measurement_target"] == ["solid unknown substance c"]
     assert contract["measurement_instrument"] == ["thermometer"]
     assert contract["measurement_branch_targets"] == ["orange box", "yellow box"]
@@ -1578,10 +1579,145 @@ def test_measurement_shortlist_gates_branch_targets_until_branch_is_resolved(tmp
     )
 
     shortlist = summary["task_relevant_action_shortlist"]
-    assert summary["current_phase"] == "resolve_branch"
+    assert summary["current_phase"] == "induce_property_change"
+    assert summary["measurement_tracking"]["property_resolution_status"] == (
+        "needs_transition_evidence"
+    )
     assert "use thermometer on solid unknown substance c" in shortlist
     assert "focus on orange box" not in shortlist
     assert "focus on yellow box" not in shortlist
+
+
+def test_measurement_branch_destination_is_blocked_until_property_is_resolved(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a thermometer, "
+            "solid unknown substance C, an orange box, a yellow box, and a lighter."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 8 degrees celsius",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move solid unknown substance c to orange box",
+            "use lighter on solid unknown substance c",
+            "use thermometer on solid unknown substance c",
+            "look at solid unknown substance c",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "induce_property_change"
+    assert "move solid unknown substance c to orange box" not in shortlist
+    assert "use lighter on solid unknown substance c" in shortlist
+
+
+def test_measurement_transition_event_requires_confirming_measurement(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C. "
+        "If the melting point of solid unknown substance C is above 150.0 degrees celsius, "
+        "focus on the orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a thermometer, "
+            "solid unknown substance C, an orange box, a yellow box, and a lighter."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 8 degrees celsius",
+    )
+    agent._update_measurement_tracking(
+        action="use lighter on solid unknown substance c",
+        observation="The solid unknown substance C melts into a liquid.",
+    )
+
+    snapshot = agent._get_measurement_tracking_snapshot()
+
+    assert snapshot["transition_observed"] is True
+    assert snapshot["property_resolution_status"] == "needs_confirming_measurement"
+    assert agent._selected_measurement_branch_target is None
+    assert agent._get_current_phase() == "verify_transition"
+
+
+def test_measurement_event_confirmed_direct_reading_resolves_branch_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C. "
+        "If the melting point of solid unknown substance C is above 150.0 degrees celsius, "
+        "focus on the orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a thermometer, "
+            "solid unknown substance C, an orange box, and a yellow box."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation=(
+            "The solid unknown substance C melts and the thermometer measures "
+            "a temperature of 151 degrees celsius"
+        ),
+    )
+
+    snapshot = agent._get_measurement_tracking_snapshot()
+
+    assert snapshot["property_resolution_status"] == "resolved"
+    assert snapshot["branch_ready"] is True
+    assert snapshot["branch_target"] == ["orange box"]
+    assert agent._get_current_phase() == "execute_branch"
 
 
 def test_measurement_shortlist_prefers_active_enclosure_for_hidden_target(tmp_path):
