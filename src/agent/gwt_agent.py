@@ -7303,6 +7303,18 @@ class GWTAutogenAgent(AutogenAgent):
                 destination_signature,
             }
         )
+        activates_active_enclosure = bool(
+            active_enclosure
+            and primary_signature == active_enclosure
+            and family == "device_control"
+            and normalized.startswith(("activate ", "turn on "))
+        )
+        deactivates_active_enclosure = bool(
+            active_enclosure
+            and primary_signature == active_enclosure
+            and family == "device_control"
+            and normalized.startswith(("deactivate ", "turn off "))
+        )
         latest_direct_measurement = self._get_latest_measurement(direct=True)
         direct_measurement_ready = latest_direct_measurement is not None
         property_resolved = self._measurement_property_is_resolved(task_contract)
@@ -7416,6 +7428,8 @@ class GWTAutogenAgent(AutogenAgent):
                     score += 4
                     if target_hidden:
                         score -= 30
+                elif touches_active_enclosure and instrument_primary_match:
+                    score -= 18 if target_hidden else 8
                 elif subject_matches_target or touches_active_enclosure:
                     score += 14
                 else:
@@ -7423,6 +7437,10 @@ class GWTAutogenAgent(AutogenAgent):
             elif family == "device_control":
                 if self._action_mentions_door(action, family=family):
                     score -= 8
+                elif deactivates_active_enclosure:
+                    score -= 50 if target_hidden else 30
+                elif activates_active_enclosure:
+                    score += 36 if target_hidden else 22
                 elif referent_matches_target or touches_active_enclosure:
                     score += 12
                 else:
