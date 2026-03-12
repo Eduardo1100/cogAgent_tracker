@@ -17,6 +17,7 @@ action_agent: |
   - The percept may include "substance_search" with grounded substance labels, exhausted containers, and source candidates. Treat grounded substance labels as authoritative and use source candidates when container search is exhausted.
   - The percept may include "artifact_creation" with the artifact type, grounded artifact instances, and whether an ingredient gap is still open. Use that to search for missing ingredients before manipulating the current ingredient into empty containers.
   - The percept may include "measurement_tracking" with a measured target, instrument, branch target readiness, recent direct/proxy readings, and an active enclosure for hidden targets.
+  - The percept may include "comparison_tracking" with compared targets, grounded comparison readings, and a resolved branch target. Gather evidence before focusing a compared target, then commit to the resolved winner.
   - The percept may include "relation_frontier" with the currently grounded local mechanism, nearby control candidates, and whether the primary target/source are grounded.
   - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
@@ -43,6 +44,7 @@ action_agent: |
   17. If measurement_tracking is present, keep the instrument, measured target, and branch targets separate. Do not treat a proxy reading on a support object as if it resolved the measured target unless the percept directly confirms that relation.
   18. If measurement_tracking shows an active enclosure for a hidden target, act through the enclosing referent instead of repeating direct commands on the hidden object.
   19. Do not act on branch targets until measurement_tracking explicitly resolves a branch target.
+  19a. If comparison_tracking is present, do not focus a comparison target until the winner is resolved from grounded evidence.
   20. If relation_frontier is present, restrict relation and device-control choices to that local mechanism unless a new observation directly forces expansion.
   21. If the task names a specific primary target and it is still not grounded, prefer search and route-enabling actions that reveal or reach that target before exploring unrelated rooms or devices.
   22. Never output plain text. Your only valid response is an execute_action() tool call.
@@ -63,6 +65,7 @@ thinking_agent: |
   If artifact_creation is present, keep the artifact type stable and do not chase adjective-only distractors of the wrong type. After grounding one ingredient, prefer finding the missing ingredient or reagent before improvising transfers into empty containers.
   If substance_search is present, treat grounded substance labels as authoritative and use source candidates only after container search evidence is exhausted.
   If measurement_tracking is present, separate the instrument, the measured target, and the branch targets. Only propose branch-target actions after the branch condition is actually resolved from grounded evidence.
+  If comparison_tracking is present, treat compared targets as evidence targets until the winner is resolved. Prefer grounded inspection and comparison-relevant test actions over premature focus.
   If relation_frontier is present, reason over that local mechanism only. Prefer inspecting or controlling the grounded target/source/control subgraph over expanding to unrelated relation pairs.
   Use ordered_target_progress and referent_resolution when present. If a requested target collapsed onto another grounded target, treat that as referent ambiguity and propose disambiguation instead of inventing a new task theory.
   Use candidate_tracking when present. Treat support entities such as destination rooms or containers as context, not as new primary targets, unless the task explicitly requires acting on them.
@@ -102,6 +105,7 @@ belief_state_agent: |
   6a. If the task contract distinguishes a target substance from a desired transformation, track those separately. Do not treat a nearby but different substance as if it satisfies the task target.
   6b. If substance_search is present, treat grounded substance labels as authoritative. Do not rename or merge substances unless the percept explicitly does so.
   6c. If measurement_tracking is present, track the measured target, instrument, and branch target separately. Do not treat a proxy measurement on a support object as if it were a confirmed measurement of the target.
+  6cc. If comparison_tracking is present, keep compared targets separate until the comparison resolves. Do not narrate an unresolved candidate as if it already satisfied the final focus condition.
   6d. If relation_frontier is present, keep the active mechanism local to the grounded target/source/control entities. Do not generalize a local relation failure into a broader environment rule.
   7. Referent ambiguity when present. If the percept says the requested target resolved to a different grounded target, represent that as uncertainty about reference, not as proof that the targets are equivalent.
 

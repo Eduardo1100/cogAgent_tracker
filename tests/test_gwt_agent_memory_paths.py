@@ -2645,6 +2645,126 @@ def test_conditional_branch_resolution_promotes_selected_branch_target(tmp_path)
     assert summary["task_relevant_action_shortlist"] == ["focus on red box"]
 
 
+def test_comparison_task_contract_tracks_compared_targets_and_property(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine which of the two inclined planes "
+        "(unknown material C, unknown material H) has the most friction. "
+        "After completing your experiment, focus on the inclined plane with the "
+        "most friction."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["comparison_task"] is True
+    assert contract["measurement_task"] is False
+    assert contract["comparison_subject"] == ["inclined planes"]
+    assert contract["comparison_property"] == "friction"
+    assert contract["comparison_direction"] == "max"
+    assert contract["comparison_targets"] == [
+        "unknown material c",
+        "unknown material h",
+    ]
+    assert contract["primary_targets"] == ["inclined planes"]
+
+
+def test_comparison_shortlist_gathers_evidence_before_focus_or_target_relocation(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine which of the two inclined planes "
+        "(unknown material C, unknown material H) has the most friction. "
+        "After completing your experiment, focus on the inclined plane with the "
+        "most friction."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the workshop. In it, you see the agent, "
+            "an inclined plane with a unknown material H surface, an inclined "
+            "plane with a unknown material C surface, a wood block, and a "
+            "stopwatch."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on inclined plane with a unknown material c surface",
+            "focus on inclined plane with a unknown material h surface",
+            "look at inclined plane with a unknown material c surface",
+            "look at inclined plane with a unknown material h surface",
+            "look in inclined plane with a unknown material c surface",
+            "move block to inclined plane with a unknown material c surface",
+            "move block to inclined plane with a unknown material h surface",
+            "pick up inclined plane with a unknown material c surface",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "gather_branch_evidence"
+    assert "focus on inclined plane with a unknown material c surface" not in shortlist
+    assert "focus on inclined plane with a unknown material h surface" not in shortlist
+    assert "pick up inclined plane with a unknown material c surface" not in shortlist
+    assert "look in inclined plane with a unknown material c surface" not in shortlist
+    assert "move block to inclined plane with a unknown material c surface" in shortlist
+    assert "look at inclined plane with a unknown material h surface" in shortlist
+
+
+def test_comparison_resolution_promotes_selected_focus_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine which of the two inclined planes "
+        "(unknown material C, unknown material H) has the most friction. "
+        "After completing your experiment, focus on the inclined plane with the "
+        "most friction."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the workshop. In it, you see the agent, "
+            "an inclined plane with a unknown material H surface, an inclined "
+            "plane with a unknown material C surface, and a wood block."
+        )
+    }
+
+    agent._update_comparison_tracking(
+        action="look at inclined plane with a unknown material h surface",
+        observation=(
+            "an inclined plane with a unknown material H surface, with: "
+            "a wood block approximately 1% down the plane"
+        ),
+    )
+    agent._update_comparison_tracking(
+        action="look at inclined plane with a unknown material c surface",
+        observation=(
+            "an inclined plane with a unknown material C surface, with: "
+            "a wood block approximately 4% down the plane"
+        ),
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on inclined plane with a unknown material c surface",
+            "focus on inclined plane with a unknown material h surface",
+            "look at inclined plane with a unknown material c surface",
+        ],
+        shortlist_limit=1,
+    )
+
+    snapshot = agent._get_comparison_tracking_snapshot()
+
+    assert snapshot["branch_ready"] is True
+    assert snapshot["branch_target"] == ["unknown material h"]
+    assert summary["current_phase"] == "execute_branch"
+    assert summary["task_relevant_action_shortlist"] == [
+        "focus on inclined plane with a unknown material h surface"
+    ]
+
+
 def test_admissible_action_summary_is_cached_until_invalidated(tmp_path, monkeypatch):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
