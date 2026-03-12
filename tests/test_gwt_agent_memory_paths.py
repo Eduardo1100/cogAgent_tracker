@@ -1096,6 +1096,29 @@ def test_repeated_support_confirmation_becomes_stalled_not_new_evidence(tmp_path
     assert "Repeated confirmation" in evidence
 
 
+def test_no_known_action_match_is_classified_as_invalid(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.percept = {
+        "resulting_observation": "No known action matches that input.",
+        "newly_admissible_actions": [],
+        "no_longer_admissible_actions": [],
+    }
+
+    outcome, evidence = agent._classify_hypothesis_outcome(
+        family="inspect",
+        executed_action="look at tin cup",
+        observation="No known action matches that input.",
+        previous_observation="You move to the kitchen.",
+    )
+
+    assert outcome == "invalid"
+    assert "failed" in evidence.lower() or "inadmissible" in evidence.lower()
+
+
 def test_candidate_tracking_rejects_stale_candidate_after_repeated_confirmation(
     tmp_path,
 ):
@@ -1527,6 +1550,58 @@ def test_state_change_shortlist_prefers_source_candidates_after_container_exhaus
     assert "activate sink" in shortlist
     assert "move bowl to kitchen" not in shortlist
     assert "focus on kitchen" not in shortlist
+
+
+def test_state_change_shortlist_avoids_invalid_same_referent_probe_retries(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._exhausted_container_targets = ["drawer", "cupboard"]
+
+    agent.percept = {
+        "resulting_observation": "No known action matches that input.",
+        "newly_admissible_actions": [],
+        "no_longer_admissible_actions": [],
+    }
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="look at tin cup",
+        executed_action="look at tin cup",
+        previous_observation="You move to the kitchen.",
+    )
+
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a tin cup, a sink, "
+            "a drain, a stove, and an oven."
+        )
+    }
+    agent.admissible_actions = [
+        "look at tin cup",
+        "look in tin cup",
+        "look at sink",
+        "look in sink",
+        "activate sink",
+        "close drain",
+        "look at stove",
+        "activate oven",
+    ]
+
+    summary = agent._summarize_admissible_actions(
+        agent.admissible_actions,
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "probe_sources"
+    assert "look at tin cup" not in shortlist
+    assert "look in tin cup" not in shortlist
+    assert "look at sink" in shortlist
+    assert "close drain" in shortlist
+    assert any("sink" in action for action in shortlist)
 
 
 def test_measurement_task_contract_extracts_measurement_roles_and_cleans_tokens(
