@@ -1794,6 +1794,60 @@ class GWTAutogenAgent(AutogenAgent):
                 token_sets.append(tokens)
         return token_sets
 
+    def _get_task_grounded_substance_labels(
+        self,
+        *,
+        limit: int = 6,
+        task_contract: dict | None = None,
+    ) -> list[str]:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_state_change_task(contract):
+            return []
+
+        role_token_sets = self._get_task_role_token_sets(contract)
+        target_roles = (
+            role_token_sets["target_substances"] or role_token_sets["primary_targets"]
+        )
+        if not target_roles:
+            return self._get_grounded_substance_labels(limit=limit)
+
+        compatible_labels: list[str] = []
+        for label in self._get_grounded_substance_labels(limit=max(limit * 3, 12)):
+            label_tokens = set(
+                self._extract_runtime_tokens(
+                    label,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                )
+            )
+            if not label_tokens or not self._matches_any_role(
+                label_tokens, target_roles
+            ):
+                continue
+            compatible_labels.append(label)
+            if len(compatible_labels) >= limit:
+                break
+        return compatible_labels
+
+    def _get_task_grounded_substance_token_sets(
+        self,
+        *,
+        limit: int = 6,
+        task_contract: dict | None = None,
+    ) -> list[set[str]]:
+        token_sets: list[set[str]] = []
+        for label in self._get_task_grounded_substance_labels(
+            limit=limit, task_contract=task_contract
+        ):
+            tokens = set(
+                self._extract_runtime_tokens(
+                    label,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                )
+            )
+            if tokens:
+                token_sets.append(tokens)
+        return token_sets
+
     def _extract_action_source_signature(
         self, action: str, *, family: str | None = None
     ) -> str:
@@ -1922,7 +1976,7 @@ class GWTAutogenAgent(AutogenAgent):
         if not self._is_state_change_task():
             return {}
         snapshot = {
-            "grounded_substances": self._get_grounded_substance_labels(limit=4),
+            "grounded_substances": self._get_task_grounded_substance_labels(limit=4),
             "exhausted_containers": self._exhausted_container_targets[-4:],
         }
         source_candidates = self._infer_source_candidates(actions)
@@ -4932,12 +4986,23 @@ class GWTAutogenAgent(AutogenAgent):
         substance_grounded = self._state_change_target_is_grounded(
             task_contract, grounded_token_set
         )
-        grounded_substance_token_sets = self._get_grounded_substance_token_sets()
+        visible_grounded_substance_token_sets = (
+            self._get_grounded_substance_token_sets()
+        )
+        grounded_substance_token_sets = self._get_task_grounded_substance_token_sets(
+            task_contract=task_contract
+        )
         grounded_substance_hits, _ = self._best_role_overlap(
             content_token_set, grounded_substance_token_sets
         )
         grounded_substance_match = self._has_full_role_match(
             content_token_set, grounded_substance_token_sets
+        )
+        visible_grounded_substance_match = self._has_full_role_match(
+            content_token_set, visible_grounded_substance_token_sets
+        )
+        non_target_grounded_substance_match = bool(
+            visible_grounded_substance_match and not grounded_substance_match
         )
         search_snapshot = self._get_substance_search_snapshot()
         source_candidates = set(search_snapshot.get("source_candidates", []))
@@ -4972,6 +5037,15 @@ class GWTAutogenAgent(AutogenAgent):
             score += grounded_substance_hits * 6
             if grounded_substance_match:
                 score += 4
+        if non_target_grounded_substance_match:
+            if family == "inspect":
+                score -= 10
+            elif family == "focus":
+                score -= 18
+            elif family in {"tool_application", "transfer_or_transform", "relation"}:
+                score -= 18
+            elif family == "relocation":
+                score -= 12
 
         if current_phase == "locate_substance":
             if family == "inspect":
