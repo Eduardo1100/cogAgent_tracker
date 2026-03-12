@@ -2286,6 +2286,44 @@ def test_conditional_branch_resolution_promotes_selected_branch_target(tmp_path)
     assert summary["task_relevant_action_shortlist"] == ["focus on red box"]
 
 
+def test_admissible_action_summary_is_cached_until_invalidated(tmp_path, monkeypatch):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to freeze water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a sink, a freezer, "
+            "and a fridge."
+        )
+    }
+    actions = ["look at sink", "open freezer", "go to hallway"]
+
+    original = agent._summarize_admissible_actions_uncached
+    call_count = {"value": 0}
+
+    def wrapped(admissible_actions, *, shortlist_limit=12):
+        call_count["value"] += 1
+        return original(admissible_actions, shortlist_limit=shortlist_limit)
+
+    monkeypatch.setattr(agent, "_summarize_admissible_actions_uncached", wrapped)
+
+    first = agent._summarize_admissible_actions(actions, shortlist_limit=20)
+    second = agent._summarize_admissible_actions(actions, shortlist_limit=20)
+
+    assert first is second
+    assert call_count["value"] == 1
+
+    agent._invalidate_action_summary_cache()
+    third = agent._summarize_admissible_actions(actions, shortlist_limit=20)
+
+    assert third is not first
+    assert call_count["value"] == 2
+
+
 def test_measurement_shortlist_prefers_active_enclosure_for_hidden_target(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
@@ -2652,4 +2690,5 @@ def test_update_percept_exposes_relation_frontier_runtime_context(tmp_path):
 
     assert "relation_frontier" in agent.percept
     assert agent.percept["relation_frontier"]["primary_target_grounded"] is True
-    assert "Relation frontier snapshot" in agent.action_agent.system_message
+    assert "Episode runtime snapshots" in agent.action_agent.system_message
+    assert "relation_frontier" in agent.action_agent.system_message

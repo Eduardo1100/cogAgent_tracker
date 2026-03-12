@@ -701,6 +701,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._relation_frontier_referents: list[str] = []
         self._search_location_states: dict[str, dict] = {}
         self._target_status_by_referent: dict[str, str] = {}
+        self._admissible_summary_cache: dict[tuple[tuple[str, ...], int], dict] = {}
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -4034,6 +4035,9 @@ class GWTAutogenAgent(AutogenAgent):
             )
         return max_attempts
 
+    def _invalidate_action_summary_cache(self) -> None:
+        self._admissible_summary_cache.clear()
+
     @staticmethod
     def _get_shortlist_family_quotas(current_phase: str) -> dict[str, int]:
         quotas_by_phase = {
@@ -6790,7 +6794,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score, grounded_hits, family_priority
 
-    def _summarize_admissible_actions(
+    def _summarize_admissible_actions_uncached(
         self,
         actions: list[str],
         *,
@@ -6906,8 +6910,66 @@ class GWTAutogenAgent(AutogenAgent):
             "conditional_branch_tracking": conditional_branch_tracking,
         }
 
-    def _build_shared_action_context(self) -> dict:
-        summary = self._summarize_admissible_actions(self.admissible_actions)
+    def _summarize_admissible_actions(
+        self,
+        actions: list[str],
+        *,
+        shortlist_limit: int = 12,
+    ) -> dict:
+        cache_key = (tuple(actions), shortlist_limit)
+        cached = self._admissible_summary_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        summary = self._summarize_admissible_actions_uncached(
+            actions, shortlist_limit=shortlist_limit
+        )
+        self._admissible_summary_cache[cache_key] = summary
+        return summary
+
+    @staticmethod
+    def _prune_empty_runtime_fields(data: dict) -> dict:
+        return {
+            key: value for key, value in data.items() if value not in ({}, [], "", None)
+        }
+
+    def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
+        snapshots = {}
+        ordered_progress = self._get_ordered_target_snapshot()
+        if self._ordered_progress_has_signal(ordered_progress):
+            snapshots["ordered_target_progress"] = ordered_progress
+        candidate_tracking = summary.get("candidate_tracking", {})
+        if self._candidate_tracking_has_signal(candidate_tracking):
+            snapshots["candidate_tracking"] = candidate_tracking
+        relation_frontier = summary.get("relation_frontier", {})
+        if self._relation_frontier_has_signal(relation_frontier):
+            snapshots["relation_frontier"] = relation_frontier
+        substance_search = summary.get("substance_search", {})
+        if self._substance_search_has_signal(substance_search):
+            snapshots["substance_search"] = substance_search
+        artifact_creation = summary.get("artifact_creation", {})
+        if self._artifact_creation_has_signal(artifact_creation):
+            snapshots["artifact_creation"] = artifact_creation
+        measurement_tracking = summary.get("measurement_tracking", {})
+        if self._measurement_tracking_has_signal(measurement_tracking):
+            snapshots["measurement_tracking"] = measurement_tracking
+        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
+        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+            snapshots["conditional_branch_tracking"] = conditional_branch_tracking
+        if self.percept.get("referent_resolution"):
+            snapshots["referent_resolution"] = self.percept["referent_resolution"]
+        return snapshots
+
+    def _build_shared_action_context(self, *, summary: dict | None = None) -> dict:
+        summary = dict(
+            summary
+            if summary is not None
+            else self._summarize_admissible_actions(
+                self.admissible_actions, shortlist_limit=20
+            )
+        )
+        summary["task_relevant_action_shortlist"] = summary[
+            "task_relevant_action_shortlist"
+        ][:12]
         previous_shortlist = self._last_action_shortlist
         current_shortlist = summary["task_relevant_action_shortlist"]
         self._last_action_shortlist = current_shortlist
@@ -6919,70 +6981,26 @@ class GWTAutogenAgent(AutogenAgent):
         ]
         return summary
 
-    def _refresh_action_agent_runtime_context(self) -> None:
+    def _refresh_action_agent_runtime_context(
+        self, *, summary: dict | None = None
+    ) -> None:
         if self.action_agent is None:
             return
 
-        summary = self._summarize_admissible_actions(
-            self.admissible_actions, shortlist_limit=20
+        summary = (
+            summary
+            if summary is not None
+            else self._summarize_admissible_actions(
+                self.admissible_actions, shortlist_limit=20
+            )
         )
         recent_invalid_actions = self._get_recent_invalid_actions()
-        ordered_progress = self._get_ordered_target_snapshot()
-        extra_context = ""
-        if self._ordered_progress_has_signal(ordered_progress):
-            extra_context += (
-                "Ordered focus progress this episode: "
-                + json.dumps(ordered_progress)
-                + "\n"
-            )
-        candidate_tracking = summary.get("candidate_tracking", {})
-        if self._candidate_tracking_has_signal(candidate_tracking):
-            extra_context += (
-                "Candidate tracking this episode: "
-                + json.dumps(candidate_tracking)
-                + "\n"
-            )
-        relation_frontier = summary.get("relation_frontier", {})
-        if self._relation_frontier_has_signal(relation_frontier):
-            extra_context += (
-                "Relation frontier state this episode: "
-                + json.dumps(relation_frontier)
-                + "\n"
-            )
-        substance_search = summary.get("substance_search", {})
-        if self._substance_search_has_signal(substance_search):
-            extra_context += (
-                "Substance search state this episode: "
-                + json.dumps(substance_search)
-                + "\n"
-            )
-        artifact_creation = summary.get("artifact_creation", {})
-        if self._artifact_creation_has_signal(artifact_creation):
-            extra_context += (
-                "Artifact creation state this episode: "
-                + json.dumps(artifact_creation)
-                + "\n"
-            )
-        measurement_tracking = summary.get("measurement_tracking", {})
-        if self._measurement_tracking_has_signal(measurement_tracking):
-            extra_context += (
-                "Measurement state this episode: "
-                + json.dumps(measurement_tracking)
-                + "\n"
-            )
-        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
-        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
-            extra_context += (
-                "Conditional branch state this episode: "
-                + json.dumps(conditional_branch_tracking)
-                + "\n"
-            )
-        if self.percept.get("referent_resolution"):
-            extra_context += (
-                "Latest referent resolution warning: "
-                + json.dumps(self.percept["referent_resolution"])
-                + "\n"
-            )
+        compact_task_contract = self._prune_empty_runtime_fields(
+            summary["task_contract"]
+        )
+        runtime_snapshots = self._prune_empty_runtime_fields(
+            self._get_action_agent_runtime_snapshots(summary)
+        )
         self._set_agent_system_message(
             self.action_agent,
             self._action_agent_base_prompt
@@ -6991,15 +7009,10 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Current exact task-relevant admissible shortlist: {json.dumps(summary['task_relevant_action_shortlist'])}\n"
             + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
-            + f"Task contract: {json.dumps(summary['task_contract'])}\n"
-            + f"Relation frontier snapshot: {json.dumps(summary['relation_frontier'])}\n"
-            + f"Artifact creation snapshot: {json.dumps(summary['artifact_creation'])}\n"
-            + f"Substance search snapshot: {json.dumps(summary['substance_search'])}\n"
-            + f"Measurement tracking snapshot: {json.dumps(summary['measurement_tracking'])}\n"
-            + f"Conditional branch snapshot: {json.dumps(summary['conditional_branch_tracking'])}\n"
+            + f"Task contract: {json.dumps(compact_task_contract)}\n"
+            + f"Episode runtime snapshots: {json.dumps(runtime_snapshots)}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
-            + extra_context
             + "Choose an exact shortlist string whenever possible. "
             + "If you go off-shortlist, stay lexically close to grounded entities and known admissible verb families instead of inventing a fresh command template. "
             + "The executor will only execute the action if it actually matches the environment's admissible commands.\n",
@@ -7292,10 +7305,16 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
+        self._invalidate_action_summary_cache()
         task_contract = self._get_task_contract()
         if any(task_contract.values()):
             self.percept["task_contract"] = task_contract
-        shared_action_context = self._build_shared_action_context()
+        action_runtime_summary = self._summarize_admissible_actions(
+            self.admissible_actions, shortlist_limit=20
+        )
+        shared_action_context = self._build_shared_action_context(
+            summary=action_runtime_summary
+        )
         self.percept["admissible_action_summary"] = {
             "total_actions": shared_action_context["total_actions"],
             "current_phase": shared_action_context["current_phase"],
@@ -7343,7 +7362,7 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
             if not newly_added and not no_longer:
                 self.percept["admissible_actions_unchanged"] = True
-        self._refresh_action_agent_runtime_context()
+        self._refresh_action_agent_runtime_context(summary=action_runtime_summary)
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
         summary_json = json.dumps(

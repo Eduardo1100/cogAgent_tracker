@@ -799,7 +799,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(ROUND(SUM(runtime_minutes)::numeric, 1), 0) AS total_runtime_min\nFROM episode_runs\nWHERE experiment_id = ${experiment_id}",
+          "rawSql": "SELECT COALESCE(\n  ROUND(\n    COALESCE(\n      NULLIF(e.total_runtime_minutes, 0),\n      ep.total_runtime_min,\n      0\n    )::numeric,\n    1\n  ),\n  0\n) AS total_runtime_min\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT SUM(COALESCE(runtime_minutes, 0)) AS total_runtime_min\n  FROM episode_runs\n  WHERE experiment_id = e.id\n) ep ON TRUE\nWHERE e.id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
