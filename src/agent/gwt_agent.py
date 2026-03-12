@@ -28,11 +28,233 @@ from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_e
 class GWTAutogenAgent(AutogenAgent):
     _AGENT_DIR = Path(__file__).resolve().parent
     _MEMORY_ROOT = _AGENT_DIR / "memory"
+    _TASK_STOPWORDS = {
+        "a",
+        "about",
+        "all",
+        "an",
+        "and",
+        "around",
+        "as",
+        "at",
+        "be",
+        "box",
+        "called",
+        "cause",
+        "change",
+        "current",
+        "determine",
+        "do",
+        "electrically",
+        "first",
+        "for",
+        "from",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "located",
+        "matter",
+        "of",
+        "on",
+        "or",
+        "place",
+        "red",
+        "green",
+        "state",
+        "substance",
+        "take",
+        "task",
+        "that",
+        "the",
+        "then",
+        "to",
+        "using",
+        "whether",
+        "with",
+        "you",
+        "your",
+    }
+    _RUNTIME_TOKEN_STOPWORDS = _TASK_STOPWORDS | {
+        "action",
+        "actions",
+        "admissible",
+        "agent",
+        "also",
+        "around",
+        "available",
+        "between",
+        "called",
+        "check",
+        "command",
+        "commands",
+        "containing",
+        "current",
+        "describe",
+        "described",
+        "description",
+        "door",
+        "doors",
+        "environment",
+        "exact",
+        "failed",
+        "focus",
+        "from",
+        "goal",
+        "inventory",
+        "known",
+        "latest",
+        "list",
+        "lists",
+        "look",
+        "move",
+        "newly",
+        "none",
+        "observation",
+        "observed",
+        "previous",
+        "resulting",
+        "see",
+        "sees",
+        "room",
+        "shortlist",
+        "state",
+        "status",
+        "still",
+        "summary",
+        "take",
+        "there",
+        "these",
+        "this",
+        "through",
+        "tool",
+        "tooling",
+        "timestep",
+        "using",
+        "valid",
+        "visible",
+        "with",
+    }
+    _ACTION_COMMAND_STOPWORDS = {
+        "activate",
+        "boil",
+        "check",
+        "close",
+        "connect",
+        "cook",
+        "cool",
+        "deactivate",
+        "disconnect",
+        "dunk",
+        "eat",
+        "empty",
+        "enter",
+        "examine",
+        "fill",
+        "focus",
+        "go",
+        "grab",
+        "heat",
+        "inspect",
+        "insert",
+        "inventory",
+        "look",
+        "mix",
+        "move",
+        "open",
+        "pick",
+        "place",
+        "pour",
+        "put",
+        "read",
+        "task",
+        "take",
+        "turn",
+        "use",
+        "wait",
+    }
+    _ACTION_FAMILY_PREFIXES = (
+        (
+            (
+                "look around",
+                "look in",
+                "look at",
+                "look ",
+                "inspect ",
+                "examine ",
+                "check ",
+                "read ",
+                "inventory",
+                "task",
+            ),
+            "inspect",
+        ),
+        (("focus on",), "focus"),
+        (("connect ", "disconnect "), "relation"),
+        (
+            (
+                "move ",
+                "go to ",
+                "enter ",
+                "pick up ",
+                "take ",
+                "grab ",
+                "put down ",
+                "drop ",
+            ),
+            "relocation",
+        ),
+        (
+            ("pour ", "dunk ", "mix ", "fill ", "empty ", "insert ", "place "),
+            "transfer_or_transform",
+        ),
+        (
+            (
+                "open ",
+                "close ",
+                "activate ",
+                "deactivate ",
+                "turn on ",
+                "turn off ",
+            ),
+            "device_control",
+        ),
+        (("use ", "heat ", "cool ", "boil ", "cook "), "tool_application"),
+        (("eat ",), "consumption"),
+        (("wait",), "idle"),
+    )
+    _DEPRIORITIZE_ELIGIBLE_FAMILIES = {
+        "relation",
+        "relocation",
+        "transfer_or_transform",
+        "device_control",
+        "tool_application",
+    }
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
         r"|do\s+not\s+know|don't\s+know|need\s+to\s+(?:verify|check|confirm)"
         r"|may\s+(?:be|need)|might\s+(?:be|need))\b",
+        re.IGNORECASE,
+    )
+    _HARD_FAILURE_RE = re.compile(
+        r"(not in the list of admissible actions|not admissible|not recognized|"
+        r"can't|cannot|failed|nothing happens|nothing is burning|not movable|"
+        r"do not see|don't see|no such)",
+        re.IGNORECASE,
+    )
+    _DIRECT_EFFECT_RE = re.compile(
+        r"(heats up|cools down|produces|transforms?|changes? state|"
+        r"temperature (?:of|reads|measures)|opens?|closes?|activates?|deactivates?|"
+        r"moves?|picked up|put down|mixed?|created|appears?|disappears?|"
+        r"filled?|emptied?|turned (?:on|off)|boils?|freezes?|burns?)",
+        re.IGNORECASE,
+    )
+    _EFFECTLESS_RE = re.compile(
+        r"(no effect|unchanged|still at|remains? |still |did not|does not|"
+        r"no longer changes)",
         re.IGNORECASE,
     )
 
@@ -110,6 +332,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.memory = ""
         self._episodic_rag_cache: dict = {}
         self._concept_rag_cache: dict = {}
+        self._reset_episode_reasoning_state()
 
     def _get_memory_environment_name(self) -> str:
         if isinstance(getattr(self, "adapter", None), ScienceWorldAdapter):
@@ -125,6 +348,649 @@ class GWTAutogenAgent(AutogenAgent):
 
     def _get_memory_dir(self) -> Path:
         return self._MEMORY_ROOT / self._get_memory_environment_name()
+
+    def _reset_episode_reasoning_state(self) -> None:
+        self.episode_hypothesis_ledger: dict[str, dict] = {}
+        self.recent_hypothesis_tests: list[dict] = []
+        self._provider_fallbacks_applied: set[str] = set()
+        self._last_action_shortlist: list[str] = []
+
+    @staticmethod
+    def _normalize_runtime_text(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+    def _extract_task_keywords(self) -> list[str]:
+        return self._extract_runtime_tokens(self.task, stopwords=self._TASK_STOPWORDS)
+
+    def _extract_runtime_tokens(
+        self,
+        text: str,
+        *,
+        stopwords: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        active_stopwords = stopwords or self._RUNTIME_TOKEN_STOPWORDS
+        tokens = []
+        for token in re.findall(r"[a-z0-9]+", (text or "").lower()):
+            if len(token) < 3 or token in active_stopwords:
+                continue
+            if token not in tokens:
+                tokens.append(token)
+            if limit is not None and len(tokens) >= limit:
+                break
+        return tokens
+
+    def _get_observation_grounded_tokens(self) -> list[str]:
+        tokens: list[str] = []
+        percept = getattr(self, "percept", {}) or {}
+
+        for token in self._extract_runtime_tokens(
+            percept.get("resulting_observation", ""), limit=10
+        ):
+            if token not in tokens:
+                tokens.append(token)
+
+        for test in reversed(self.recent_hypothesis_tests):
+            if test["outcome"] not in {"observable_change", "evidence"}:
+                continue
+            for token in self._extract_runtime_tokens(test["action"], limit=6):
+                if token not in tokens:
+                    tokens.append(token)
+            if len(tokens) >= 12:
+                break
+
+        return tokens[:12]
+
+    def _extract_action_content_tokens(self, action: str, family: str | None = None) -> list[str]:
+        stopwords = self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
+        content_tokens = self._extract_runtime_tokens(action, stopwords=stopwords)
+        if family == "device_control":
+            # Keeping "door" helps navigation/opening tasks stay grounded.
+            return content_tokens
+        return content_tokens
+
+    def _get_recent_invalid_actions(self, *, limit: int = 4) -> list[str]:
+        invalid_actions: list[str] = []
+        for test in reversed(self.recent_hypothesis_tests):
+            if test["outcome"] != "invalid":
+                continue
+            action = test["action"]
+            if action and action not in invalid_actions:
+                invalid_actions.append(action)
+            if len(invalid_actions) >= limit:
+                break
+        return list(reversed(invalid_actions))
+
+    @staticmethod
+    def _get_shortlist_family_quotas(current_phase: str) -> dict[str, int]:
+        quotas_by_phase = {
+            "gather_evidence": {
+                "inspect": 3,
+                "device_control": 2,
+                "relocation": 2,
+                "transfer_or_transform": 2,
+                "tool_application": 1,
+                "focus": 1,
+            },
+            "test_mechanism": {
+                "inspect": 2,
+                "device_control": 1,
+                "relocation": 1,
+                "transfer_or_transform": 3,
+                "tool_application": 3,
+                "relation": 1,
+                "focus": 1,
+            },
+            "commit_to_goal": {
+                "inspect": 1,
+                "device_control": 2,
+                "relocation": 3,
+                "transfer_or_transform": 3,
+                "tool_application": 2,
+                "focus": 1,
+            },
+            "act": {
+                "inspect": 2,
+                "device_control": 2,
+                "relocation": 2,
+                "transfer_or_transform": 2,
+                "tool_application": 2,
+                "focus": 1,
+            },
+        }
+        return quotas_by_phase.get(current_phase, quotas_by_phase["act"])
+
+    @staticmethod
+    def _get_family_priority(current_phase: str, family: str) -> int:
+        priorities_by_phase = {
+            "gather_evidence": {
+                "inspect": 6,
+                "device_control": 5,
+                "relocation": 5,
+                "transfer_or_transform": 4,
+                "tool_application": 3,
+                "focus": 2,
+                "relation": 1,
+                "other": 0,
+                "idle": -5,
+            },
+            "test_mechanism": {
+                "tool_application": 6,
+                "transfer_or_transform": 6,
+                "inspect": 5,
+                "device_control": 4,
+                "relocation": 4,
+                "relation": 3,
+                "focus": 1,
+                "other": 0,
+                "idle": -5,
+            },
+            "commit_to_goal": {
+                "relocation": 6,
+                "transfer_or_transform": 5,
+                "tool_application": 5,
+                "device_control": 4,
+                "inspect": 3,
+                "focus": 1,
+                "relation": 0,
+                "other": 0,
+                "idle": -5,
+            },
+            "act": {
+                "inspect": 5,
+                "device_control": 5,
+                "relocation": 5,
+                "transfer_or_transform": 5,
+                "tool_application": 5,
+                "focus": 1,
+                "relation": 1,
+                "other": 0,
+                "idle": -5,
+            },
+        }
+        return priorities_by_phase.get(current_phase, priorities_by_phase["act"]).get(
+            family, 0
+        )
+
+    def _classify_action_family(self, action: str) -> str:
+        normalized = self._normalize_runtime_text(action)
+        if not normalized:
+            return "unknown"
+
+        for prefixes, family in self._ACTION_FAMILY_PREFIXES:
+            if normalized.startswith(prefixes):
+                return family
+        return "other"
+
+    def _get_hypothesis_entry(self, family: str) -> dict:
+        entry = self.episode_hypothesis_ledger.get(family)
+        if entry is not None:
+            return entry
+
+        entry = {
+            "family": family,
+            "tests": 0,
+            "invalid_attempts": 0,
+            "stalled_attempts": 0,
+            "observable_change_attempts": 0,
+            "evidence_attempts": 0,
+            "confidence": 0.5,
+            "status": "unseen",
+            "retired": False,
+            "last_action": "",
+            "last_evidence": "",
+        }
+        self.episode_hypothesis_ledger[family] = entry
+        return entry
+
+    def _classify_hypothesis_outcome(
+        self,
+        *,
+        family: str,
+        executed_action: str | None,
+        observation: str,
+        previous_observation: str,
+    ) -> tuple[str, str]:
+        normalized_observation = self._normalize_runtime_text(observation)
+        observation_changed = (
+            normalized_observation != self._normalize_runtime_text(previous_observation)
+        )
+        has_admissible_delta = bool(
+            self.percept.get("newly_admissible_actions")
+            or self.percept.get("no_longer_admissible_actions")
+        )
+
+        if executed_action is None or self._HARD_FAILURE_RE.search(observation):
+            return "invalid", "The attempted action failed or was inadmissible."
+        if family == "inspect" and observation_changed:
+            return "evidence", "Inspection produced new evidence."
+        if self.task_status == "COMPLETED" or self._DIRECT_EFFECT_RE.search(observation):
+            return "observable_change", "The observation reported a state change."
+        if has_admissible_delta:
+            return "observable_change", "The action changed the available affordances."
+        if self._EFFECTLESS_RE.search(observation) or not observation_changed:
+            return "stalled", "No task-relevant change was observed."
+        return (
+            "uncertain",
+            "The action changed context, but its causal value is still unclear.",
+        )
+
+    def _update_episode_hypothesis_ledger(
+        self,
+        *,
+        suggested_action: str,
+        executed_action: str | None,
+        previous_observation: str,
+    ) -> None:
+        family = self._classify_action_family(executed_action or suggested_action)
+        entry = self._get_hypothesis_entry(family)
+        observation = self.percept.get("resulting_observation", "")
+        outcome, evidence = self._classify_hypothesis_outcome(
+            family=family,
+            executed_action=executed_action,
+            observation=observation,
+            previous_observation=previous_observation,
+        )
+
+        entry["tests"] += 1
+        entry["last_action"] = executed_action or suggested_action
+        entry["last_evidence"] = evidence
+
+        if outcome == "invalid":
+            entry["invalid_attempts"] += 1
+            entry["confidence"] = max(0.0, entry["confidence"] - 0.2)
+        elif outcome == "observable_change":
+            entry["observable_change_attempts"] += 1
+            entry["confidence"] = min(1.0, entry["confidence"] + 0.1)
+        elif outcome == "evidence":
+            entry["evidence_attempts"] += 1
+        elif outcome == "stalled":
+            entry["stalled_attempts"] += 1
+            entry["confidence"] = max(0.0, entry["confidence"] - 0.15)
+
+        if (
+            family in self._DEPRIORITIZE_ELIGIBLE_FAMILIES
+            and entry["observable_change_attempts"] == 0
+            and (entry["invalid_attempts"] >= 2 or entry["stalled_attempts"] >= 2)
+        ):
+            entry["status"] = "deprioritized"
+            entry["retired"] = True
+        elif entry["observable_change_attempts"] > 0:
+            entry["status"] = "promising"
+            entry["retired"] = False
+        elif entry["tests"] > 0:
+            entry["status"] = "uncertain"
+            entry["retired"] = False
+
+        self.recent_hypothesis_tests.append(
+            {
+                "family": family,
+                "action": executed_action or suggested_action,
+                "outcome": outcome,
+                "evidence": evidence,
+            }
+        )
+        self.recent_hypothesis_tests = self.recent_hypothesis_tests[-6:]
+
+    def _get_episode_hypothesis_snapshot(
+        self,
+        *,
+        max_families: int = 4,
+        max_recent_tests: int = 4,
+    ) -> dict:
+        families = sorted(
+            self.episode_hypothesis_ledger.values(),
+            key=lambda entry: (
+                entry["status"] != "deprioritized",
+                -(entry["tests"]),
+                entry["family"],
+            ),
+        )
+        serialized_families = [
+            {
+                "family": entry["family"],
+                "status": entry["status"],
+                "confidence": round(entry["confidence"], 2),
+                "tests": entry["tests"],
+                "invalid_attempts": entry["invalid_attempts"],
+                "stalled_attempts": entry["stalled_attempts"],
+                "observable_change_attempts": entry["observable_change_attempts"],
+                "last_evidence": entry["last_evidence"],
+            }
+            for entry in families[:max_families]
+            if entry["tests"] > 0
+        ]
+
+        return {
+            "mechanisms": serialized_families,
+            "recent_tests": self.recent_hypothesis_tests[-max_recent_tests:],
+        }
+
+    def _get_current_phase(self) -> str:
+        inspect_evidence = any(
+            entry["evidence_attempts"] > 0
+            for entry in self.episode_hypothesis_ledger.values()
+            if entry["family"] == "inspect"
+        )
+        mechanism_progress = any(
+            entry["observable_change_attempts"] > 0
+            for entry in self.episode_hypothesis_ledger.values()
+            if entry["family"] in {"relation", "tool_application", "transfer_or_transform"}
+        )
+        task_lower = self.task.lower()
+        placement_task = any(
+            token in task_lower for token in ("place", "put", "move", "deliver")
+        )
+        if not inspect_evidence:
+            return "gather_evidence"
+        if any(token in task_lower for token in ("determine", "test", "whether", "identify")) and not mechanism_progress:
+            return "test_mechanism"
+        if placement_task:
+            return "commit_to_goal"
+        return "act"
+
+    def _score_action_for_shortlist(
+        self,
+        action: str,
+        *,
+        current_phase: str,
+        task_keywords: list[str],
+        grounded_tokens: list[str],
+    ) -> tuple[int, int, int]:
+        normalized = self._normalize_runtime_text(action)
+        family = self._classify_action_family(action)
+        action_tokens = self._extract_runtime_tokens(action)
+        content_tokens = self._extract_action_content_tokens(action, family=family)
+        action_token_set = set(action_tokens)
+        content_token_set = set(content_tokens)
+        task_keyword_set = set(task_keywords)
+        score = 0
+
+        keyword_hits = len(action_token_set & task_keyword_set)
+        grounded_hits = len(content_token_set & set(grounded_tokens))
+        score += keyword_hits * 5
+        score += grounded_hits * 6
+
+        family_priority = self._get_family_priority(current_phase, family)
+        score += family_priority
+
+        if family == "inspect" and (keyword_hits or grounded_hits):
+            score += 5
+        if family == "device_control" and grounded_hits:
+            score += 4
+        if family == "relocation" and grounded_hits:
+            score += 4
+        if family == "transfer_or_transform" and grounded_hits:
+            score += 4
+        if family == "tool_application" and (keyword_hits or grounded_hits):
+            score += 4
+        if family == "focus" and grounded_hits:
+            score += 3
+        elif family == "focus":
+            score -= 3
+
+        if current_phase == "gather_evidence":
+            if family == "relation":
+                score -= 2
+        elif current_phase == "test_mechanism":
+            if family == "focus":
+                score -= 1
+        elif current_phase == "commit_to_goal":
+            if family == "relation":
+                score -= 1
+
+        entry = self.episode_hypothesis_ledger.get(family)
+        if entry is not None:
+            score += round((entry["confidence"] - 0.5) * 8)
+            if entry["status"] == "promising":
+                score += 2
+            if entry["status"] == "deprioritized":
+                score -= 8
+            if entry["invalid_attempts"] >= 2:
+                score -= 2
+            if entry["stalled_attempts"] >= 2:
+                score -= 2
+        if family == "other":
+            score -= 2
+
+        if content_token_set and grounded_hits == 0:
+            score -= 10
+
+        if normalized.startswith("wait"):
+            score -= 10
+
+        return score, grounded_hits, family_priority
+
+    def _summarize_admissible_actions(
+        self,
+        actions: list[str],
+        *,
+        shortlist_limit: int = 12,
+    ) -> dict:
+        family_counts: dict[str, int] = {}
+        current_phase = self._get_current_phase()
+        task_keywords = self._extract_task_keywords()
+        grounded_tokens = self._get_observation_grounded_tokens()
+        scored_actions = []
+
+        for action in actions:
+            family = self._classify_action_family(action)
+            family_counts[family] = family_counts.get(family, 0) + 1
+            score, grounded_hits, family_priority = self._score_action_for_shortlist(
+                action,
+                current_phase=current_phase,
+                task_keywords=task_keywords,
+                grounded_tokens=grounded_tokens,
+            )
+            scored_actions.append(
+                {
+                    "action": action,
+                    "family": family,
+                    "score": score,
+                    "grounded_hits": grounded_hits,
+                    "family_priority": family_priority,
+                }
+            )
+
+        scored_actions.sort(
+            key=lambda item: (
+                -item["score"],
+                -item["grounded_hits"],
+                -item["family_priority"],
+                len(item["action"]),
+                item["action"],
+            )
+        )
+
+        quotas = self._get_shortlist_family_quotas(current_phase)
+        shortlist: list[str] = []
+        selected_actions: set[str] = set()
+        selected_by_family: dict[str, int] = {}
+
+        for item in scored_actions:
+            family = item["family"]
+            quota = quotas.get(family, 0)
+            if quota <= 0 or selected_by_family.get(family, 0) >= quota:
+                continue
+            shortlist.append(item["action"])
+            selected_actions.add(item["action"])
+            selected_by_family[family] = selected_by_family.get(family, 0) + 1
+            if len(shortlist) >= shortlist_limit:
+                break
+
+        for item in scored_actions:
+            if len(shortlist) >= shortlist_limit:
+                break
+            if item["action"] in selected_actions:
+                continue
+            shortlist.append(item["action"])
+            selected_actions.add(item["action"])
+
+        deprioritized_families = sorted(
+            entry["family"]
+            for entry in self.episode_hypothesis_ledger.values()
+            if entry["status"] == "deprioritized"
+        )
+        return {
+            "total_actions": len(actions),
+            "current_phase": current_phase,
+            "family_counts": family_counts,
+            "salient_entities": grounded_tokens[:8],
+            "task_relevant_action_shortlist": shortlist,
+            "deprioritized_families": deprioritized_families,
+        }
+
+    def _build_shared_action_context(self) -> dict:
+        summary = self._summarize_admissible_actions(self.admissible_actions)
+        previous_shortlist = self._last_action_shortlist
+        current_shortlist = summary["task_relevant_action_shortlist"]
+        self._last_action_shortlist = current_shortlist
+        summary["newly_relevant_actions"] = [
+            action for action in current_shortlist if action not in previous_shortlist
+        ]
+        summary["no_longer_relevant_actions"] = [
+            action for action in previous_shortlist if action not in current_shortlist
+        ]
+        return summary
+
+    def _refresh_action_agent_runtime_context(self) -> None:
+        if self.action_agent is None:
+            return
+
+        summary = self._summarize_admissible_actions(self.admissible_actions, shortlist_limit=20)
+        recent_invalid_actions = self._get_recent_invalid_actions()
+        self._set_agent_system_message(
+            self.action_agent,
+            self._action_agent_base_prompt
+            + "\n\n--- PRIVATE RUNTIME CONTEXT ---\n"
+            + f"Current phase: {summary['current_phase']}\n"
+            + f"Current exact task-relevant admissible shortlist: {json.dumps(summary['task_relevant_action_shortlist'])}\n"
+            + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
+            + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
+            + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
+            + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
+            + "Choose an exact shortlist string whenever possible. "
+            + "If you go off-shortlist, stay lexically close to grounded entities and known admissible verb families instead of inventing a fresh command template. "
+            + "The executor will only execute the action if it actually matches the environment's admissible commands.\n"
+        )
+
+    @staticmethod
+    def _set_agent_system_message(agent, content: str) -> None:
+        if hasattr(agent, "_oai_system_message") and getattr(agent, "_oai_system_message"):
+            agent._oai_system_message[0]["content"] = content
+            return
+        setattr(agent, "system_message", content)
+
+    def _synthesize_belief_state_fallback(self, malformed_content: str) -> str:
+        percept = self.percept or {}
+        timestep = percept.get("timestep", self.num_actions_taken)
+        attempted_action = percept.get("attempted_action", "None")
+        observation = percept.get("resulting_observation", "No observation available.")
+        attempts_left = percept.get("action_attempts_left", self.max_actions - self.num_actions_taken)
+        ledger = self._get_episode_hypothesis_snapshot(max_families=3, max_recent_tests=2)
+
+        parts = [
+            f"Timestep {timestep}: My previous belief-state output drifted out of format, so I discard any embedded action suggestion and re-anchor on the latest confirmed percept.",
+            f"The last attempted action was {attempted_action!r}.",
+            f"The latest confirmed observation is: {observation}",
+            f"The task is still {percept.get('task_status', self.task_status)} with {attempts_left} action attempts left.",
+        ]
+
+        if ledger["mechanisms"]:
+            mechanism_notes = ", ".join(
+                f"{entry['family']}={entry['status']}({entry['confidence']})"
+                for entry in ledger["mechanisms"]
+            )
+            parts.append(
+                "My current episode-local mechanism confidence is: "
+                + mechanism_notes
+                + ". These are provisional beliefs about this episode only."
+            )
+
+        if malformed_content.strip():
+            parts.append(
+                "The malformed output should not be treated as world knowledge or a committed plan."
+            )
+
+        return "BELIEF STATE: [" + " ".join(parts) + "]"
+
+    @staticmethod
+    def _is_provider_quota_error(error: Exception) -> bool:
+        message = str(error).upper()
+        return "429" in message or "RESOURCE_EXHAUSTED" in message
+
+    @staticmethod
+    def _provider_from_error(error: Exception) -> str | None:
+        message = str(error).lower()
+        if "generativelanguage" in message or "gemini" in message:
+            return "google"
+        if "deepseek" in message:
+            return "openai"
+        return None
+
+    @staticmethod
+    def _deprioritize_provider(config: dict | None, provider: str) -> bool:
+        if not config or "config_list" not in config:
+            return False
+
+        current = list(config["config_list"])
+        if len(current) <= 1:
+            return False
+
+        preferred = [item for item in current if item.get("api_type") != provider]
+        deprioritized = [item for item in current if item.get("api_type") == provider]
+        reordered = preferred + deprioritized
+        if reordered == current:
+            return False
+        config["config_list"] = reordered
+        return True
+
+    def _apply_provider_fallback(self, provider: str) -> bool:
+        if provider in self._provider_fallbacks_applied:
+            return False
+
+        changed = False
+        for config in (
+            getattr(self, "support_config", None),
+            getattr(self, "reasoner_config", None),
+        ):
+            changed = self._deprioritize_provider(config, provider) or changed
+
+        if changed and self.group_chat_manager is not None:
+            if getattr(self, "reasoner_config", None):
+                self.group_chat_manager.llm_config = self.reasoner_config["config_list"][0]
+
+        if changed:
+            self._provider_fallbacks_applied.add(provider)
+        return changed
+
+    def recover_from_chat_error(self, *, error, initial_message_content, stage):
+        if not self._is_provider_quota_error(error):
+            return None
+
+        provider = self._provider_from_error(error)
+        if provider is None or not self._apply_provider_fallback(provider):
+            return None
+
+        print(
+            f"⚠️ Quota error from provider '{provider}'. Reordering runtime configs and retrying the in-flight chat."
+        )
+
+        self._refresh_action_agent_runtime_context()
+        try:
+            if self.group_chat is not None and self.group_chat.messages:
+                return self.resume_chat(self.group_chat.messages)
+            assert self.start_agent is not None
+            assert self.group_chat_manager is not None
+            chat_result = self.start_agent.initiate_chat(
+                self.group_chat_manager,
+                message={"role": "system", "content": initial_message_content},
+                summary_method="reflection_with_llm",
+            )
+            return chat_result, None
+        except Exception as retry_error:
+            print(f"⚠️ Provider fallback retry failed: {retry_error}")
+            return None
 
     def _make_belief_state_termination_fn(self):
         """Returns a termination predicate for Belief_State_Agent.
@@ -153,6 +1019,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         self.register_game_log_paths()
         self.cluster_knowledge()
+        self._reset_episode_reasoning_state()
 
         self.num_actions_taken = 0
         self.max_actions = self._initial_max_actions - self.max_round_actions * (
@@ -223,18 +1090,29 @@ class GWTAutogenAgent(AutogenAgent):
             "task_status": self.task_status,
             "action_attempts_left": self.max_actions - self.num_actions_taken,
         }
-        if self.num_actions_taken == 0:
-            # First percept: send the full admissible list as the baseline.
-            self.percept["admissible_actions"] = sorted(self.admissible_actions)
-        else:
-            # Subsequent percepts: send only what changed to reduce prompt tokens.
-            # Agents should track the running list: initial + added - removed.
-            if newly_added:
-                self.percept["newly_admissible_actions"] = newly_added
-            if no_longer:
-                self.percept["no_longer_admissible_actions"] = no_longer
+        shared_action_context = self._build_shared_action_context()
+        self.percept["admissible_action_summary"] = {
+            "total_actions": shared_action_context["total_actions"],
+            "current_phase": shared_action_context["current_phase"],
+            "family_counts": shared_action_context["family_counts"],
+            "salient_entities": shared_action_context["salient_entities"],
+            "deprioritized_families": shared_action_context["deprioritized_families"],
+        }
+        self.percept["task_relevant_action_shortlist"] = shared_action_context[
+            "task_relevant_action_shortlist"
+        ]
+        if self.num_actions_taken > 0:
+            if shared_action_context["newly_relevant_actions"]:
+                self.percept["newly_relevant_actions"] = shared_action_context[
+                    "newly_relevant_actions"
+                ]
+            if shared_action_context["no_longer_relevant_actions"]:
+                self.percept["no_longer_relevant_actions"] = shared_action_context[
+                    "no_longer_relevant_actions"
+                ]
             if not newly_added and not no_longer:
                 self.percept["admissible_actions_unchanged"] = True
+        self._refresh_action_agent_runtime_context()
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
         summary_json = json.dumps(
@@ -254,17 +1132,34 @@ class GWTAutogenAgent(AutogenAgent):
         with _prompts_path.open() as _f:
             _PROMPTS = yaml.safe_load(_f)
 
+        self._action_agent_base_prompt = _PROMPTS["action_agent"]
         self.llm_config_list = self.llm_profile.get("config_list", [])
 
         # Standard priority: Gemini -> Chat -> Reasoner
-        standard_config = {
-            "config_list": self.llm_config_list,
+        self.standard_config = {
+            "config_list": list(self.llm_config_list),
+            "temperature": 0.0,
+            "max_tokens": 200,
+        }
+        self.support_config = {
+            "config_list": [
+                *[
+                    cfg
+                    for cfg in self.llm_config_list
+                    if cfg.get("api_type") != "google"
+                ],
+                *[
+                    cfg
+                    for cfg in self.llm_config_list
+                    if cfg.get("api_type") == "google"
+                ],
+            ],
             "temperature": 0.0,
             "max_tokens": 200,
         }
 
         # Reasoner priority: Reasoner -> Chat -> Gemini (reversed)
-        reasoner_config = {
+        self.reasoner_config = {
             "config_list": list(reversed(self.llm_config_list)),
             "temperature": 1.0,  # Reasoners need higher temp for R1/o1
         }
@@ -279,7 +1174,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Focus_Agent",
             system_message=_PROMPTS["focus_agent"],
             description="Focus_Agent calls the 'focus' function whenever Belief_State_Agent fails to state a BELIEF STATE until Belief_State_Agent outputs a BELIEF STATE.",
-            llm_config=standard_config,
+            llm_config=self.support_config,
             is_termination_msg=lambda msg: False,
             human_input_mode="NEVER",
         )
@@ -292,7 +1187,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Retrieve_Memory_Agent",
             system_message=_PROMPTS["retrieve_memory_agent"],
             description="Retrieve_Memory_Agent calls the 'retrieve_memory' function to help recall and process useful knowledge and information to solve the task.",
-            llm_config=standard_config,
+            llm_config=self.support_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -303,9 +1198,9 @@ class GWTAutogenAgent(AutogenAgent):
 
         self.action_agent = ConversableAgent(
             name="Action_Agent",
-            system_message=_PROMPTS["action_agent"],
+            system_message=self._action_agent_base_prompt,
             description="Action_Agent calls the 'execute_action' function with the best admissible action as the argument.",
-            llm_config=reasoner_config,
+            llm_config=self.reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -318,7 +1213,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Thinking_Agent",
             system_message=_PROMPTS["thinking_agent"],
             description="Thinking_Agent integrates all available information from the ongoing conversation in order to construct new ideas.",
-            llm_config=reasoner_config,
+            llm_config=self.reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -331,7 +1226,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Belief_State_Agent",
             system_message=_PROMPTS["belief_state_agent"],
             description="Belief_State_Agent interprets the latest percept and refines an evolving first-person belief state of the environment. Never suggests next actions.",
-            llm_config=reasoner_config,
+            llm_config=self.reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=self._make_belief_state_termination_fn(),
         )
@@ -392,7 +1287,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Learning_Agent",
             system_message=_PROMPTS["learning_agent"],
             description="Learning_Agent forms or reinforces generalizable concepts only after successful, observed actions or contrastive outcomes. Prioritizes novel discovery and integrates belief state-based abstraction.",
-            llm_config=reasoner_config,
+            llm_config=self.reasoner_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -405,7 +1300,7 @@ class GWTAutogenAgent(AutogenAgent):
             name="Record_Long_Term_Memory_Agent",
             system_message=_PROMPTS["record_long_term_memory_agent"],
             description="Record_Long_Term_Memory_Agent calls the 'record_long_term_memory' function with the concept given by 'Learning_Agent' as the argument.",
-            llm_config=standard_config,
+            llm_config=self.support_config,
             human_input_mode="NEVER",
             is_termination_msg=lambda msg: False,
         )
@@ -682,12 +1577,15 @@ class GWTAutogenAgent(AutogenAgent):
             action, action_score = get_best_candidate(
                 suggested_action, admissible_commands
             )
+            executed_action = None
+            previous_observation = self.percept.get("resulting_observation", "")
             if action_score < 0.98:
                 self.adapter.set_observation(
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
                 )
                 # Inadmissible actions don't consume the action budget
             else:
+                executed_action = action
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
@@ -710,6 +1608,16 @@ class GWTAutogenAgent(AutogenAgent):
                 reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
 
             self.update_percept(suggested_action)
+            self._update_episode_hypothesis_ledger(
+                suggested_action=suggested_action,
+                executed_action=executed_action,
+                previous_observation=previous_observation,
+            )
+            hypothesis_snapshot = self._get_episode_hypothesis_snapshot(
+                max_families=3, max_recent_tests=2
+            )
+            if hypothesis_snapshot["mechanisms"] or hypothesis_snapshot["recent_tests"]:
+                self.percept["episode_hypothesis_ledger"] = hypothesis_snapshot
 
             with open(self.log_paths["admissible_commands_path"], "a+") as f:
                 f.write(f"{self.admissible_actions}\n")
@@ -771,10 +1679,14 @@ class GWTAutogenAgent(AutogenAgent):
             return self.retrieve_memory()
 
         def focus() -> str:
+            shared_action_context = self._summarize_admissible_actions(
+                self.admissible_actions
+            )
             return (
                 f"TASK: {self.task}\n"
                 f"REPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept)}\n"
-                f"CURRENT ADMISSIBLE ACTIONS: {json.dumps(sorted(self.admissible_actions))}"
+                f"EPISODE HYPOTHESIS LEDGER: {json.dumps(self._get_episode_hypothesis_snapshot())}\n"
+                f"ACTION SPACE SUMMARY: {json.dumps(shared_action_context)}"
             )
 
         assert self.focus_agent is not None
@@ -973,6 +1885,7 @@ class GWTAutogenAgent(AutogenAgent):
                     "knowledge": relevant_knowledge,
                     "recent_episodic_memories": relevant_episodes,
                     "current_episode_memory": self.curr_episodic_memory,
+                    "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
                 },
             )
             + "\n\n"
@@ -1020,6 +1933,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "knowledge": relevant_knowledge,
                 "previous_episodic_memories": relevant_episodes,
                 "current_episode_memory": self.curr_episodic_memory,
+                "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
             },
         )
         return self.memory
@@ -1100,6 +2014,12 @@ class GWTAutogenAgent(AutogenAgent):
             and not self.task_failed
         ):
             current_content = last_msg.get("content") or ""
+            if not current_content.lstrip().upper().startswith("BELIEF STATE:"):
+                repaired = self._synthesize_belief_state_fallback(current_content)
+                last_msg["content"] = repaired
+                current_content = repaired
+                self._last_belief_content = ""
+                self._consecutive_thinking_count = 0
             if (
                 self._UNCERTAINTY_RE.search(current_content.lower())
                 or "no observation" in current_content.lower()

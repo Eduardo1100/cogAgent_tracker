@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -161,6 +162,27 @@ def _build_agent(tmp_path: Path, env_type: str):
     Path(agent.log_path).mkdir(parents=True, exist_ok=True)
     agent.log_paths = {}
     agent.adapter = None
+    agent.task = ""
+    agent.admissible_actions = []
+    agent.percept = {}
+    agent.curr_episodic_memory = []
+    agent.prev_episodic_memories = []
+    agent.knowledge = []
+    agent.task_status = "INCOMPLETE"
+    agent.max_actions = 35
+    agent.num_actions_taken = 0
+    agent._task_contract = {}
+    agent._task_contract_source = ""
+    agent._last_action_shortlist = []
+    agent.group_chat_manager = None
+    agent.group_chat = None
+    agent.action_agent = None
+    agent._action_agent_base_prompt = ""
+    agent.support_config = None
+    agent.reasoner_config = None
+    agent._episodic_rag_cache = {}
+    agent._concept_rag_cache = {}
+    agent._reset_episode_reasoning_state()
     return agent, gwt_module
 
 
@@ -205,3 +227,269 @@ def test_register_log_paths_switches_to_adapter_environment(tmp_path):
     assert Path(agent.log_paths["memory_dir"]) == alfworld_dir
     assert Path(agent.log_paths["memory1_path"]) == alfworld_dir / "memory1.txt"
     assert Path(agent.log_paths["memory2_path"]) == alfworld_dir / "memory2.txt"
+
+
+def test_episode_hypothesis_ledger_is_episode_local_and_deprioritizes_repeats(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    agent.percept = {
+        "resulting_observation": "The action 'connect sink to stove' is not in the list of admissible actions for the current timestep.",
+    }
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="connect sink to stove",
+        executed_action=None,
+        previous_observation="",
+    )
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="connect sink to stove",
+        executed_action=None,
+        previous_observation="",
+    )
+
+    snapshot = agent._get_episode_hypothesis_snapshot()
+    relation_entry = snapshot["mechanisms"][0]
+    assert relation_entry["family"] == "relation"
+    assert relation_entry["status"] == "deprioritized"
+    assert relation_entry["invalid_attempts"] == 2
+
+    agent._reset_episode_reasoning_state()
+    assert agent._get_episode_hypothesis_snapshot() == {
+        "mechanisms": [],
+        "recent_tests": [],
+    }
+
+
+def test_retrieve_memory_serializes_episode_hypothesis_ledger(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Heat the water."
+    agent.curr_episodic_memory = []
+    agent.prev_episodic_memories = []
+    agent.knowledge = []
+    agent.rag_episode_k = 4
+    agent.rag_concept_k = 5
+    agent._episodic_rag_cache = {}
+    agent._concept_rag_cache = {}
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": "The lighter heats up the water a small amount.",
+    }
+
+    agent._update_episode_hypothesis_ledger(
+        suggested_action="use lighter on water",
+        executed_action="use lighter on water",
+        previous_observation="The water is cold.",
+    )
+
+    payload = json.loads(agent.retrieve_memory())
+    mechanisms = payload["episode_hypothesis_ledger"]["mechanisms"]
+    assert mechanisms[0]["family"] == "tool_application"
+    assert mechanisms[0]["status"] == "promising"
+
+
+def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Determine whether aluminum foil is electrically conductive."
+    agent.task_status = "INCOMPLETE"
+    agent.curr_episodic_memory = []
+    agent.num_actions_taken = 0
+    agent.max_actions = 35
+    agent.action_agent = SimpleNamespace(system_message="")
+    agent._action_agent_base_prompt = "BASE ACTION PROMPT"
+    agent._reset_episode_reasoning_state()
+    agent.admissible_actions = ["look around"]
+    agent.adapter = SimpleNamespace(
+        admissible_actions=[
+            "look around",
+            "look at aluminum foil",
+            "pick up aluminum foil",
+            "connect aluminum foil to battery",
+            "open drawer",
+        ],
+        observation="You are in the workshop with aluminum foil, a battery, and a drawer.",
+    )
+
+    agent.update_percept("go to workshop")
+
+    summary = agent.percept["admissible_action_summary"]
+    shortlist = agent.percept["task_relevant_action_shortlist"]
+
+    assert summary["total_actions"] == 5
+    assert summary["current_phase"] == "gather_evidence"
+    assert summary["family_counts"]["inspect"] >= 2
+    assert "aluminum" in summary["salient_entities"]
+    assert "look at aluminum foil" in shortlist
+    assert "pick up aluminum foil" in shortlist
+    assert (
+        "Current exact task-relevant admissible shortlist"
+        in agent.action_agent.system_message
+    )
+    assert "Salient grounded entities" in agent.action_agent.system_message
+    assert "connect aluminum foil to battery" in agent.action_agent.system_message
+
+
+def test_custom_speaker_selection_repairs_malformed_belief_state_and_continues(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.focus_agent = object()
+    agent.belief_state_agent = object()
+    agent.thinking_agent = object()
+    agent.action_agent = object()
+    agent.echo_agent = object()
+    agent.learning_agent = object()
+    agent.retrieve_memory_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent.task_status = "INCOMPLETE"
+    agent.max_actions = 35
+    agent.num_actions_taken = 3
+    agent.percept = {
+        "timestep": 3,
+        "attempted_action": "look at aluminum foil",
+        "resulting_observation": "The aluminum foil is a thin sheet of metal.",
+        "task_status": "INCOMPLETE",
+        "action_attempts_left": 32,
+    }
+    agent._reset_episode_reasoning_state()
+    agent._last_belief_content = "stale"
+    agent._consecutive_thinking_count = 2
+    agent.allowed_transitions = {
+        agent.belief_state_agent: [
+            agent.action_agent,
+            agent.thinking_agent,
+            agent.focus_agent,
+        ]
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"attempted_action": "use lighter on water"}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.belief_state_agent, groupchat)
+
+    assert next_speaker is agent.action_agent
+    assert groupchat.messages[-1]["content"].startswith("BELIEF STATE:")
+    assert "latest confirmed percept" in groupchat.messages[-1]["content"]
+    assert agent._last_belief_content == ""
+    assert agent._consecutive_thinking_count == 0
+
+
+def test_recover_from_chat_error_reorders_provider_and_retries(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Determine whether aluminum foil is electrically conductive."
+    agent.admissible_actions = [
+        "look at aluminum foil",
+        "pick up aluminum foil",
+        "connect aluminum foil to battery",
+    ]
+    agent.action_agent = SimpleNamespace(system_message="")
+    agent._action_agent_base_prompt = "BASE ACTION PROMPT"
+    agent.support_config = {
+        "config_list": [
+            {"api_type": "google", "model": "gemini-2.0-flash"},
+            {"api_type": "openai", "model": "deepseek-chat"},
+        ]
+    }
+    agent.reasoner_config = {
+        "config_list": [
+            {"api_type": "google", "model": "gemini-2.0-flash"},
+            {"api_type": "openai", "model": "deepseek-reasoner"},
+        ]
+    }
+    agent.group_chat_manager = SimpleNamespace(
+        llm_config=agent.support_config["config_list"][0]
+    )
+    agent.group_chat = SimpleNamespace(messages=[{"content": "in-flight"}])
+    agent._reset_episode_reasoning_state()
+    agent.resume_chat = lambda messages: ("recovered", None)
+
+    recovered = agent.recover_from_chat_error(
+        error=RuntimeError(
+            "429 RESOURCE_EXHAUSTED from generativelanguage.googleapis.com for gemini"
+        ),
+        initial_message_content="retry",
+        stage="resume",
+    )
+
+    assert recovered == ("recovered", None)
+    assert [cfg["api_type"] for cfg in agent.support_config["config_list"]] == [
+        "openai",
+        "google",
+    ]
+    assert [cfg["api_type"] for cfg in agent.reasoner_config["config_list"]] == [
+        "openai",
+        "google",
+    ]
+    assert agent.group_chat_manager.llm_config["api_type"] == "openai"
+    assert (
+        "Current exact task-relevant admissible shortlist"
+        in agent.action_agent.system_message
+    )
+
+
+def test_set_agent_system_message_supports_read_only_autogen_property(tmp_path):
+    agent, gwt_module = _build_agent(tmp_path, env_type="scienceworld")
+
+    class ReadOnlyAgent:
+        def __init__(self):
+            self._oai_system_message = [{"role": "system", "content": "old"}]
+
+        @property
+        def system_message(self):
+            return self._oai_system_message[0]["content"]
+
+    read_only_agent = ReadOnlyAgent()
+
+    gwt_module.GWTAutogenAgent._set_agent_system_message(read_only_agent, "new prompt")
+
+    assert read_only_agent.system_message == "new prompt"
+
+
+def test_action_family_classification_covers_common_general_verbs(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    assert agent._classify_action_family("inspect sink") == "inspect"
+    assert agent._classify_action_family("take ceramic cup") == "relocation"
+    assert agent._classify_action_family("fill kettle from tap") == (
+        "transfer_or_transform"
+    )
+    assert agent._classify_action_family("turn on stove") == "device_control"
+
+
+def test_shortlist_balances_families_and_grounds_on_observation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Boil water in the kitchen."
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. "
+            "You also see a door to the kitchen and a door to the workshop."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on air",
+            "focus on door to kitchen",
+            "focus on workshop",
+            "look at door to kitchen",
+            "open door to kitchen",
+            "go to kitchen",
+            "wait",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["salient_entities"][:2] == ["hallway", "kitchen"]
+    assert "open door to kitchen" in shortlist
+    assert "go to kitchen" in shortlist
+    assert "look at door to kitchen" in shortlist
+    assert sum(action.startswith("focus on") for action in shortlist) <= 1
+

@@ -86,6 +86,13 @@ class AutogenAgent:
                 summary_method="reflection_with_llm",
             )
         except Exception as e:
+            recovery = self._recover_chat_error(
+                e,
+                initial_message_content=initial_message_content,
+                stage="run",
+            )
+            if recovery is not None:
+                return recovery
             print(f"Group Chat manager fails to chat with error message {e}")
             error_message = e
 
@@ -108,10 +115,27 @@ class AutogenAgent:
             )
 
         except Exception as e:
+            recovery = self._recover_chat_error(
+                e,
+                initial_message_content=last_message,
+                stage="resume",
+            )
+            if recovery is not None:
+                return recovery
             print(f"Group Chat manager fails to chat with error message {e}")
             error_message = e
 
         return chat_result, error_message
+
+    def _recover_chat_error(self, error, *, initial_message_content, stage):
+        recover = getattr(self, "recover_from_chat_error", None)
+        if callable(recover):
+            return recover(
+                error=error,
+                initial_message_content=initial_message_content,
+                stage=stage,
+            )
+        return None
 
     def register_log_paths(self):
 
