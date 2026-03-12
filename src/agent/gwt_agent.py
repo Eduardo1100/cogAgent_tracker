@@ -7805,11 +7805,26 @@ class GWTAutogenAgent(AutogenAgent):
                 else:
                     score -= 4
             elif family == "relocation":
-                score += 8 if (primary_role_hits or support_role_hits) else 3
+                if support_role_hits and not primary_role_hits:
+                    score += 4
+                elif primary_role_hits:
+                    score -= (
+                        14
+                        if self._is_container_like_action(action, family=family)
+                        else 8
+                    )
+                else:
+                    score -= 8
             elif family == "relation":
-                score += 10 if (primary_role_hits or support_role_hits) else -8
+                if "relation" in task_contract.get("required_families", []):
+                    score += 10 if (primary_role_hits or support_role_hits) else -8
+                else:
+                    score += 6 if support_role_hits else -12
             elif family == "tool_application":
-                score += 8 if (primary_role_hits or support_role_hits) else -8
+                if "tool_application" in task_contract.get("required_families", []):
+                    score += 8 if (primary_role_hits or support_role_hits) else -8
+                else:
+                    score += 6 if support_role_hits else -10
             elif family == "transfer_or_transform":
                 score -= 90
 
@@ -8671,6 +8686,11 @@ class GWTAutogenAgent(AutogenAgent):
         comparison_task = scoring_context["comparison_task"]
         conditional_branch_task = scoring_context["conditional_branch_task"]
         lifecycle_task = scoring_context["lifecycle_task"]
+        unresolved_conditional_branch_evidence = bool(
+            conditional_branch_task
+            and current_phase == "gather_branch_evidence"
+            and not self._selected_conditional_branch_target
+        )
         lifecycle_targets_visible = scoring_context["lifecycle_targets_visible"]
         room_frontier_action = self._action_targets_room_frontier(
             action, current_observation, family=family
@@ -8781,7 +8801,11 @@ class GWTAutogenAgent(AutogenAgent):
                 or support_role_hits
             ):
                 score -= 4
-        if family == "relocation" and grounded_hits:
+        if (
+            family == "relocation"
+            and grounded_hits
+            and not (unresolved_conditional_branch_evidence and primary_role_hits)
+        ):
             score += 4
         if family == "transfer_or_transform" and grounded_hits:
             score += 4
@@ -9134,6 +9158,29 @@ class GWTAutogenAgent(AutogenAgent):
                 primary_role_hits=primary_role_hits,
                 support_role_hits=support_role_hits,
             )
+            if unresolved_conditional_branch_evidence:
+                if (
+                    family == "relocation"
+                    and primary_role_hits
+                    and not support_role_hits
+                ):
+                    score -= 36
+                    if self._is_container_like_action(action, family=family):
+                        score -= 8
+                elif (
+                    family == "relation"
+                    and "relation" not in required_families
+                    and primary_role_hits
+                    and not support_role_hits
+                ):
+                    score -= 30
+                elif (
+                    family == "tool_application"
+                    and "tool_application" not in required_families
+                    and primary_role_hits
+                    and not support_role_hits
+                ):
+                    score -= 24
         elif measurement_task:
             score += self._score_measurement_action(
                 action=action,
@@ -9190,7 +9237,11 @@ class GWTAutogenAgent(AutogenAgent):
                 support_role_hits=support_role_hits,
             )
 
-        if primary_target_focused and family == "relation":
+        if (
+            primary_target_focused
+            and family == "relation"
+            and not (unresolved_conditional_branch_evidence)
+        ):
             score += 8
         if primary_target_focused and relation_role_hits and family == "inspect":
             score += 4
@@ -9365,6 +9416,7 @@ class GWTAutogenAgent(AutogenAgent):
         grounded_tokens = self._get_observation_grounded_tokens()
         task_contract = self._get_task_contract()
         remote_room_signal = self._get_remote_room_signal_snapshot()
+        role_token_sets = self._get_task_role_token_sets(task_contract)
         scoring_context = self._build_shortlist_scoring_context(
             current_phase=current_phase,
             task_keywords=task_keywords,
@@ -9375,6 +9427,15 @@ class GWTAutogenAgent(AutogenAgent):
         for action in actions:
             family = self._classify_action_family(action)
             family_counts[family] = family_counts.get(family, 0) + 1
+            content_token_set = set(
+                self._extract_action_content_tokens(action, family=family)
+            )
+            primary_role_hits, _ = self._best_role_overlap(
+                content_token_set, role_token_sets["primary_targets"]
+            )
+            support_role_hits, _ = self._best_role_overlap(
+                content_token_set, role_token_sets["supporting_targets"]
+            )
             score, grounded_hits, family_priority = self._score_action_for_shortlist(
                 action,
                 available_actions=actions,
@@ -9390,6 +9451,8 @@ class GWTAutogenAgent(AutogenAgent):
                     "score": score,
                     "grounded_hits": grounded_hits,
                     "family_priority": family_priority,
+                    "primary_role_hits": primary_role_hits,
+                    "support_role_hits": support_role_hits,
                 }
             )
 
@@ -9413,7 +9476,6 @@ class GWTAutogenAgent(AutogenAgent):
             quotas["focus"] = max(2, quotas.get("focus", 0))
             if quotas.get("inspect", 0) > 0:
                 quotas["inspect"] -= 1
-        role_token_sets = self._get_task_role_token_sets(task_contract)
         if "relation" in task_contract.get(
             "required_families", []
         ) and self._role_focus_completed(role_token_sets["primary_targets"]):
@@ -9482,6 +9544,15 @@ class GWTAutogenAgent(AutogenAgent):
                     role_token_sets=role_token_sets,
                 )
             )
+            if current_phase == "gather_branch_evidence":
+                blocked_actions.update(
+                    item["action"]
+                    for item in scored_actions
+                    if item["family"] in {"relocation", "relation", "tool_application"}
+                    and item["family"] not in task_contract.get("required_families", [])
+                    and item["primary_role_hits"] > 0
+                    and item["support_role_hits"] == 0
+                )
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}

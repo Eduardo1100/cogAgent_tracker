@@ -3099,6 +3099,55 @@ def test_conditional_branch_transfer_shortlist_waits_for_evidence(tmp_path):
     assert "focus on red box" not in shortlist
 
 
+def test_conditional_branch_transfer_shortlist_avoids_premature_target_relocation(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine if unknown substance B is electrically "
+        "conductive. The unknown substance B is located around the workshop. "
+        "First, focus on the unknown substance B. If it is electrically "
+        "conductive, place it in the red box. If it is electrically "
+        "nonconductive, place it in the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the workshop. In it, you see unknown substance B, "
+            "a battery, a freezer, a table, and a switch."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on unknown substance",
+        observation="You focus on the unknown substance B.",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at unknown substance",
+            "look at battery",
+            "activate switch",
+            "open freezer",
+            "connect unknown substance to workshop",
+            "connect unknown substance to battery",
+            "move unknown substance to freezer",
+            "move unknown substance to table",
+        ],
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "gather_branch_evidence"
+    assert "look at unknown substance" in shortlist
+    assert "look at battery" in shortlist
+    assert "activate switch" in shortlist
+    assert "move unknown substance to freezer" not in shortlist
+    assert "move unknown substance to table" not in shortlist
+    assert "connect unknown substance to workshop" not in shortlist
+    assert "connect unknown substance to battery" not in shortlist
+
+
 def test_conditional_branch_transfer_execute_branch_prefers_selected_destination(
     tmp_path,
 ):
