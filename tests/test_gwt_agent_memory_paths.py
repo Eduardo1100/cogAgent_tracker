@@ -1198,6 +1198,124 @@ def test_shortlist_pivots_to_new_grounded_candidate_after_rejection(tmp_path):
     assert "focus on picture" not in shortlist
 
 
+def test_candidate_tracking_preserves_room_and_aliases_across_referent_shift(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) plant. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    agent._update_candidate_tracking(
+        executed_action="focus on adult pea plant",
+        observation="You focus on the pea plant.",
+        previous_observation="You move to the greenhouse.",
+    )
+    first_snapshot = agent._get_candidate_tracking_snapshot()
+    assert first_snapshot["active_candidate"] == "adult pea plant"
+    assert first_snapshot["active_candidate_room"] == "greenhouse"
+    assert "pea plant" in first_snapshot["active_candidate_aliases"]
+
+    agent._update_candidate_tracking(
+        executed_action="look at living thing in flower pot 3",
+        observation="a pea plant in the reproducing stage with a tall height.",
+        previous_observation="You move to the greenhouse.",
+    )
+    agent._update_candidate_tracking(
+        executed_action="move living thing in flower pot 3 to hallway",
+        observation="You move the pea plant to the hallway.",
+        previous_observation="a pea plant in the reproducing stage with a tall height.",
+    )
+
+    final_snapshot = agent._get_candidate_tracking_snapshot()
+    assert final_snapshot["active_candidate"] == "adult pea plant"
+    assert final_snapshot["active_candidate_room"] == "hallway"
+    assert any(
+        "flower pot 3" in alias for alias in final_snapshot["active_candidate_aliases"]
+    )
+
+
+def test_shortlist_reacquires_last_seen_candidate_room_before_support_room_drift(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) plant. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._update_candidate_tracking(
+        executed_action="focus on adult pea plant",
+        observation="You focus on the pea plant.",
+        previous_observation="You move to the greenhouse.",
+    )
+    inspect_entry = agent._get_hypothesis_entry("inspect")
+    inspect_entry["tests"] = 1
+    inspect_entry["evidence_attempts"] = 1
+    inspect_entry["status"] = "uncertain"
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see the agent. "
+            "You also see: A door to the greenhouse (that is open) "
+            "A door to the kitchen (that is open)"
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "go to greenhouse",
+            "go to kitchen",
+            "look at kitchen",
+            "open door to greenhouse",
+        ],
+        shortlist_limit=1,
+    )
+
+    assert summary["candidate_tracking"]["active_candidate_room"] == "greenhouse"
+    assert summary["task_relevant_action_shortlist"] == ["go to greenhouse"]
+
+
+def test_shortlist_prefers_alias_matched_candidate_relocation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) plant. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._active_candidate = "adult pea plant"
+    state = agent._get_candidate_state("adult pea plant")
+    state["focused"] = True
+    state["support_confirmed"] = True
+    state["last_seen_room"] = "hallway"
+    state["aliases"] = ["pea plant", "living thing flower pot 3"]
+    inspect_entry = agent._get_hypothesis_entry("inspect")
+    inspect_entry["tests"] = 1
+    inspect_entry["evidence_attempts"] = 1
+    inspect_entry["status"] = "uncertain"
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see a living thing in "
+            "flower pot 3 and a picture."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move living thing to kitchen",
+            "go to kitchen",
+            "look at picture",
+        ],
+        shortlist_limit=1,
+    )
+
+    assert summary["task_relevant_action_shortlist"] == ["move living thing to kitchen"]
+
+
 def test_custom_speaker_selection_repairs_malformed_thinking_output(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.thinking_agent = object()
