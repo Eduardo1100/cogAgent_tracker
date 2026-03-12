@@ -349,6 +349,12 @@ class GWTAutogenAgent(AutogenAgent):
         "way",
         "when",
     }
+    _ARTIFACT_CREATION_GENERIC_TOOL_PREAMBLES = (
+        "use chemistry to create",
+        "use chemistry to make",
+        "use chemistry to produce",
+        "use chemistry to synthesize",
+    )
     _CONDITIONAL_BRANCH_TASK_STOPWORDS = {
         "answer",
         "branch",
@@ -929,10 +935,24 @@ class GWTAutogenAgent(AutogenAgent):
         )
         required_families: list[str] = []
         family_hint_tokens: set[str] = set()
+        generic_artifact_use_preamble_only = (
+            artifact_creation_task
+            and self._artifact_creation_preamble_uses_generic_tool_hint_only(task_lower)
+        )
         for family, hints in self._TASK_FAMILY_HINTS.items():
-            if any(self._task_contains_hint(task_lower, hint) for hint in hints):
+            matched_hints = [
+                hint
+                for hint in hints
+                if self._task_contains_hint(task_lower, hint)
+                and not (
+                    family == "tool_application"
+                    and hint == "use"
+                    and generic_artifact_use_preamble_only
+                )
+            ]
+            if matched_hints:
                 required_families.append(family)
-                for hint in hints:
+                for hint in matched_hints:
                     family_hint_tokens.update(
                         self._extract_runtime_tokens(
                             hint,
@@ -1210,6 +1230,25 @@ class GWTAutogenAgent(AutogenAgent):
                 normalized_task,
             )
         )
+
+    def _artifact_creation_preamble_uses_generic_tool_hint_only(
+        self, task_text: str
+    ) -> bool:
+        normalized_task = re.sub(r"\s+", " ", task_text.strip().lower())
+        if not normalized_task:
+            return False
+
+        stripped_task = normalized_task
+        matched_preamble = False
+        for preamble in self._ARTIFACT_CREATION_GENERIC_TOOL_PREAMBLES:
+            stripped_task, replacements = re.subn(
+                rf"(?<![a-z0-9]){re.escape(preamble)}(?![a-z0-9])",
+                " ",
+                stripped_task,
+            )
+            if replacements:
+                matched_preamble = True
+        return matched_preamble and not self._task_contains_hint(stripped_task, "use")
 
     @staticmethod
     def _normalize_runtime_text(text: str) -> str:
