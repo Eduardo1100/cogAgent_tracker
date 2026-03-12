@@ -270,6 +270,26 @@ class GWTAutogenAgent(AutogenAgent):
         "cool": {"direction": "cool"},
         "chill": {"direction": "cool"},
     }
+    _STATE_CHANGE_TASK_STOPWORDS = {
+        "actions",
+        "also",
+        "boiling",
+        "combusting",
+        "combustion",
+        "without",
+        "will",
+    }
+    _MEASUREMENT_TASK_STOPWORDS = {
+        "above",
+        "below",
+        "celsius",
+        "degrees",
+        "degree",
+        "melting",
+        "next",
+        "point",
+        "which",
+    }
     _TASK_ENTITY_STOPWORDS = _TASK_STOPWORDS | {
         "acceptable",
         "action",
@@ -392,9 +412,19 @@ class GWTAutogenAgent(AutogenAgent):
         "bowl",
         "box",
         "bucket",
+        "cabinet",
+        "chest",
+        "closet",
         "container",
+        "cupboard",
+        "drawer",
+        "freezer",
+        "fridge",
         "jar",
+        "locker",
         "pot",
+        "refrigerator",
+        "shelf",
         "tray",
     }
     _STAGE_EVIDENCE_FILTER_TOKENS = _CONTAINER_REFERENT_TOKENS | {
@@ -600,6 +630,12 @@ class GWTAutogenAgent(AutogenAgent):
         self._candidate_states: dict[str, dict] = {}
         self._rejected_candidates: list[str] = []
         self._action_observation_signatures: dict[tuple[str, str, str], int] = {}
+        self._grounded_substances: dict[str, dict] = {}
+        self._exhausted_container_targets: list[str] = []
+        self._measurement_observations: list[dict] = []
+        self._selected_measurement_branch_target: str | None = None
+        self._containment_by_object: dict[str, str] = {}
+        self._invalid_exact_actions: dict[str, int] = {}
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -621,6 +657,29 @@ class GWTAutogenAgent(AutogenAgent):
             transformation_direction,
         ) = self._extract_state_change_goal(task)
         state_change_task = bool(desired_transformation)
+        (
+            measurement_property,
+            measurement_target,
+            measurement_instrument,
+            measurement_branch_targets,
+            measurement_branches,
+        ) = self._extract_measurement_contract(task)
+        measurement_task = bool(measurement_property and measurement_target)
+        measurement_branch_tokens: set[str] = set()
+        for branch_target in measurement_branch_targets:
+            measurement_branch_tokens.update(
+                self._extract_runtime_tokens(
+                    branch_target,
+                    stopwords=self._TASK_ENTITY_STOPWORDS
+                    | self._ACTION_COMMAND_STOPWORDS,
+                    limit=6,
+                )
+            )
+        measurement_numeric_tokens = {
+            token
+            for branch in measurement_branches
+            for token in re.findall(r"[0-9]+", str(branch["threshold"]))
+        }
         transformation_tokens = set(
             self._extract_runtime_tokens(
                 desired_transformation,
@@ -660,6 +719,11 @@ class GWTAutogenAgent(AutogenAgent):
                     )
 
         role_phrases = self._extract_task_role_phrases(task)
+        if measurement_task:
+            role_phrases["primary_targets"] = [measurement_target]
+            role_phrases["supporting_targets"] = []
+            if measurement_instrument:
+                role_phrases["supporting_targets"].append(measurement_instrument)
         if target_substances and (
             not role_phrases["primary_targets"]
             or all(
@@ -693,6 +757,8 @@ class GWTAutogenAgent(AutogenAgent):
             "required_relations",
             "candidate_classes",
             "target_substances",
+            "measurement_target",
+            "measurement_instrument",
             "destination_container",
             "destination_room",
         ):
@@ -701,6 +767,10 @@ class GWTAutogenAgent(AutogenAgent):
                 phrases = candidate_classes
             elif role == "target_substances":
                 phrases = target_substances
+            elif role == "measurement_target":
+                phrases = [measurement_target] if measurement_target else []
+            elif role == "measurement_instrument":
+                phrases = [measurement_instrument] if measurement_instrument else []
             elif role == "destination_container":
                 phrases = [destination_container] if destination_container else []
             elif role == "destination_room":
@@ -723,6 +793,10 @@ class GWTAutogenAgent(AutogenAgent):
                 | family_hint_tokens
                 | ordering_tokens
                 | transformation_tokens
+                | (self._STATE_CHANGE_TASK_STOPWORDS if state_change_task else set())
+                | (self._MEASUREMENT_TASK_STOPWORDS if measurement_task else set())
+                | (measurement_branch_tokens if measurement_task else set())
+                | (measurement_numeric_tokens if measurement_task else set())
             ),
             limit=8,
         )
@@ -741,11 +815,19 @@ class GWTAutogenAgent(AutogenAgent):
             "procedural_sequence": procedural_sequence,
             "lifecycle_sequence": lifecycle_sequence,
             "state_change_task": state_change_task,
+            "measurement_task": measurement_task,
             "search_mode": search_mode,
             "candidate_classes": candidate_classes,
             "primary_targets": role_phrases["primary_targets"],
             "supporting_targets": role_phrases["supporting_targets"],
             "target_substances": target_substances,
+            "measurement_property": measurement_property,
+            "measurement_target": [measurement_target] if measurement_target else [],
+            "measurement_instrument": (
+                [measurement_instrument] if measurement_instrument else []
+            ),
+            "measurement_branch_targets": measurement_branch_targets,
+            "measurement_branches": measurement_branches,
             "destination_container": (
                 [destination_container] if destination_container else []
             ),
@@ -788,6 +870,17 @@ class GWTAutogenAgent(AutogenAgent):
         transformation = task_contract.get("desired_transformation")
         if transformation and transformation not in keywords:
             keywords.append(transformation)
+        measurement_property = task_contract.get("measurement_property")
+        if measurement_property and measurement_property not in keywords:
+            keywords.append(measurement_property)
+        if self._selected_measurement_branch_target:
+            for token in self._extract_runtime_tokens(
+                self._selected_measurement_branch_target,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            ):
+                if token not in keywords:
+                    keywords.append(token)
         if keywords:
             return keywords
         return self._extract_runtime_tokens(self.task, stopwords=self._TASK_STOPWORDS)
@@ -846,9 +939,145 @@ class GWTAutogenAgent(AutogenAgent):
 
         return target_substances[:2], desired_transformation, transformation_direction
 
+    def _normalize_measurement_phrase(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+
+        normalized = re.split(
+            r"\b(?:that|which|where|because|since|until|while|then|and then)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:a|an|the)\s+", "", normalized)
+        normalized = normalized.strip(" .,:;")
+        tokens = self._extract_runtime_tokens(
+            normalized,
+            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(tokens[:4])
+
+    def _normalize_measurement_target_phrase(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+
+        normalized = re.split(
+            r"\b(?:that|which|where|because|since|until|while|then|and then)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:a|an|the)\s+", "", normalized)
+        normalized = normalized.strip(" .,:;")
+        active_stopwords = (self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS) - {
+            "substance"
+        }
+        raw_tokens = re.findall(r"[a-z0-9]+", normalized)
+        tokens: list[str] = []
+        for index, token in enumerate(raw_tokens):
+            if token in active_stopwords:
+                continue
+            if len(token) < 3 and not token.isdigit():
+                if index > 0 and raw_tokens[index - 1] == "substance":
+                    tokens.append(token)
+                continue
+            tokens.append(token)
+            if len(tokens) >= 5:
+                break
+        return " ".join(tokens[:5])
+
+    def _extract_measurement_contract(
+        self, task: str
+    ) -> tuple[str, str, str, list[str], list[dict]]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        measurement_property = ""
+        measurement_target = ""
+        measurement_instrument = ""
+        measurement_branch_targets: list[str] = []
+        measurement_branches: list[dict] = []
+
+        measure_patterns = (
+            r"\bmeasure\s+(?:the\s+)?(.+?)\s+of\s+(?:the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b|\bif\b)",
+            r"\bdetermine\s+(?:the\s+)?(.+?)\s+of\s+(?:the\s+)?(.+?)(?=$|[.;,\n]|\bfirst\b|\bthen\b|\band then\b|\bif\b)",
+        )
+        for pattern in measure_patterns:
+            match = re.search(pattern, normalized_task)
+            if not match:
+                continue
+            measurement_property = self._normalize_measurement_phrase(match.group(1))
+            measurement_target = self._normalize_measurement_target_phrase(
+                match.group(2)
+            )
+            if measurement_property and measurement_target:
+                break
+
+        if not (measurement_property and measurement_target):
+            return "", "", "", [], []
+
+        branch_pattern = re.compile(
+            r"\bif\s+(?:the\s+)?(.+?)\s+is\s+(above|below)\s+"
+            r"(-?\d+(?:\.\d+)?)\s*(?:degrees?\s+celsius)?"
+            r",?\s*focus on\s+(?:the\s+)?(.+?)(?=$|[.;,\n])"
+        )
+        for match in branch_pattern.finditer(normalized_task):
+            branch_target = self._normalize_task_phrase(
+                match.group(4), role="supporting_targets"
+            )
+            if not branch_target:
+                continue
+            measurement_branches.append(
+                {
+                    "condition": self._normalize_measurement_phrase(match.group(1)),
+                    "operator": match.group(2),
+                    "threshold": float(match.group(3)),
+                    "target": branch_target,
+                }
+            )
+            if branch_target not in measurement_branch_targets:
+                measurement_branch_targets.append(branch_target)
+
+        focus_targets = [
+            self._normalize_task_phrase(match.group(1), role="primary_targets")
+            for match in re.finditer(
+                r"\bfocus on\s+(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
+                normalized_task,
+            )
+        ]
+        for focus_target in focus_targets:
+            if not focus_target:
+                continue
+            if focus_target == measurement_target:
+                continue
+            if focus_target in measurement_branch_targets:
+                continue
+            measurement_instrument = focus_target
+            break
+
+        using_match = re.search(
+            r"\b(?:using|with)\s+(?:the\s+)?(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
+            normalized_task,
+        )
+        if not measurement_instrument and using_match:
+            measurement_instrument = self._normalize_task_phrase(
+                using_match.group(1), role="supporting_targets"
+            )
+
+        return (
+            measurement_property,
+            measurement_target,
+            measurement_instrument,
+            measurement_branch_targets[:2],
+            measurement_branches[:2],
+        )
+
     def _is_state_change_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("state_change_task"))
+
+    def _is_measurement_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("measurement_task"))
 
     def _state_change_target_is_grounded(
         self,
@@ -868,6 +1097,592 @@ class GWTAutogenAgent(AutogenAgent):
         ) or self._role_is_grounded(
             grounded_token_set, role_token_sets["primary_targets"]
         )
+
+    def _normalize_grounded_substance_label(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+
+        normalized = re.split(
+            r"\b(?:that|which|where|because|since|until|while|then|and then)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:a|an|the|some)\s+", "", normalized)
+        normalized = normalized.strip(" .,:;()")
+        if " and " in normalized:
+            return ""
+
+        tokens = self._extract_runtime_tokens(
+            normalized,
+            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=4,
+        )
+        if not tokens:
+            return ""
+        if set(tokens).issubset(self._CONTAINER_REFERENT_TOKENS):
+            return ""
+        return " ".join(tokens[:4])
+
+    def _extract_grounded_substance_mentions(self, observation: str) -> list[str]:
+        normalized_observation = self._normalize_runtime_text(observation)
+        if not normalized_observation:
+            return []
+
+        grounded_labels: list[str] = []
+        explicit_patterns = (
+            r"\b(?:a|an)\s+substance called\s+([a-z0-9][a-z0-9\s-]{0,40}?)(?=$|[).,;\n])",
+            r"\bcontaining\s+(?:a|an)\s+substance called\s+([a-z0-9][a-z0-9\s-]{0,40}?)(?=$|[).,;\n])",
+        )
+        contextual_patterns = (
+            r"\bfilled with\s+([a-z0-9][a-z0-9\s-]{0,30}?)(?=$|[).,;\n])",
+            r"\bcontaining\s+([a-z0-9][a-z0-9\s-]{0,30}?)(?=$|[).,;\n])",
+            r"\bcontains?\s+([a-z0-9][a-z0-9\s-]{0,30}?)(?=$|[).,;\n])",
+        )
+        for pattern in explicit_patterns:
+            for match in re.finditer(pattern, normalized_observation):
+                label = self._normalize_grounded_substance_label(match.group(1))
+                if label and label not in grounded_labels:
+                    grounded_labels.append(label)
+
+        target_token_sets = self._get_task_role_token_sets().get(
+            "target_substances", []
+        )
+        for pattern in contextual_patterns:
+            for match in re.finditer(pattern, normalized_observation):
+                label = self._normalize_grounded_substance_label(match.group(1))
+                if not label or label in grounded_labels:
+                    continue
+                label_tokens = set(
+                    self._extract_runtime_tokens(
+                        label,
+                        stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                    )
+                )
+                if not label_tokens:
+                    continue
+                if not self._matches_any_role(label_tokens, target_token_sets):
+                    continue
+                grounded_labels.append(label)
+        return grounded_labels[:6]
+
+    def _update_grounded_substances(self, observation: str) -> None:
+        if not self._is_state_change_task():
+            return
+        for label in self._extract_grounded_substance_mentions(observation):
+            entry = self._grounded_substances.setdefault(
+                label,
+                {
+                    "label": label,
+                    "last_seen_timestep": self.num_actions_taken,
+                },
+            )
+            entry["last_seen_timestep"] = self.num_actions_taken
+
+    def _get_grounded_substance_labels(self, *, limit: int = 6) -> list[str]:
+        labels = sorted(
+            self._grounded_substances.values(),
+            key=lambda item: (-item["last_seen_timestep"], item["label"]),
+        )
+        return [item["label"] for item in labels[:limit]]
+
+    def _get_grounded_substance_token_sets(self) -> list[set[str]]:
+        token_sets: list[set[str]] = []
+        for label in self._get_grounded_substance_labels():
+            tokens = set(
+                self._extract_runtime_tokens(
+                    label,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                )
+            )
+            if tokens:
+                token_sets.append(tokens)
+        return token_sets
+
+    def _extract_action_source_signature(
+        self, action: str, *, family: str | None = None
+    ) -> str:
+        normalized = self._normalize_runtime_text(action)
+        if not normalized or " from " not in normalized:
+            return ""
+
+        source_segment = normalized.rsplit(" from ", maxsplit=1)[-1]
+        source_tokens = self._extract_runtime_tokens(
+            source_segment,
+            stopwords=self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(source_tokens[:6])
+
+    def _update_state_change_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        if not self._is_state_change_task():
+            return
+        self._update_grounded_substances(observation)
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+
+        family = self._classify_action_family(action)
+        if family not in {"inspect", "device_control"}:
+            return
+
+        if not self._is_container_like_action(action, family=family):
+            return
+
+        grounded_tokens = set(self._get_observation_grounded_tokens())
+        if self._state_change_target_is_grounded(
+            self._get_task_contract(), grounded_tokens
+        ):
+            return
+
+        normalized = self._normalize_runtime_text(action)
+        if family != "inspect" and not normalized.startswith("open "):
+            return
+
+        referent = self._get_action_referent_signature(action, family=family)
+        if referent and referent not in self._exhausted_container_targets:
+            self._exhausted_container_targets.append(referent)
+            self._exhausted_container_targets = self._exhausted_container_targets[-8:]
+
+    def _infer_source_candidates(self, actions: list[str] | None = None) -> list[str]:
+        profiles: dict[str, dict[str, int | bool]] = {}
+        for action in actions or self.admissible_actions:
+            family = self._classify_action_family(action)
+            referent = self._get_action_referent_signature(action, family=family)
+            if referent:
+                profile = profiles.setdefault(
+                    referent,
+                    {
+                        "inspect": 0,
+                        "device_control": 0,
+                        "relocation": 0,
+                        "from_refs": 0,
+                        "container_like": False,
+                    },
+                )
+                if family in {"inspect", "device_control", "relocation"}:
+                    profile[family] += 1
+                if self._is_container_like_action(action, family=family):
+                    profile["container_like"] = True
+
+            source_referent = self._extract_action_source_signature(
+                action, family=family
+            )
+            if source_referent:
+                profile = profiles.setdefault(
+                    source_referent,
+                    {
+                        "inspect": 0,
+                        "device_control": 0,
+                        "relocation": 0,
+                        "from_refs": 0,
+                        "container_like": False,
+                    },
+                )
+                profile["from_refs"] += 1
+
+        ranked_candidates: list[tuple[int, str]] = []
+        exhausted_set = set(self._exhausted_container_targets)
+        grounded_substance_tokens = self._get_grounded_substance_token_sets()
+        for referent, profile in profiles.items():
+            referent_tokens = set(
+                self._extract_runtime_tokens(
+                    referent,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                    limit=6,
+                )
+            )
+            if not referent_tokens:
+                continue
+            if referent_tokens.issubset(self._NON_CANDIDATE_REFERENT_TOKENS):
+                continue
+            if any(
+                tokens and tokens.issubset(referent_tokens)
+                for tokens in grounded_substance_tokens
+            ):
+                continue
+
+            score = 0
+            if profile["from_refs"]:
+                score += 8 + int(profile["from_refs"]) * 3
+            if profile["inspect"]:
+                score += 2
+            if profile["device_control"]:
+                score += 2
+            if profile["relocation"]:
+                score -= 4
+            if profile["container_like"]:
+                score -= 5
+            if referent in exhausted_set:
+                score -= 6
+
+            if score > 0:
+                ranked_candidates.append((score, referent))
+
+        ranked_candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+        return [referent for _, referent in ranked_candidates[:4]]
+
+    def _get_substance_search_snapshot(self, actions: list[str] | None = None) -> dict:
+        if not self._is_state_change_task():
+            return {}
+        snapshot = {
+            "grounded_substances": self._get_grounded_substance_labels(limit=4),
+            "exhausted_containers": self._exhausted_container_targets[-4:],
+        }
+        source_candidates = self._infer_source_candidates(actions)
+        if source_candidates:
+            snapshot["source_candidates"] = source_candidates
+        return snapshot
+
+    @staticmethod
+    def _parse_numeric_measurement(observation: str) -> tuple[float | None, str]:
+        normalized = (observation or "").lower()
+        if not normalized:
+            return None, ""
+        match = re.search(
+            r"\b(?:temperature of|measures? a temperature of|reading a temperature of|reads?)\s+"
+            r"(-?\d+(?:\.\d+)?)\s*(degrees?\s+celsius|celsius|degrees?)?",
+            normalized,
+        )
+        if not match:
+            return None, ""
+        unit = re.sub(r"\s+", " ", (match.group(2) or "").strip())
+        return float(match.group(1)), unit
+
+    def _extract_action_destination_signature(
+        self, action: str, *, family: str | None = None
+    ) -> str:
+        family = family or self._classify_action_family(action)
+        if family not in {"relocation", "transfer_or_transform"}:
+            return ""
+
+        normalized = self._normalize_runtime_text(action)
+        if not normalized:
+            return ""
+
+        destination_match = re.search(
+            r"\b(?:to|into|in|on)\b\s+([a-z0-9][a-z0-9\s-]{0,60})$",
+            normalized,
+        )
+        if not destination_match:
+            return ""
+        destination_tokens = self._extract_runtime_tokens(
+            destination_match.group(1),
+            stopwords=self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(destination_tokens[:6])
+
+    def _referent_tokens(self, referent: str) -> set[str]:
+        return set(
+            self._extract_runtime_tokens(
+                referent,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=8,
+            )
+        )
+
+    def _phrase_to_referent_signature(self, phrase: str) -> str:
+        tokens = self._extract_runtime_tokens(
+            phrase,
+            stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(tokens[:6])
+
+    def _get_measurement_target_signature(
+        self, task_contract: dict | None = None
+    ) -> str:
+        contract = task_contract or self._get_task_contract()
+        measurement_target = contract.get("measurement_target", [])
+        if not measurement_target:
+            return ""
+        return self._phrase_to_referent_signature(measurement_target[0])
+
+    def _referent_is_visible(
+        self, referent: str, observation: str | None = None
+    ) -> bool:
+        referent_tokens = self._referent_tokens(referent)
+        if not referent_tokens:
+            return False
+        observation_tokens = set(
+            self._extract_runtime_tokens(
+                observation
+                if observation is not None
+                else (self.percept or {}).get("resulting_observation", ""),
+                limit=48,
+            )
+        )
+        return referent_tokens.issubset(observation_tokens)
+
+    def _resolve_enclosing_referent(self, referent: str) -> str:
+        current = referent
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(current)
+            parent = self._containment_by_object.get(current)
+            if not parent or parent == current:
+                break
+            current = parent
+        return current if current != referent else ""
+
+    def _update_containment_tracking(
+        self, action: str | None, observation: str
+    ) -> None:
+        if not action or self._HARD_FAILURE_RE.search(observation):
+            return
+        family = self._classify_action_family(action)
+        primary_object = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        destination = self._extract_action_destination_signature(action, family=family)
+        if primary_object and destination and primary_object != destination:
+            self._containment_by_object[primary_object] = destination
+
+    def _extract_measurement_subject_signature(
+        self, action: str, *, family: str | None = None
+    ) -> str:
+        family = family or self._classify_action_family(action)
+        normalized = self._normalize_runtime_text(action)
+        if family != "tool_application" or not normalized:
+            return ""
+        if normalized.startswith("use ") and " on " in normalized:
+            subject_segment = normalized.split(" on ", maxsplit=1)[-1]
+        elif normalized.startswith("measure ") and " with " in normalized:
+            subject_segment = normalized.split(" with ", maxsplit=1)[0][
+                len("measure ") :
+            ]
+        else:
+            return ""
+        subject_tokens = self._extract_runtime_tokens(
+            subject_segment,
+            stopwords=self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=6,
+        )
+        return " ".join(subject_tokens[:6])
+
+    def _measurement_property_requires_event(
+        self, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        property_text = self._normalize_runtime_text(
+            contract.get("measurement_property", "")
+        )
+        return "point" in property_text
+
+    def _measurement_property_event_detected(
+        self, observation: str, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._measurement_property_requires_event(contract):
+            return True
+
+        observation_lower = self._normalize_runtime_text(observation)
+        property_text = self._normalize_runtime_text(
+            contract.get("measurement_property", "")
+        )
+        event_patterns = [r"\bchanges? state\b", r"\btransforms?\b"]
+        if "melt" in property_text:
+            event_patterns.extend((r"\bmelt(?:s|ed|ing)?\b", r"\bliquid\b"))
+        if "boil" in property_text:
+            event_patterns.extend((r"\bboil(?:s|ed|ing)?\b", r"\bsteam\b"))
+        if "freeze" in property_text:
+            event_patterns.extend((r"\bfreez(?:e|es|ing|ed)\b", r"\bice\b"))
+        return any(re.search(pattern, observation_lower) for pattern in event_patterns)
+
+    def _update_measurement_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        self._update_containment_tracking(action, observation)
+        if not self._is_measurement_task() or not action or action == "None":
+            return
+
+        family = self._classify_action_family(action)
+        measurement_value, measurement_unit = self._parse_numeric_measurement(
+            observation
+        )
+        if measurement_value is None or family != "tool_application":
+            return
+
+        task_contract = self._get_task_contract()
+        role_token_sets = self._get_task_role_token_sets(task_contract)
+        subject_signature = self._extract_measurement_subject_signature(
+            action, family=family
+        )
+        subject_tokens = self._referent_tokens(subject_signature)
+        direct_measurement = bool(
+            subject_tokens
+            and self._matches_any_role(
+                subject_tokens, role_token_sets["measurement_target"]
+            )
+        )
+        active_enclosure = self._resolve_enclosing_referent(
+            self._get_measurement_target_signature(task_contract)
+        )
+        proxy_measurement = bool(
+            subject_signature
+            and not direct_measurement
+            and active_enclosure
+            and subject_signature == active_enclosure
+        )
+        event_confirmed = self._measurement_property_event_detected(
+            observation, task_contract
+        )
+        measurement_entry = {
+            "value": measurement_value,
+            "unit": measurement_unit,
+            "subject": subject_signature,
+            "direct": direct_measurement,
+            "proxy": proxy_measurement,
+            "event_confirmed": event_confirmed,
+            "timestep": self.num_actions_taken,
+        }
+        self._measurement_observations.append(measurement_entry)
+        self._measurement_observations = self._measurement_observations[-8:]
+
+        if not direct_measurement:
+            return
+        if self._selected_measurement_branch_target:
+            return
+
+        for branch in task_contract.get("measurement_branches", []):
+            operator = branch["operator"]
+            threshold = branch["threshold"]
+            if (
+                self._measurement_property_requires_event(task_contract)
+                and not event_confirmed
+            ):
+                continue
+            if operator == "above" and measurement_value > threshold:
+                self._selected_measurement_branch_target = branch["target"]
+                break
+            if operator == "below" and measurement_value < threshold:
+                self._selected_measurement_branch_target = branch["target"]
+                break
+
+    def _get_latest_measurement(self, *, direct: bool | None = None) -> dict | None:
+        for entry in reversed(self._measurement_observations):
+            if direct is None or entry["direct"] is direct:
+                return entry
+        return None
+
+    def _get_measurement_tracking_snapshot(self) -> dict:
+        if not self._is_measurement_task():
+            return {}
+        task_contract = self._get_task_contract()
+        snapshot = {
+            "measurement_target": task_contract.get("measurement_target", [])[:1],
+            "measurement_instrument": task_contract.get("measurement_instrument", [])[
+                :1
+            ],
+            "branch_target": (
+                [self._selected_measurement_branch_target]
+                if self._selected_measurement_branch_target
+                else []
+            ),
+        }
+        latest_direct = self._get_latest_measurement(direct=True)
+        latest_proxy = self._get_latest_measurement(direct=False)
+        if latest_direct:
+            snapshot["latest_direct_measurement"] = {
+                "value": latest_direct["value"],
+                "unit": latest_direct["unit"],
+                "subject": latest_direct["subject"],
+            }
+        if latest_proxy:
+            snapshot["latest_proxy_measurement"] = {
+                "value": latest_proxy["value"],
+                "unit": latest_proxy["unit"],
+                "subject": latest_proxy["subject"],
+            }
+        measurement_target = self._get_measurement_target_signature(task_contract)
+        active_enclosure = self._resolve_enclosing_referent(measurement_target)
+        if active_enclosure and not self._referent_is_visible(measurement_target):
+            snapshot["active_enclosure"] = [active_enclosure]
+        if task_contract.get("measurement_branch_targets"):
+            snapshot["branch_ready"] = bool(self._selected_measurement_branch_target)
+        return snapshot
+
+    @staticmethod
+    def _measurement_tracking_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
+
+    @staticmethod
+    def _substance_search_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
+
+    def _should_probe_sources(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_state_change_task(contract):
+            return False
+        grounded_tokens = set(self._get_observation_grounded_tokens())
+        if self._state_change_target_is_grounded(contract, grounded_tokens):
+            return False
+        snapshot = self._get_substance_search_snapshot()
+        return len(snapshot.get("exhausted_containers", [])) >= 2 and bool(
+            snapshot.get("source_candidates")
+        )
+
+    def _canonicalize_unsupported_substance_action(
+        self, suggested_action: str, admissible_commands: list[str]
+    ) -> str | None:
+        if not self._is_state_change_task():
+            return None
+
+        family = self._classify_action_family(suggested_action)
+        if family not in {
+            "focus",
+            "inspect",
+            "tool_application",
+            "transfer_or_transform",
+        }:
+            return None
+
+        suggested_tokens = set(
+            self._extract_action_content_tokens(suggested_action, family=family)
+        )
+        if not suggested_tokens or not (
+            suggested_tokens & self._CONTAINER_REFERENT_TOKENS
+        ):
+            return None
+
+        grounded_tokens = set(self._get_observation_grounded_tokens())
+        grounded_tokens.update(*self._get_grounded_substance_token_sets())
+        unsupported_tokens = {
+            token
+            for token in suggested_tokens
+            if token not in grounded_tokens
+            and token not in self._CONTAINER_REFERENT_TOKENS
+        }
+        if not unsupported_tokens:
+            return None
+
+        reduced_tokens = suggested_tokens - unsupported_tokens
+        if not reduced_tokens:
+            return None
+
+        candidates: list[tuple[int, int, str]] = []
+        for command in admissible_commands:
+            if self._classify_action_family(command) != family:
+                continue
+            command_tokens = set(
+                self._extract_action_content_tokens(command, family=family)
+            )
+            if not reduced_tokens.issubset(command_tokens):
+                continue
+            if not (command_tokens & self._CONTAINER_REFERENT_TOKENS):
+                continue
+            extra = len(command_tokens - reduced_tokens)
+            candidates.append((extra, len(command_tokens), command))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], item[1], len(item[2]), item[2]))
+        if len(candidates) > 1 and candidates[0][:2] == candidates[1][:2]:
+            return None
+        return candidates[0][2]
 
     def _extract_stage_labels(self, text: str) -> list[str]:
         normalized = self._normalize_runtime_text(text)
@@ -1154,6 +1969,9 @@ class GWTAutogenAgent(AutogenAgent):
             "required_relations",
             "candidate_classes",
             "target_substances",
+            "measurement_target",
+            "measurement_instrument",
+            "measurement_branch_targets",
             "destination_container",
             "destination_room",
         ):
@@ -1265,6 +2083,15 @@ class GWTAutogenAgent(AutogenAgent):
             if label not in tokens:
                 tokens.append(label)
 
+        for label in self._get_grounded_substance_labels(limit=4):
+            for token in self._extract_runtime_tokens(
+                label,
+                stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            ):
+                if token not in tokens:
+                    tokens.append(token)
+
         for token in observation_tokens:
             if token not in target_entities or token in tokens:
                 continue
@@ -1295,6 +2122,14 @@ class GWTAutogenAgent(AutogenAgent):
         self, token_set: set[str], role_token_sets: list[set[str]]
     ) -> bool:
         return any(tokens and tokens.issubset(token_set) for tokens in role_token_sets)
+
+    def _signature_matches_role(
+        self, signature: str, role_token_sets: list[set[str]]
+    ) -> bool:
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return False
+        return self._matches_any_role(signature_tokens, role_token_sets)
 
     def _is_support_referent(
         self, referent: str, task_contract: dict | None = None
@@ -1662,6 +2497,19 @@ class GWTAutogenAgent(AutogenAgent):
         if self._is_candidate_search_task() and self._is_support_referent(referent):
             return
 
+        if self._is_measurement_task():
+            task_contract = self._get_task_contract()
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            referent_tokens = self._referent_tokens(referent)
+            if (
+                referent_tokens
+                and self._matches_any_role(
+                    referent_tokens, role_token_sets["measurement_branch_targets"]
+                )
+                and referent != self._selected_measurement_branch_target
+            ):
+                return
+
         if referent and referent not in self._completed_focus_targets:
             self._completed_focus_targets.append(referent)
             self._completed_focus_targets = self._completed_focus_targets[-6:]
@@ -1698,14 +2546,65 @@ class GWTAutogenAgent(AutogenAgent):
                 break
         return list(reversed(invalid_actions))
 
+    def _record_invalid_exact_action(self, action: str | None) -> None:
+        normalized = self._normalize_runtime_text(action or "")
+        if not normalized:
+            return
+        self._invalid_exact_actions[normalized] = (
+            self._invalid_exact_actions.get(normalized, 0) + 1
+        )
+
     @staticmethod
     def _get_shortlist_family_quotas(current_phase: str) -> dict[str, int]:
         quotas_by_phase = {
+            "locate_instrument": {
+                "inspect": 3,
+                "focus": 2,
+                "device_control": 2,
+                "relocation": 2,
+                "tool_application": 1,
+            },
+            "locate_measured_target": {
+                "inspect": 3,
+                "focus": 2,
+                "device_control": 2,
+                "relocation": 2,
+                "tool_application": 1,
+            },
+            "measure_target": {
+                "tool_application": 3,
+                "inspect": 2,
+                "focus": 2,
+                "device_control": 2,
+                "relocation": 1,
+            },
+            "resolve_branch": {
+                "tool_application": 3,
+                "inspect": 3,
+                "device_control": 2,
+                "focus": 1,
+                "transfer_or_transform": 1,
+                "relocation": 1,
+            },
+            "execute_branch": {
+                "focus": 2,
+                "inspect": 2,
+                "relocation": 2,
+                "transfer_or_transform": 1,
+                "device_control": 1,
+            },
             "locate_substance": {
                 "inspect": 4,
                 "device_control": 3,
                 "relocation": 2,
                 "focus": 1,
+                "transfer_or_transform": 1,
+            },
+            "probe_sources": {
+                "inspect": 4,
+                "device_control": 4,
+                "focus": 1,
+                "relocation": 1,
                 "transfer_or_transform": 1,
             },
             "confirm_referent": {
@@ -1771,6 +2670,61 @@ class GWTAutogenAgent(AutogenAgent):
     @staticmethod
     def _get_family_priority(current_phase: str, family: str) -> int:
         priorities_by_phase = {
+            "locate_instrument": {
+                "focus": 7,
+                "inspect": 6,
+                "device_control": 5,
+                "relocation": 5,
+                "tool_application": 2,
+                "transfer_or_transform": -2,
+                "relation": -4,
+                "other": -2,
+                "idle": -5,
+            },
+            "locate_measured_target": {
+                "focus": 7,
+                "inspect": 6,
+                "device_control": 5,
+                "relocation": 5,
+                "tool_application": 3,
+                "transfer_or_transform": -2,
+                "relation": -4,
+                "other": -2,
+                "idle": -5,
+            },
+            "measure_target": {
+                "tool_application": 8,
+                "inspect": 6,
+                "focus": 5,
+                "device_control": 4,
+                "relocation": 2,
+                "transfer_or_transform": 1,
+                "relation": -3,
+                "other": -2,
+                "idle": -5,
+            },
+            "resolve_branch": {
+                "tool_application": 8,
+                "inspect": 7,
+                "device_control": 6,
+                "focus": 2,
+                "transfer_or_transform": 4,
+                "relocation": 1,
+                "relation": -3,
+                "other": -2,
+                "idle": -5,
+            },
+            "execute_branch": {
+                "focus": 7,
+                "inspect": 6,
+                "relocation": 5,
+                "transfer_or_transform": 4,
+                "device_control": 3,
+                "tool_application": 2,
+                "relation": -3,
+                "other": -2,
+                "idle": -5,
+            },
             "locate_substance": {
                 "inspect": 7,
                 "device_control": 7,
@@ -1780,6 +2734,17 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -2,
                 "relation": -4,
                 "other": -2,
+                "idle": -5,
+            },
+            "probe_sources": {
+                "inspect": 8,
+                "device_control": 8,
+                "focus": 1,
+                "relocation": 1,
+                "transfer_or_transform": -4,
+                "tool_application": -4,
+                "relation": -5,
+                "other": -3,
                 "idle": -5,
             },
             "confirm_referent": {
@@ -1913,13 +2878,34 @@ class GWTAutogenAgent(AutogenAgent):
             candidates.append((score, extra, command))
 
         if not candidates:
+            unsupported_substance_fallback = (
+                self._canonicalize_unsupported_substance_action(
+                    suggested_action, admissible_commands
+                )
+            )
+            if unsupported_substance_fallback is not None:
+                return unsupported_substance_fallback
             return suggested_action
 
         candidates.sort(key=lambda item: (-item[0], item[1], len(item[2]), item[2]))
         best_score, _, best_command = candidates[0]
         if best_score < 18:
+            unsupported_substance_fallback = (
+                self._canonicalize_unsupported_substance_action(
+                    suggested_action, admissible_commands
+                )
+            )
+            if unsupported_substance_fallback is not None:
+                return unsupported_substance_fallback
             return suggested_action
         if len(candidates) > 1 and best_score - candidates[1][0] < 4:
+            unsupported_substance_fallback = (
+                self._canonicalize_unsupported_substance_action(
+                    suggested_action, admissible_commands
+                )
+            )
+            if unsupported_substance_fallback is not None:
+                return unsupported_substance_fallback
             return suggested_action
         return best_command
 
@@ -2037,6 +3023,9 @@ class GWTAutogenAgent(AutogenAgent):
         candidate_target = self._get_candidate_action_target(
             executed_action or "", family=family, task_contract=task_contract
         )
+        measurement_subject = self._extract_measurement_subject_signature(
+            executed_action or "", family=family
+        )
 
         signal = 0
         if family in required_families and not (
@@ -2090,6 +3079,35 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             signal = max(signal - 2, 0)
 
+        if self._is_measurement_task(task_contract):
+            direct_measurement = self._signature_matches_role(
+                measurement_subject, role_token_sets["measurement_target"]
+            )
+            branch_target_action = self._signature_matches_role(
+                referent_signature, role_token_sets["measurement_branch_targets"]
+            )
+            selected_branch_action = (
+                referent_signature == self._selected_measurement_branch_target
+                and bool(self._selected_measurement_branch_target)
+            )
+            direct_value_entry = self._get_latest_measurement(direct=True)
+            if family == "tool_application":
+                if direct_measurement:
+                    signal += 2
+                elif measurement_subject:
+                    signal = min(signal, 1)
+            if branch_target_action and not self._selected_measurement_branch_target:
+                signal = 0
+            elif branch_target_action and selected_branch_action:
+                signal += 2
+            if (
+                direct_value_entry is not None
+                and direct_value_entry.get("subject") != measurement_subject
+                and family == "tool_application"
+                and measurement_subject
+            ):
+                signal = min(signal, 1)
+
         for command in self.percept.get("newly_admissible_actions", []):
             command_tokens = set(
                 self._extract_action_content_tokens(
@@ -2134,6 +3152,7 @@ class GWTAutogenAgent(AutogenAgent):
         if outcome == "invalid":
             entry["invalid_attempts"] += 1
             entry["confidence"] = max(0.0, entry["confidence"] - 0.2)
+            self._record_invalid_exact_action(executed_action or suggested_action)
         elif outcome == "observable_change":
             entry["observable_change_attempts"] += 1
             entry["confidence"] = min(1.0, entry["confidence"] + 0.1)
@@ -2236,12 +3255,41 @@ class GWTAutogenAgent(AutogenAgent):
         substance_grounded = self._state_change_target_is_grounded(
             task_contract, grounded_token_set
         )
+        grounded_substance_token_sets = self._get_grounded_substance_token_sets()
+        grounded_substance_hits, _ = self._best_role_overlap(
+            content_token_set, grounded_substance_token_sets
+        )
+        grounded_substance_match = self._has_full_role_match(
+            content_token_set, grounded_substance_token_sets
+        )
+        search_snapshot = self._get_substance_search_snapshot()
+        source_candidates = set(search_snapshot.get("source_candidates", []))
+        exhausted_containers = set(search_snapshot.get("exhausted_containers", []))
+        referent_signature = self._get_action_referent_signature(action, family=family)
+        source_signature = self._extract_action_source_signature(action, family=family)
+        source_candidate_match = bool(
+            (referent_signature and referent_signature in source_candidates)
+            or (source_signature and source_signature in source_candidates)
+        )
+        unsupported_substance_tokens = {
+            token
+            for token in content_token_set
+            if token not in grounded_token_set
+            and token not in self._CONTAINER_REFERENT_TOKENS
+            and not any(
+                token in token_set for token_set in grounded_substance_token_sets
+            )
+        }
         score = 0
 
         if substance_role_hits:
             score += substance_role_hits * 8
             if substance_full_match:
                 score += 6
+        if grounded_substance_hits:
+            score += grounded_substance_hits * 6
+            if grounded_substance_match:
+                score += 4
 
         if current_phase == "locate_substance":
             if family == "inspect":
@@ -2266,6 +3314,13 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 10
 
             if (
+                referent_signature
+                and referent_signature in exhausted_containers
+                and family in {"inspect", "device_control"}
+            ):
+                score -= 6
+
+            if (
                 content_token_set
                 and grounded_hits > 0
                 and target_hits == 0
@@ -2279,6 +3334,20 @@ class GWTAutogenAgent(AutogenAgent):
                 and not substance_role_hits
             ):
                 score -= 8
+
+        elif current_phase == "probe_sources":
+            if family in {"inspect", "device_control"}:
+                score += 10 if source_candidate_match else -4
+                if family == "inspect" and normalized.startswith("look at "):
+                    score += 3
+                if family == "device_control" and normalized.startswith("open "):
+                    score += 2
+            elif family == "focus":
+                score += 3 if substance_full_match or grounded_substance_match else -14
+            elif family in {"tool_application", "transfer_or_transform", "relation"}:
+                score -= 16
+            elif family == "relocation":
+                score -= 10
 
         elif current_phase == "confirm_referent":
             if family == "focus":
@@ -2328,6 +3397,206 @@ class GWTAutogenAgent(AutogenAgent):
                 and not substance_role_hits
             ):
                 score -= 6
+        if (
+            family in {"focus", "inspect", "tool_application", "transfer_or_transform"}
+            and unsupported_substance_tokens
+            and not grounded_substance_match
+            and self._is_container_like_action(action, family=family)
+        ):
+            score -= 14
+        if (
+            source_candidates
+            and current_phase == "locate_substance"
+            and source_candidate_match
+        ):
+            score += 5
+
+        return score
+
+    def _score_measurement_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        content_token_set: set[str],
+        grounded_token_set: set[str],
+        task_contract: dict,
+        role_token_sets: dict[str, list[set[str]]],
+    ) -> int:
+        if not self._is_measurement_task(task_contract):
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        referent_signature = self._get_action_referent_signature(action, family=family)
+        primary_signature = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        measurement_subject = self._extract_measurement_subject_signature(
+            action, family=family
+        )
+        measurement_target = task_contract.get("measurement_target", [""])
+        measurement_target = (
+            self._get_measurement_target_signature(task_contract)
+            if measurement_target
+            else ""
+        )
+        active_enclosure = self._resolve_enclosing_referent(measurement_target)
+        target_hidden = bool(active_enclosure) and not self._referent_is_visible(
+            measurement_target
+        )
+
+        referent_matches_target = self._signature_matches_role(
+            referent_signature, role_token_sets["measurement_target"]
+        )
+        primary_matches_target = self._signature_matches_role(
+            primary_signature, role_token_sets["measurement_target"]
+        )
+        subject_matches_target = self._signature_matches_role(
+            measurement_subject, role_token_sets["measurement_target"]
+        )
+        instrument_primary_match = self._signature_matches_role(
+            primary_signature, role_token_sets["measurement_instrument"]
+        )
+        instrument_referent_match = self._signature_matches_role(
+            referent_signature, role_token_sets["measurement_instrument"]
+        )
+        branch_referent_match = self._signature_matches_role(
+            referent_signature, role_token_sets["measurement_branch_targets"]
+        )
+        selected_branch_match = bool(
+            self._selected_measurement_branch_target
+            and referent_signature == self._selected_measurement_branch_target
+        )
+        touches_active_enclosure = bool(
+            active_enclosure
+            and active_enclosure
+            in {
+                referent_signature,
+                measurement_subject,
+                primary_signature,
+            }
+        )
+        latest_direct_measurement = self._get_latest_measurement(direct=True)
+        direct_measurement_ready = latest_direct_measurement is not None
+        score = 0
+
+        if current_phase == "locate_instrument":
+            if family == "focus":
+                score += (
+                    18 if referent_matches_target or instrument_referent_match else -8
+                )
+            elif family == "inspect":
+                score += 10 if instrument_referent_match else 2
+            elif family == "relocation" and instrument_referent_match:
+                score += 6
+            elif family == "tool_application" and instrument_primary_match:
+                score += 4
+
+        elif current_phase == "locate_measured_target":
+            if family == "focus":
+                score += 18 if referent_matches_target else -8
+            elif family == "inspect":
+                score += (
+                    10 if (referent_matches_target or primary_matches_target) else 2
+                )
+            elif family == "tool_application" and subject_matches_target:
+                score += 6
+
+        elif current_phase == "measure_target":
+            if family == "tool_application":
+                if subject_matches_target and instrument_primary_match:
+                    score += 22
+                    if target_hidden:
+                        score -= 30
+                elif touches_active_enclosure and instrument_primary_match:
+                    score += 8
+                else:
+                    score -= 10
+            elif family == "focus":
+                if referent_matches_target or instrument_referent_match:
+                    score += 8
+            elif family == "inspect":
+                if referent_matches_target or touches_active_enclosure:
+                    score += 8
+
+        elif current_phase == "resolve_branch":
+            if family == "tool_application":
+                if subject_matches_target and instrument_primary_match:
+                    score += 16
+                    if target_hidden:
+                        score -= 30
+                elif touches_active_enclosure and instrument_primary_match:
+                    score += 6
+                else:
+                    score -= 8
+            elif family in {"inspect", "device_control"}:
+                if touches_active_enclosure:
+                    score += 12
+                elif referent_matches_target:
+                    score += 8
+            elif family in {"transfer_or_transform", "relocation"}:
+                if referent_matches_target or touches_active_enclosure:
+                    score += 6
+                else:
+                    score -= 8
+            elif family == "focus":
+                score += 4 if referent_matches_target else -6
+
+        elif current_phase == "execute_branch":
+            if family == "focus":
+                score += (
+                    18 if selected_branch_match else -10 if branch_referent_match else 0
+                )
+            elif family in {"inspect", "relocation", "transfer_or_transform"}:
+                score += (
+                    12 if selected_branch_match else -8 if branch_referent_match else 0
+                )
+            elif branch_referent_match:
+                score -= 6
+
+        if branch_referent_match and not self._selected_measurement_branch_target:
+            score -= 18
+        if branch_referent_match and not selected_branch_match:
+            score -= 10
+
+        if (
+            target_hidden
+            and not touches_active_enclosure
+            and (
+                referent_matches_target
+                or primary_matches_target
+                or subject_matches_target
+            )
+        ):
+            score -= 24
+            if family == "tool_application" and subject_matches_target:
+                score -= 72
+            elif family in {"focus", "inspect"} and referent_matches_target:
+                score -= 48
+        if (
+            target_hidden
+            and touches_active_enclosure
+            and family
+            in {
+                "inspect",
+                "device_control",
+                "tool_application",
+            }
+        ):
+            score += 14
+        if (
+            direct_measurement_ready
+            and family == "tool_application"
+            and not subject_matches_target
+            and not touches_active_enclosure
+        ):
+            score -= 10
+        if (
+            normalized in self._invalid_exact_actions
+            and self._invalid_exact_actions[normalized] > 0
+        ):
+            score -= 18 + self._invalid_exact_actions[normalized] * 4
 
         return score
 
@@ -2335,12 +3604,33 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
+        if self._is_measurement_task(task_contract):
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            if task_contract.get(
+                "measurement_instrument"
+            ) and not self._role_focus_completed(
+                role_token_sets["measurement_instrument"]
+            ):
+                return "locate_instrument"
+            if task_contract.get(
+                "measurement_target"
+            ) and not self._role_focus_completed(role_token_sets["measurement_target"]):
+                return "locate_measured_target"
+            if self._get_latest_measurement(direct=True) is None:
+                return "measure_target"
+            if task_contract.get("measurement_branch_targets"):
+                if self._selected_measurement_branch_target:
+                    return "execute_branch"
+                return "resolve_branch"
+            return "measure_target"
         if self._is_state_change_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             role_token_sets = self._get_task_role_token_sets(task_contract)
             if not self._state_change_target_is_grounded(
                 task_contract, grounded_tokens
             ):
+                if self._should_probe_sources(task_contract):
+                    return "probe_sources"
                 return "locate_substance"
             if "focus" in task_contract.get(
                 "required_families", []
@@ -2445,6 +3735,7 @@ class GWTAutogenAgent(AutogenAgent):
             role_token_sets["primary_targets"]
         )
         state_change_task = self._is_state_change_task(task_contract)
+        measurement_task = self._is_measurement_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
             self._observed_stage_labels
@@ -2564,6 +3855,9 @@ class GWTAutogenAgent(AutogenAgent):
                 score -= 2
         if family == "other":
             score -= 2
+        invalid_repeat_count = self._invalid_exact_actions.get(normalized, 0)
+        if invalid_repeat_count:
+            score -= 12 + invalid_repeat_count * 4
         if recent_repeat_count >= 2 and family in {"focus", "inspect"}:
             score -= 10
         elif recent_repeat_count >= 1 and family in {"focus", "inspect"}:
@@ -2643,6 +3937,16 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+        elif measurement_task:
+            score += self._score_measurement_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                content_token_set=content_token_set,
+                grounded_token_set=grounded_token_set,
+                task_contract=task_contract,
+                role_token_sets=role_token_sets,
+            )
         elif state_change_task:
             score += self._score_state_change_action(
                 action=action,
@@ -2806,6 +4110,8 @@ class GWTAutogenAgent(AutogenAgent):
             for entry in self.episode_hypothesis_ledger.values()
             if entry["status"] == "deprioritized"
         )
+        substance_search = self._get_substance_search_snapshot(actions)
+        measurement_tracking = self._get_measurement_tracking_snapshot()
 
         return {
             "total_actions": len(actions),
@@ -2816,6 +4122,8 @@ class GWTAutogenAgent(AutogenAgent):
             "deprioritized_families": deprioritized_families,
             "candidate_tracking": self._get_candidate_tracking_snapshot(),
             "task_contract": task_contract,
+            "substance_search": substance_search,
+            "measurement_tracking": measurement_tracking,
         }
 
     def _build_shared_action_context(self) -> dict:
@@ -2854,6 +4162,20 @@ class GWTAutogenAgent(AutogenAgent):
                 + json.dumps(candidate_tracking)
                 + "\n"
             )
+        substance_search = summary.get("substance_search", {})
+        if self._substance_search_has_signal(substance_search):
+            extra_context += (
+                "Substance search state this episode: "
+                + json.dumps(substance_search)
+                + "\n"
+            )
+        measurement_tracking = summary.get("measurement_tracking", {})
+        if self._measurement_tracking_has_signal(measurement_tracking):
+            extra_context += (
+                "Measurement state this episode: "
+                + json.dumps(measurement_tracking)
+                + "\n"
+            )
         if self.percept.get("referent_resolution"):
             extra_context += (
                 "Latest referent resolution warning: "
@@ -2869,6 +4191,8 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
             + f"Task contract: {json.dumps(summary['task_contract'])}\n"
+            + f"Substance search snapshot: {json.dumps(summary['substance_search'])}\n"
+            + f"Measurement tracking snapshot: {json.dumps(summary['measurement_tracking'])}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
             + extra_context
@@ -3143,6 +4467,14 @@ class GWTAutogenAgent(AutogenAgent):
             "task_status": self.task_status,
             "action_attempts_left": self.max_actions - self.num_actions_taken,
         }
+        self._update_state_change_search_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
+        self._update_measurement_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
         task_contract = self._get_task_contract()
         if any(task_contract.values()):
             self.percept["task_contract"] = task_contract
@@ -3157,6 +4489,12 @@ class GWTAutogenAgent(AutogenAgent):
                 "required_families"
             ],
         }
+        substance_search = shared_action_context.get("substance_search", {})
+        if self._substance_search_has_signal(substance_search):
+            self.percept["substance_search"] = substance_search
+        measurement_tracking = shared_action_context.get("measurement_tracking", {})
+        if self._measurement_tracking_has_signal(measurement_tracking):
+            self.percept["measurement_tracking"] = measurement_tracking
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
         ]
