@@ -2285,14 +2285,60 @@ class GWTAutogenAgent(AutogenAgent):
         if target_grounded:
             return
 
-        normalized = self._normalize_runtime_text(action)
-        if family != "inspect" and not normalized.startswith("open "):
+        if not self._observation_confirms_container_probe(
+            action, observation, family=family
+        ):
             return
 
         referent = self._get_action_referent_signature(action, family=family)
         if referent and referent not in self._exhausted_container_targets:
             self._exhausted_container_targets.append(referent)
             self._exhausted_container_targets = self._exhausted_container_targets[-8:]
+
+    def _observation_confirms_container_probe(
+        self,
+        action: str,
+        observation: str,
+        *,
+        family: str | None = None,
+    ) -> bool:
+        family = family or self._classify_action_family(action)
+        if family not in {"inspect", "device_control"}:
+            return False
+        if not self._is_container_like_action(action, family=family):
+            return False
+
+        normalized_action = self._normalize_runtime_text(action)
+        if family == "device_control" and not normalized_action.startswith("open "):
+            return False
+
+        referent = self._get_action_referent_signature(action, family=family)
+        normalized_observation = self._normalize_runtime_text(observation)
+        if not referent or not normalized_observation:
+            return False
+
+        referent_pattern = re.escape(referent)
+        if re.search(
+            rf"\b(?:the )?{referent_pattern}\b[^.\n]*\bclosed\b",
+            normalized_observation,
+        ):
+            return False
+
+        if family == "inspect" and re.search(
+            rf"\b(?:the )?{referent_pattern}\b[^.\n]*\bopen\b",
+            normalized_observation,
+        ):
+            return True
+
+        reveal_patterns = (
+            rf"\binside (?:the )?{referent_pattern}\b",
+            rf"\bin (?:the )?{referent_pattern}\b",
+            rf"\b(?:the )?{referent_pattern}\b[^.\n]*\bcontains?\b",
+            rf"\b(?:the )?{referent_pattern}\b[^.\n]*\bcontaining\b",
+        )
+        return any(
+            re.search(pattern, normalized_observation) for pattern in reveal_patterns
+        )
 
     def _infer_source_candidates(self, actions: list[str] | None = None) -> list[str]:
         profiles: dict[str, dict[str, int | bool]] = {}
