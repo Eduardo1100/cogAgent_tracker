@@ -783,10 +783,10 @@ def parse_arguments():
         help="Games to evaluate per split. -1 means all games (default).",
     )
     parser.add_argument(
-        "--max_actions", type=int, default=35, help="Max environment actions per game"
+        "--max_actions", type=int, default=15, help="Max environment actions per game"
     )
     parser.add_argument(
-        "--max_chat_rounds", type=int, default=150, help="Max chat rounds per game"
+        "--max_chat_rounds", type=int, default=75, help="Max chat rounds per game"
     )
     parser.add_argument(
         "--rag_episode_k",
@@ -803,7 +803,7 @@ def parse_arguments():
     parser.add_argument(
         "--rag_episode_k_initial",
         type=int,
-        default=10,
+        default=5,
         help="Episodes injected in the initial message (start-of-game RAG)",
     )
     parser.add_argument(
