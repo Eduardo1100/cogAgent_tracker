@@ -94,6 +94,7 @@
     - `agent-iter-31-state-change-probe-confirmation`
     - `agent-iter-32-focus-first-candidate-grounding`
     - `agent-iter-33-measurement-heater-escalation`
+    - `agent-iter-34-artifact-chemistry-guardrail`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.

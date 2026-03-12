@@ -3451,6 +3451,7 @@ def test_artifact_creation_task_contract_tracks_artifact_roles_and_cleans_tokens
     contract = agent._get_task_contract()
 
     assert contract["artifact_creation_task"] is True
+    assert contract["required_families"] == ["focus"]
     assert contract["artifact_type"] == ["paint"]
     assert contract["artifact_intermediate_targets"] == [
         "intermediate secondary color paint"
@@ -3462,6 +3463,20 @@ def test_artifact_creation_task_contract_tracks_artifact_roles_and_cleans_tokens
     assert "part" not in contract["target_entities"]
     assert "way" not in contract["target_entities"]
     assert "done" not in contract["target_entities"]
+
+
+def test_artifact_creation_contract_keeps_explicit_use_hints(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Use chemistry to create green-blue paint. Use the mixer. "
+        "When part-way done, focus on the intermediate (secondary color) paint. "
+        "When completely done, focus on the green paint."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["artifact_creation_task"] is True
+    assert contract["required_families"] == ["focus", "tool_application"]
 
 
 def test_artifact_creation_shortlist_prefers_missing_ingredient_search_to_empty_transfer(
