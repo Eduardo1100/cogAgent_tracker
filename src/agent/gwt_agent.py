@@ -5245,6 +5245,7 @@ class GWTAutogenAgent(AutogenAgent):
             return
 
         referent = self._get_action_referent_signature(executed_action, family=family)
+        task_contract = self._get_task_contract()
         if self._is_lifecycle_task():
             stage_labels = self._get_focus_stage_labels(executed_action, observation)
             if not stage_labels:
@@ -5258,8 +5259,19 @@ class GWTAutogenAgent(AutogenAgent):
             self._focused_stage_labels = self._focused_stage_labels[-6:]
             return
 
-        if self._is_candidate_search_task() and self._is_support_referent(referent):
-            return
+        if self._is_candidate_search_task(task_contract):
+            candidate_target = self._get_candidate_action_target(
+                executed_action,
+                family=family,
+                task_contract=task_contract,
+            )
+            if (
+                "focus" in task_contract.get("required_families", [])
+                and not candidate_target
+            ):
+                return
+            if self._is_support_referent(referent, task_contract):
+                return
 
         if self._is_measurement_task():
             task_contract = self._get_task_contract()
@@ -8472,6 +8484,14 @@ class GWTAutogenAgent(AutogenAgent):
             candidate_reset_required = bool(
                 self._rejected_candidates and not self._active_candidate
             )
+            candidate_identification_pending = bool(
+                "focus" in required_families and not self._active_candidate
+            )
+            room_like_referent = self._signature_looks_like_room(
+                referent_signature,
+                current_observation,
+                current_observation,
+            )
             if self._remote_room_signal_has_signal(remote_room_signal):
                 if family == "relocation":
                     if remote_room_navigation_action:
@@ -8500,6 +8520,26 @@ class GWTAutogenAgent(AutogenAgent):
                     "tool_application",
                 }:
                     score -= 16
+            if candidate_identification_pending:
+                if family == "focus":
+                    if candidate_target:
+                        score += 22
+                    elif support_referent or room_like_referent:
+                        score -= 28
+                    elif referent_signature:
+                        score -= 12
+                elif family == "inspect" and candidate_target:
+                    score += 12
+                elif (
+                    family in {"relocation", "transfer_or_transform"}
+                    and not agent_navigation_action
+                ):
+                    if candidate_target:
+                        score -= 48
+                    elif support_referent:
+                        score -= 18
+                    elif referent_signature:
+                        score -= 22
             if family == "focus" and support_referent:
                 score -= 24
             elif family == "inspect" and support_referent:
@@ -8548,7 +8588,7 @@ class GWTAutogenAgent(AutogenAgent):
                             score += 4
                 elif destination_container_referent:
                     if family in {"focus", "inspect"}:
-                        score -= 44
+                        score -= 80
                     elif family in {
                         "relocation",
                         "transfer_or_transform",

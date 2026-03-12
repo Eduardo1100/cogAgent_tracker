@@ -1320,6 +1320,30 @@ def test_support_entities_do_not_count_as_completed_focus_targets(tmp_path):
     ]
 
 
+def test_candidate_search_ignores_room_label_focus_progress_for_generic_target(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_ordered_target_progress(
+        executed_action="focus on living room",
+        observation="You focus on the living room.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on pea plant",
+        observation="You focus on the pea plant.",
+    )
+
+    assert agent._get_ordered_target_snapshot()["completed_focus_targets"] == [
+        "pea plant"
+    ]
+
+
 def test_repeated_support_confirmation_becomes_stalled_not_new_evidence(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
@@ -1509,6 +1533,41 @@ def test_shortlist_reopens_room_context_after_rejected_container_candidate(tmp_p
     assert shortlist[:2] == ["focus on bowl", "look at kitchen"]
     assert "move picture to red box" not in shortlist[:3]
     assert "look at red box" not in shortlist[:3]
+
+
+def test_shortlist_requires_focus_before_relocating_new_candidate(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    inspect_entry = agent._get_hypothesis_entry("inspect")
+    inspect_entry["tests"] = 1
+    inspect_entry["evidence_attempts"] = 1
+    inspect_entry["status"] = "uncertain"
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a bowl, "
+            "a picture, and a red box. You also see: A door to the hallway "
+            "(that is open)"
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move bowl to red box",
+            "focus on bowl",
+            "look at picture",
+            "go to hallway",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert shortlist[0] == "focus on bowl"
+    assert "move bowl to red box" not in shortlist[:2]
 
 
 def test_candidate_tracking_preserves_room_and_aliases_across_referent_shift(
