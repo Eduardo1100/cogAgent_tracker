@@ -34,6 +34,7 @@ class GWTAutogenAgent(AutogenAgent):
         "all",
         "an",
         "and",
+        "are",
         "around",
         "as",
         "at",
@@ -234,6 +235,10 @@ class GWTAutogenAgent(AutogenAgent):
         "starting",
         "whether",
     }
+    _REFERENT_SIGNATURE_STOPWORDS = {
+        "self",
+        "watering",
+    }
     _ACTION_FAMILY_PREFIXES = (
         (
             (
@@ -415,6 +420,8 @@ class GWTAutogenAgent(AutogenAgent):
         self.recent_hypothesis_tests: list[dict] = []
         self._provider_fallbacks_applied: set[str] = set()
         self._last_action_shortlist: list[str] = []
+        self._completed_focus_targets: list[str] = []
+        self._referent_resolution_events: list[dict] = []
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -426,7 +433,9 @@ class GWTAutogenAgent(AutogenAgent):
                 for hint in hints:
                     family_hint_tokens.update(
                         self._extract_runtime_tokens(
-                            hint, stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
+                            hint,
+                            stopwords=self._TASK_STOPWORDS
+                            | self._ACTION_COMMAND_STOPWORDS,
                         )
                     )
 
@@ -439,11 +448,12 @@ class GWTAutogenAgent(AutogenAgent):
                     ordering_tokens.update(
                         self._extract_runtime_tokens(
                             hint,
-                            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                            stopwords=self._TASK_STOPWORDS
+                            | self._ACTION_COMMAND_STOPWORDS,
                         )
                     )
 
-        target_entities = self._extract_runtime_tokens(
+        raw_target_entities = self._extract_runtime_tokens(
             task,
             stopwords=self._TASK_ENTITY_STOPWORDS
             | self._ACTION_COMMAND_STOPWORDS
@@ -451,6 +461,12 @@ class GWTAutogenAgent(AutogenAgent):
             | ordering_tokens,
             limit=8,
         )
+        target_entities: list[str] = []
+        raw_target_set = set(raw_target_entities)
+        for token in raw_target_entities:
+            if token.endswith("s") and token[:-1] in raw_target_set:
+                continue
+            target_entities.append(token)
 
         return {
             "required_families": required_families,
@@ -472,7 +488,10 @@ class GWTAutogenAgent(AutogenAgent):
         if not normalized_hint:
             return False
         return bool(
-            re.search(rf"(?<![a-z0-9]){re.escape(normalized_hint)}(?![a-z0-9])", normalized_task)
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_hint)}(?![a-z0-9])",
+                normalized_task,
+            )
         )
 
     @staticmethod
@@ -492,7 +511,7 @@ class GWTAutogenAgent(AutogenAgent):
         active_stopwords = stopwords or self._RUNTIME_TOKEN_STOPWORDS
         tokens = []
         for token in re.findall(r"[a-z0-9]+", (text or "").lower()):
-            if len(token) < 3 or token in active_stopwords:
+            if (len(token) < 3 and not token.isdigit()) or token in active_stopwords:
                 continue
             if token not in tokens:
                 tokens.append(token)
@@ -500,15 +519,38 @@ class GWTAutogenAgent(AutogenAgent):
                 break
         return tokens
 
+    def _extract_current_location_tokens(self, observation: str) -> list[str]:
+        patterns = (
+            r"\b(?:room|location)\s+is\s+called\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
+            r"\byou\s+are\s+in\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
+        )
+        location_tokens: list[str] = []
+        for pattern in patterns:
+            match = re.search(pattern, (observation or "").lower())
+            if not match:
+                continue
+            for token in self._extract_runtime_tokens(match.group(1), limit=4):
+                if token not in location_tokens:
+                    location_tokens.append(token)
+            if location_tokens:
+                break
+        return location_tokens
+
     def _get_observation_grounded_tokens(self) -> list[str]:
         tokens: list[str] = []
         percept = getattr(self, "percept", {}) or {}
+        observation = percept.get("resulting_observation", "")
+        observation_tokens = self._extract_runtime_tokens(observation, limit=36)
+        target_entities = set(self._get_task_contract().get("target_entities", []))
 
-        for token in self._extract_runtime_tokens(
-            percept.get("resulting_observation", ""), limit=10
-        ):
+        for token in self._extract_current_location_tokens(observation):
             if token not in tokens:
                 tokens.append(token)
+
+        for token in observation_tokens:
+            if token not in target_entities or token in tokens:
+                continue
+            tokens.append(token)
 
         for test in reversed(self.recent_hypothesis_tests):
             if test["outcome"] not in {"observable_change", "evidence"}:
@@ -519,15 +561,91 @@ class GWTAutogenAgent(AutogenAgent):
             if len(tokens) >= 12:
                 break
 
+        for token in observation_tokens:
+            if token not in tokens:
+                tokens.append(token)
+            if len(tokens) >= 12:
+                break
+
         return tokens[:12]
 
-    def _extract_action_content_tokens(self, action: str, family: str | None = None) -> list[str]:
+    def _extract_action_content_tokens(
+        self, action: str, family: str | None = None
+    ) -> list[str]:
         stopwords = self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
         content_tokens = self._extract_runtime_tokens(action, stopwords=stopwords)
         if family == "device_control":
             # Keeping "door" helps navigation/opening tasks stay grounded.
             return content_tokens
         return content_tokens
+
+    def _get_action_referent_signature(
+        self, action: str, *, family: str | None = None
+    ) -> str:
+        referent_tokens = [
+            token
+            for token in self._extract_action_content_tokens(action, family=family)
+            if token not in self._REFERENT_SIGNATURE_STOPWORDS
+        ]
+        if not referent_tokens:
+            referent_tokens = self._extract_action_content_tokens(action, family=family)
+        return " ".join(referent_tokens[:6])
+
+    def _record_referent_resolution(
+        self, *, suggested_action: str, canonical_action: str
+    ) -> dict | None:
+        suggested_family = self._classify_action_family(suggested_action)
+        canonical_family = self._classify_action_family(canonical_action)
+        if suggested_family != canonical_family:
+            return None
+
+        requested_target = self._get_action_referent_signature(
+            suggested_action, family=suggested_family
+        )
+        resolved_target = self._get_action_referent_signature(
+            canonical_action, family=canonical_family
+        )
+        if (
+            not requested_target
+            or not resolved_target
+            or requested_target == resolved_target
+        ):
+            return None
+
+        resolution = {
+            "status": "ambiguous",
+            "requested_target": requested_target,
+            "resolved_target": resolved_target,
+        }
+        if resolution not in self._referent_resolution_events:
+            self._referent_resolution_events.append(resolution)
+            self._referent_resolution_events = self._referent_resolution_events[-4:]
+        return resolution
+
+    def _update_ordered_target_progress(
+        self, *, executed_action: str | None, observation: str
+    ) -> None:
+        if executed_action is None:
+            return
+
+        family = self._classify_action_family(executed_action)
+        if family != "focus":
+            return
+
+        normalized_observation = self._normalize_runtime_text(observation)
+        if not normalized_observation.startswith("you focus on"):
+            return
+
+        referent = self._get_action_referent_signature(executed_action, family=family)
+        if referent and referent not in self._completed_focus_targets:
+            self._completed_focus_targets.append(referent)
+            self._completed_focus_targets = self._completed_focus_targets[-6:]
+
+    def _get_ordered_target_snapshot(self) -> dict:
+        return {
+            "completed_focus_targets": self._completed_focus_targets[-4:],
+            "ambiguous_focus_targets": self._referent_resolution_events[-3:],
+        }
 
     def _get_recent_invalid_actions(self, *, limit: int = 4) -> list[str]:
         invalid_actions: list[str] = []
@@ -660,31 +778,36 @@ class GWTAutogenAgent(AutogenAgent):
         if not suggested_tokens:
             return suggested_action
 
-        best_command = suggested_action
-        best_score = float("-inf")
+        candidates: list[tuple[int, int, str]] = []
         for command in admissible_commands:
             if self._classify_action_family(command) != family:
                 continue
             command_tokens = set(
                 self._extract_action_content_tokens(command, family=family)
             )
-            overlap = len(suggested_tokens & command_tokens)
-            if overlap == 0:
+            if not suggested_tokens.issubset(command_tokens):
                 continue
 
-            missing = len(suggested_tokens - command_tokens)
             extra = len(command_tokens - suggested_tokens)
-            score = overlap * 10 - missing * 5 - extra * 2
+            score = len(suggested_tokens) * 10 - extra * 2
             if suggested_tokens == command_tokens:
-                score += 10
-            elif suggested_tokens.issubset(command_tokens):
-                score += 6
+                score += 8
+            if self._get_action_referent_signature(
+                command, family=family
+            ) == self._get_action_referent_signature(suggested_action, family=family):
+                score += 4
+            candidates.append((score, extra, command))
 
-            if score > best_score:
-                best_score = score
-                best_command = command
+        if not candidates:
+            return suggested_action
 
-        return best_command if best_score >= 15 else suggested_action
+        candidates.sort(key=lambda item: (-item[0], item[1], len(item[2]), item[2]))
+        best_score, _, best_command = candidates[0]
+        if best_score < 18:
+            return suggested_action
+        if len(candidates) > 1 and best_score - candidates[1][0] < 4:
+            return suggested_action
+        return best_command
 
     def _get_hypothesis_entry(self, family: str) -> dict:
         entry = self.episode_hypothesis_ledger.get(family)
@@ -716,8 +839,8 @@ class GWTAutogenAgent(AutogenAgent):
         previous_observation: str,
     ) -> tuple[str, str]:
         normalized_observation = self._normalize_runtime_text(observation)
-        observation_changed = (
-            normalized_observation != self._normalize_runtime_text(previous_observation)
+        observation_changed = normalized_observation != self._normalize_runtime_text(
+            previous_observation
         )
         has_admissible_delta = bool(
             self.percept.get("newly_admissible_actions")
@@ -728,7 +851,9 @@ class GWTAutogenAgent(AutogenAgent):
             return "invalid", "The attempted action failed or was inadmissible."
         if family == "inspect" and observation_changed:
             return "evidence", "Inspection produced new evidence."
-        if self.task_status == "COMPLETED" or self._DIRECT_EFFECT_RE.search(observation):
+        if self.task_status == "COMPLETED" or self._DIRECT_EFFECT_RE.search(
+            observation
+        ):
             return "observable_change", "The observation reported a state change."
         if has_admissible_delta:
             return "observable_change", "The action changed the available affordances."
@@ -841,7 +966,8 @@ class GWTAutogenAgent(AutogenAgent):
         mechanism_progress = any(
             entry["observable_change_attempts"] > 0
             for entry in self.episode_hypothesis_ledger.values()
-            if entry["family"] in {"relation", "tool_application", "transfer_or_transform"}
+            if entry["family"]
+            in {"relation", "tool_application", "transfer_or_transform"}
         )
         task_lower = self.task.lower()
         placement_task = any(
@@ -849,7 +975,13 @@ class GWTAutogenAgent(AutogenAgent):
         )
         if not inspect_evidence:
             return "gather_evidence"
-        if any(token in task_lower for token in ("determine", "test", "whether", "identify")) and not mechanism_progress:
+        if (
+            any(
+                token in task_lower
+                for token in ("determine", "test", "whether", "identify")
+            )
+            and not mechanism_progress
+        ):
             return "test_mechanism"
         if placement_task:
             return "commit_to_goal"
@@ -874,6 +1006,16 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         required_families = set(task_contract.get("required_families", []))
         target_entity_set = set(task_contract.get("target_entities", []))
+        current_location_tokens = set(
+            self._extract_current_location_tokens(
+                (self.percept or {}).get("resulting_observation", "")
+            )
+        )
+        visible_nonlocation_targets = (
+            grounded_token_set & target_entity_set
+        ) - current_location_tokens
+        ordered_sequence = "ordered_sequence" in task_contract.get("ordering_cues", [])
+        referent_signature = self._get_action_referent_signature(action, family=family)
         score = 0
 
         keyword_hits = len(action_token_set & task_keyword_set)
@@ -907,6 +1049,13 @@ class GWTAutogenAgent(AutogenAgent):
             score += 3
         elif family == "focus":
             score -= 3
+        if (
+            family == "focus"
+            and visible_nonlocation_targets
+            and content_token_set
+            and content_token_set.issubset(current_location_tokens)
+        ):
+            score -= 8
 
         if current_phase == "gather_evidence":
             if family == "relation":
@@ -932,6 +1081,12 @@ class GWTAutogenAgent(AutogenAgent):
         if family == "other":
             score -= 2
 
+        if referent_signature and referent_signature in self._completed_focus_targets:
+            if family == "focus":
+                score -= 10 if ordered_sequence else 4
+            else:
+                score -= 2
+
         if content_token_set and grounded_hits == 0:
             if target_hits:
                 score -= 6
@@ -945,6 +1100,12 @@ class GWTAutogenAgent(AutogenAgent):
             and family not in {"inspect", "device_control", "relocation"}
         ):
             score -= 3
+
+        if visible_nonlocation_targets and target_hits == 0:
+            if family == "inspect":
+                score -= 2
+            elif family not in {"device_control", "relocation"}:
+                score -= 6
 
         if normalized.startswith("wait"):
             score -= 10
@@ -993,6 +1154,15 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         quotas = self._get_shortlist_family_quotas(current_phase)
+        if "ordered_sequence" in self._get_task_contract().get(
+            "ordering_cues", []
+        ) and set(grounded_tokens) & set(
+            self._get_task_contract().get("target_entities", [])
+        ):
+            quotas = dict(quotas)
+            quotas["focus"] = max(2, quotas.get("focus", 0))
+            if quotas.get("inspect", 0) > 0:
+                quotas["inspect"] -= 1
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}
@@ -1050,8 +1220,27 @@ class GWTAutogenAgent(AutogenAgent):
         if self.action_agent is None:
             return
 
-        summary = self._summarize_admissible_actions(self.admissible_actions, shortlist_limit=20)
+        summary = self._summarize_admissible_actions(
+            self.admissible_actions, shortlist_limit=20
+        )
         recent_invalid_actions = self._get_recent_invalid_actions()
+        ordered_progress = self._get_ordered_target_snapshot()
+        extra_context = ""
+        if (
+            ordered_progress["completed_focus_targets"]
+            or ordered_progress["ambiguous_focus_targets"]
+        ):
+            extra_context += (
+                "Ordered focus progress this episode: "
+                + json.dumps(ordered_progress)
+                + "\n"
+            )
+        if self.percept.get("referent_resolution"):
+            extra_context += (
+                "Latest referent resolution warning: "
+                + json.dumps(self.percept["referent_resolution"])
+                + "\n"
+            )
         self._set_agent_system_message(
             self.action_agent,
             self._action_agent_base_prompt
@@ -1063,14 +1252,17 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Task contract: {json.dumps(summary['task_contract'])}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
+            + extra_context
             + "Choose an exact shortlist string whenever possible. "
             + "If you go off-shortlist, stay lexically close to grounded entities and known admissible verb families instead of inventing a fresh command template. "
-            + "The executor will only execute the action if it actually matches the environment's admissible commands.\n"
+            + "The executor will only execute the action if it actually matches the environment's admissible commands.\n",
         )
 
     @staticmethod
     def _set_agent_system_message(agent, content: str) -> None:
-        if hasattr(agent, "_oai_system_message") and getattr(agent, "_oai_system_message"):
+        if hasattr(agent, "_oai_system_message") and getattr(
+            agent, "_oai_system_message"
+        ):
             agent._oai_system_message[0]["content"] = content
             return
         setattr(agent, "system_message", content)
@@ -1080,8 +1272,12 @@ class GWTAutogenAgent(AutogenAgent):
         timestep = percept.get("timestep", self.num_actions_taken)
         attempted_action = percept.get("attempted_action", "None")
         observation = percept.get("resulting_observation", "No observation available.")
-        attempts_left = percept.get("action_attempts_left", self.max_actions - self.num_actions_taken)
-        ledger = self._get_episode_hypothesis_snapshot(max_families=3, max_recent_tests=2)
+        attempts_left = percept.get(
+            "action_attempts_left", self.max_actions - self.num_actions_taken
+        )
+        ledger = self._get_episode_hypothesis_snapshot(
+            max_families=3, max_recent_tests=2
+        )
 
         parts = [
             f"Timestep {timestep}: My previous belief-state output drifted out of format, so I discard any embedded action suggestion and re-anchor on the latest confirmed percept.",
@@ -1152,7 +1348,9 @@ class GWTAutogenAgent(AutogenAgent):
 
         if changed and self.group_chat_manager is not None:
             if getattr(self, "reasoner_config", None):
-                self.group_chat_manager.llm_config = self.reasoner_config["config_list"][0]
+                self.group_chat_manager.llm_config = self.reasoner_config[
+                    "config_list"
+                ][0]
 
         if changed:
             self._provider_fallbacks_applied.add(provider)
@@ -1296,11 +1494,19 @@ class GWTAutogenAgent(AutogenAgent):
             "family_counts": shared_action_context["family_counts"],
             "salient_entities": shared_action_context["salient_entities"],
             "deprioritized_families": shared_action_context["deprioritized_families"],
-            "required_families": shared_action_context["task_contract"]["required_families"],
+            "required_families": shared_action_context["task_contract"][
+                "required_families"
+            ],
         }
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
         ]
+        ordered_progress = self._get_ordered_target_snapshot()
+        if (
+            ordered_progress["completed_focus_targets"]
+            or ordered_progress["ambiguous_focus_targets"]
+        ):
+            self.percept["ordered_target_progress"] = ordered_progress
         if self.num_actions_taken > 0:
             if shared_action_context["newly_relevant_actions"]:
                 self.percept["newly_relevant_actions"] = shared_action_context[
@@ -1810,21 +2016,40 @@ class GWTAutogenAgent(AutogenAgent):
                 self.rounds_left -= 1
                 reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
 
-            attempted_action = canonical_suggested_action if executed_action else suggested_action
+            attempted_action = (
+                canonical_suggested_action if executed_action else suggested_action
+            )
             self.update_percept(attempted_action)
             if canonical_suggested_action != suggested_action:
                 self.percept["requested_action"] = suggested_action
                 self.percept["canonicalized_action"] = canonical_suggested_action
+                referent_resolution = self._record_referent_resolution(
+                    suggested_action=suggested_action,
+                    canonical_action=canonical_suggested_action,
+                )
+                if referent_resolution is not None:
+                    self.percept["referent_resolution"] = referent_resolution
             self._update_episode_hypothesis_ledger(
                 suggested_action=suggested_action,
                 executed_action=executed_action,
                 previous_observation=previous_observation,
+            )
+            self._update_ordered_target_progress(
+                executed_action=executed_action,
+                observation=self.percept.get("resulting_observation", ""),
             )
             hypothesis_snapshot = self._get_episode_hypothesis_snapshot(
                 max_families=3, max_recent_tests=2
             )
             if hypothesis_snapshot["mechanisms"] or hypothesis_snapshot["recent_tests"]:
                 self.percept["episode_hypothesis_ledger"] = hypothesis_snapshot
+            ordered_progress = self._get_ordered_target_snapshot()
+            if (
+                ordered_progress["completed_focus_targets"]
+                or ordered_progress["ambiguous_focus_targets"]
+            ):
+                self.percept["ordered_target_progress"] = ordered_progress
+            self._refresh_action_agent_runtime_context()
 
             with open(self.log_paths["admissible_commands_path"], "a+") as f:
                 f.write(f"{self.admissible_actions}\n")
@@ -2093,6 +2318,7 @@ class GWTAutogenAgent(AutogenAgent):
                     "recent_episodic_memories": relevant_episodes,
                     "current_episode_memory": self.curr_episodic_memory,
                     "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
+                    "ordered_target_progress": self._get_ordered_target_snapshot(),
                 },
             )
             + "\n\n"
@@ -2141,6 +2367,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "previous_episodic_memories": relevant_episodes,
                 "current_episode_memory": self.curr_episodic_memory,
                 "episode_hypothesis_ledger": self._get_episode_hypothesis_snapshot(),
+                "ordered_target_progress": self._get_ordered_target_snapshot(),
             },
         )
         return self.memory

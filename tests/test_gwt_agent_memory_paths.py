@@ -496,12 +496,31 @@ def test_shortlist_balances_families_and_grounds_on_observation(tmp_path):
 
 def test_task_contract_extracts_required_family_and_target_entities(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
 
     contract = agent._get_task_contract()
 
     assert contract["required_families"] == ["focus"]
     assert "turtle" in contract["target_entities"]
+    assert contract["ordering_cues"] == ["ordered_sequence"]
+
+
+def test_task_contract_drops_stopwords_and_plural_duplicates(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["required_families"] == ["focus"]
+    assert "apple" in contract["target_entities"]
+    assert "plant" in contract["target_entities"]
+    assert "plants" not in contract["target_entities"]
+    assert "are" not in contract["target_entities"]
     assert contract["ordering_cues"] == ["ordered_sequence"]
 
 
@@ -518,6 +537,22 @@ def test_canonicalize_suggested_action_snaps_to_exact_admissible_command(tmp_pat
     )
 
     assert canonical == "go to art studio"
+
+
+def test_canonicalize_suggested_action_refuses_ambiguous_sibling_targets(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    suggested_action = "focus on apple tree in self watering flower pot 6"
+
+    canonical = agent._canonicalize_suggested_action(
+        suggested_action,
+        [
+            "focus on apple tree in self watering flower pot 4",
+            "focus on apple tree in self watering flower pot 7",
+            "look at apple tree in self watering flower pot 6",
+        ],
+    )
+
+    assert canonical == suggested_action
 
 
 def test_required_task_family_is_not_deprioritized_after_repeated_failures(tmp_path):
@@ -550,7 +585,9 @@ def test_required_task_family_is_not_deprioritized_after_repeated_failures(tmp_p
 
 def test_required_focus_family_survives_shortlist_without_hidden_entity_drift(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
     agent.task_status = "INCOMPLETE"
     agent._reset_episode_reasoning_state()
     agent.percept = {
@@ -576,3 +613,88 @@ def test_required_focus_family_survives_shortlist_without_hidden_entity_drift(tm
     assert "focus on turtle egg" not in shortlist
     assert "open art studio door" in shortlist
     assert "go to art studio" in shortlist
+
+
+def test_shortlist_prefers_grounded_stage_targets_over_area_focus_and_distractors(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest. "
+        "The plants are located outside."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This outside location is called the outside. Here you see a blue jay egg, "
+            "a self watering flower pot 4 containing a apple seed, and a self watering "
+            "flower pot 6 containing a apple tree in the seedling stage."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on outside",
+            "look at blue jay egg",
+            "focus on apple seed",
+            "focus on apple tree in self watering flower pot 6",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "focus on apple seed" in shortlist
+    assert "focus on apple tree in self watering flower pot 6" in shortlist
+    assert "focus on outside" not in shortlist
+    assert "look at blue jay egg" not in shortlist
+
+
+def test_ordered_target_progress_penalizes_repeat_focus_on_completed_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the life stages of the apple plant, starting from earliest to latest."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This outside location is called the outside. Here you see a apple seed and "
+            "a apple tree in the seedling stage."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on apple seed",
+        observation="You focus on the apple seed.",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on apple seed",
+            "focus on apple tree in self watering flower pot 6",
+        ],
+        shortlist_limit=1,
+    )
+
+    assert summary["task_relevant_action_shortlist"] == [
+        "focus on apple tree in self watering flower pot 6"
+    ]
+
+
+def test_referent_resolution_records_ambiguity_without_collapsing_targets(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent._reset_episode_reasoning_state()
+
+    resolution = agent._record_referent_resolution(
+        suggested_action="focus on apple tree in self watering flower pot 6",
+        canonical_action="focus on apple tree in self watering flower pot 4",
+    )
+
+    assert resolution == {
+        "status": "ambiguous",
+        "requested_target": "apple tree flower pot 6",
+        "resolved_target": "apple tree flower pot 4",
+    }
+    assert agent._get_ordered_target_snapshot()["ambiguous_focus_targets"] == [
+        resolution
+    ]
