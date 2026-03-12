@@ -1414,6 +1414,38 @@ def test_candidate_tracking_rejects_stale_candidate_after_repeated_confirmation(
     assert "active_candidate" not in snapshot
 
 
+def test_candidate_tracking_rejects_goal_satisfied_candidate_after_follow_up(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    agent._update_candidate_tracking(
+        executed_action="focus on picture",
+        observation="You focus on the picture.",
+        previous_observation="a picture of a farm.",
+    )
+    agent._update_candidate_tracking(
+        executed_action="move picture to red box",
+        observation="You move the picture to the red box.",
+        previous_observation="You move to the kitchen.",
+    )
+    agent._update_candidate_tracking(
+        executed_action="look in red box",
+        observation="Inside the red box is: \n\ta picture",
+        previous_observation="You move the picture to the red box.",
+    )
+
+    snapshot = agent._get_candidate_tracking_snapshot()
+    assert snapshot["rejected_candidates"] == ["picture"]
+    assert "active_candidate" not in snapshot
+
+
 def test_shortlist_pivots_to_new_grounded_candidate_after_rejection(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
@@ -1447,6 +1479,36 @@ def test_shortlist_pivots_to_new_grounded_candidate_after_rejection(tmp_path):
     assert "focus on painting" in shortlist
     assert "focus on red box" not in shortlist
     assert "focus on picture" not in shortlist
+
+
+def test_shortlist_reopens_room_context_after_rejected_container_candidate(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a(n) non-living thing. First, focus on the thing. "
+        "Then, move it to the red box in the kitchen."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._rejected_candidates = ["picture"]
+    agent.percept = {"resulting_observation": "Inside the red box is: \n\ta picture"}
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move picture to red box",
+            "look at red box",
+            "look in red box",
+            "focus on red box",
+            "look at kitchen",
+            "focus on bowl",
+            "move bowl to red box",
+        ],
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert shortlist[:2] == ["focus on bowl", "look at kitchen"]
+    assert "move picture to red box" not in shortlist[:3]
+    assert "look at red box" not in shortlist[:3]
 
 
 def test_candidate_tracking_preserves_room_and_aliases_across_referent_shift(
