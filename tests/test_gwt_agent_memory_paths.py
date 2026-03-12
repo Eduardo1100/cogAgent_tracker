@@ -799,6 +799,36 @@ def test_remote_room_signal_tokenizes_multiword_candidate_classes(tmp_path):
     assert "living" in snapshot["signal_tokens"]
 
 
+def test_signature_looks_like_room_from_dynamic_visible_room_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    observation = (
+        "This room is called the atrium. You also see a door to the observatory "
+        "(that is closed)."
+    )
+
+    assert agent._signature_looks_like_room("observatory", observation, "")
+
+
+def test_candidate_action_target_rejects_dynamic_room_without_hardcoded_room_name(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Find a living thing in the observatory and focus on it."
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the atrium. You see a door to the observatory "
+            "(that is closed) and a silver beetle."
+        )
+    }
+
+    candidate = agent._get_candidate_action_target(
+        "focus on observatory", family="focus"
+    )
+
+    assert candidate == ""
+
+
 def test_lifecycle_search_prefers_doors_over_object_transport_before_entry(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (

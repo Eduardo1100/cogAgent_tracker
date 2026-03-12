@@ -522,17 +522,20 @@ class GWTAutogenAgent(AutogenAgent):
         "agent",
         "air",
         "inventory",
-        "hallway",
-        "kitchen",
-        "bathroom",
-        "bedroom",
-        "greenhouse",
-        "outside",
-        "workshop",
-        "living",
-        "room",
         "studio",
         "door",
+        "doors",
+    }
+    _GENERIC_LOCATION_TOKENS = {
+        "area",
+        "hall",
+        "hallway",
+        "inside",
+        "location",
+        "outside",
+        "place",
+        "room",
+        "space",
     }
     _THINKING_PREFIXES = (
         "IDEA:",
@@ -567,7 +570,7 @@ class GWTAutogenAgent(AutogenAgent):
         (
             "flowering",
             (
-                r"\bflower(?:ing)?\b",
+                r"\bflower(?!\s+pot\b)(?:ing)?\b",
                 r"\bblossom(?:ing)?\b",
                 r"\bpollen\b",
                 r"\breproducing\b",
@@ -2608,6 +2611,7 @@ class GWTAutogenAgent(AutogenAgent):
         ranked_candidates: list[tuple[int, str]] = []
         exhausted_set = set(self._exhausted_container_targets)
         grounded_substance_tokens = self._get_grounded_substance_token_sets()
+        current_observation = (self.percept or {}).get("resulting_observation", "")
         for referent, profile in profiles.items():
             referent_tokens = set(
                 self._extract_runtime_tokens(
@@ -2618,7 +2622,9 @@ class GWTAutogenAgent(AutogenAgent):
             )
             if not referent_tokens:
                 continue
-            if referent_tokens.issubset(self._NON_CANDIDATE_REFERENT_TOKENS):
+            if self._signature_looks_structural_noncandidate(
+                referent, observation=current_observation
+            ):
                 continue
             if any(
                 tokens and tokens.issubset(referent_tokens)
@@ -3698,7 +3704,6 @@ class GWTAutogenAgent(AutogenAgent):
 
     def _extract_stage_labels(self, text: str) -> list[str]:
         normalized = self._normalize_runtime_text(text)
-        normalized = re.sub(r"\b(?:self watering )?flower pot\b", "pot", normalized)
         labels: list[str] = []
         for label, patterns in self._LIFECYCLE_STAGE_PATTERNS:
             if any(re.search(pattern, normalized) for pattern in patterns):
@@ -4346,9 +4351,12 @@ class GWTAutogenAgent(AutogenAgent):
         contract = task_contract or self._get_task_contract()
         role_sets = role_token_sets or self._get_task_role_token_sets(contract)
         signature_tokens = self._referent_tokens(signature)
+        current_observation = (self.percept or {}).get("resulting_observation", "")
         if not signature_tokens:
             return -24
-        if signature_tokens.issubset(self._NON_CANDIDATE_REFERENT_TOKENS):
+        if self._signature_looks_structural_noncandidate(
+            signature, observation=current_observation
+        ):
             return -24
         if self._signature_matches_role(signature, role_sets["primary_targets"]):
             return -24
@@ -5019,8 +5027,9 @@ class GWTAutogenAgent(AutogenAgent):
             return ""
 
         candidate_tokens = set(self._extract_runtime_tokens(candidate, limit=6))
-        if not candidate_tokens or candidate_tokens.issubset(
-            self._NON_CANDIDATE_REFERENT_TOKENS
+        current_observation = (self.percept or {}).get("resulting_observation", "")
+        if not candidate_tokens or self._signature_looks_structural_noncandidate(
+            candidate, observation=current_observation
         ):
             return ""
         if self._is_support_referent(candidate, contract):
@@ -5147,17 +5156,13 @@ class GWTAutogenAgent(AutogenAgent):
         if not signature:
             return False
         signature_tokens = self._referent_tokens(signature)
-        room_like_noncandidate_tokens = self._NON_CANDIDATE_REFERENT_TOKENS - {
-            "agent",
-            "air",
-            "door",
-            "inventory",
-            "living",
-            "room",
-            "studio",
-        }
-        if signature_tokens and signature_tokens.issubset(
-            room_like_noncandidate_tokens
+        if not signature_tokens:
+            return False
+        if signature_tokens.issubset(self._GENERIC_LOCATION_TOKENS):
+            return True
+        if (
+            signature_tokens & {"room", "location", "area"}
+            and len(signature_tokens) <= 3
         ):
             return True
         known_rooms = set(self._extract_visible_room_targets(observation))
@@ -5170,6 +5175,26 @@ class GWTAutogenAgent(AutogenAgent):
             known_rooms.add(previous_room)
         known_rooms.update(self._get_task_contract().get("destination_room", []))
         return signature in known_rooms
+
+    def _signature_looks_structural_noncandidate(
+        self,
+        signature: str,
+        *,
+        observation: str = "",
+        previous_observation: str = "",
+    ) -> bool:
+        if not signature:
+            return False
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return False
+        if signature_tokens.issubset(self._NON_CANDIDATE_REFERENT_TOKENS):
+            return True
+        return self._signature_looks_like_room(
+            signature,
+            observation,
+            previous_observation,
+        )
 
     @staticmethod
     def _normalize_observation_signature(observation: str) -> str:
@@ -5546,6 +5571,15 @@ class GWTAutogenAgent(AutogenAgent):
                 family=family,
                 task_contract=task_contract,
             )
+            observation_alias = self._extract_observation_candidate_alias(
+                observation, family=family
+            )
+            if self._signature_looks_structural_noncandidate(
+                referent, observation=observation
+            ) or self._signature_looks_structural_noncandidate(
+                observation_alias, observation=observation
+            ):
+                return
             if (
                 "focus" in task_contract.get("required_families", [])
                 and not candidate_target
