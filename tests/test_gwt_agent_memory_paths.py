@@ -3342,6 +3342,64 @@ def test_measurement_shortlist_prefers_enclosure_activation_before_proxy_reads(
     assert "mix solid unknown substance c" not in shortlist
 
 
+def test_measurement_shortlist_escalates_to_powered_heating_setup_before_repeats(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see the agent, a oven, "
+            "a thermometer, a lighter, solid unknown substance C, an orange box, "
+            "and a yellow box. The oven is closed."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 10 degrees celsius",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "use lighter on solid unknown substance c",
+            "use thermometer on solid unknown substance c",
+            "open oven",
+            "activate oven",
+            "move solid unknown substance c to oven",
+            "look at oven",
+        ],
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    setup_actions = {
+        "open oven",
+        "activate oven",
+        "move solid unknown substance c to oven",
+    }
+    assert summary["current_phase"] == "induce_property_change"
+    assert set(shortlist[:3]).issubset(setup_actions)
+    assert "use thermometer on solid unknown substance c" not in shortlist[:3]
+    assert "use lighter on solid unknown substance c" not in shortlist[:3]
+
+
 def test_invalid_measurement_exact_action_is_retired_from_shortlist(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (

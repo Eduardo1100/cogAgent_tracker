@@ -301,6 +301,26 @@ class GWTAutogenAgent(AutogenAgent):
         "cool": {"direction": "cool"},
         "chill": {"direction": "cool"},
     }
+    _THERMAL_CONTROL_DIRECTION_HINTS = {
+        "warm": {
+            "boiler",
+            "burner",
+            "furnace",
+            "heater",
+            "hotplate",
+            "kiln",
+            "microwave",
+            "oven",
+            "stove",
+        },
+        "cool": {
+            "chiller",
+            "cooler",
+            "freezer",
+            "fridge",
+            "refrigerator",
+        },
+    }
     _STATE_CHANGE_TASK_STOPWORDS = {
         "actions",
         "also",
@@ -1476,6 +1496,78 @@ class GWTAutogenAgent(AutogenAgent):
         if "point" in normalized:
             return "stable_threshold_property"
         return "instantaneous_state"
+
+    def _get_measurement_property_direction(
+        self, task_contract: dict | None = None
+    ) -> str:
+        contract = task_contract or self._get_task_contract()
+        property_text = self._normalize_runtime_text(
+            contract.get("measurement_property", "")
+        )
+        if not property_text:
+            return ""
+        for hint, metadata in self._TASK_STATE_CHANGE_HINTS.items():
+            if hint in property_text:
+                return metadata.get("direction", "")
+        return ""
+
+    def _is_measurement_thermal_control_signature(
+        self, signature: str, *, direction: str
+    ) -> bool:
+        if not signature or not direction:
+            return False
+        hint_tokens = self._THERMAL_CONTROL_DIRECTION_HINTS.get(direction, set())
+        return bool(self._referent_tokens(signature) & hint_tokens)
+
+    def _get_measurement_control_candidate_signatures(
+        self,
+        actions: list[str] | None = None,
+        task_contract: dict | None = None,
+    ) -> list[str]:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_measurement_task(contract):
+            return []
+
+        direction = self._get_measurement_property_direction(contract)
+        measurement_target = self._get_measurement_target_signature(contract)
+        if not direction or not measurement_target:
+            return []
+
+        active_actions = actions if actions is not None else self.admissible_actions
+        move_destinations: set[str] = set()
+        control_candidates: list[str] = []
+        for action in active_actions:
+            family = self._classify_action_family(action)
+            if family in {"relocation", "transfer_or_transform"}:
+                primary_signature = self._extract_action_primary_object_signature(
+                    action, family=family
+                )
+                destination_signature = self._extract_action_destination_signature(
+                    action, family=family
+                )
+                if primary_signature == measurement_target and destination_signature:
+                    move_destinations.add(destination_signature)
+                continue
+
+            if family != "device_control" or self._action_mentions_door(
+                action, family=family
+            ):
+                continue
+            primary_signature = self._extract_action_primary_object_signature(
+                action, family=family
+            )
+            if not self._is_measurement_thermal_control_signature(
+                primary_signature, direction=direction
+            ):
+                continue
+            if primary_signature not in control_candidates:
+                control_candidates.append(primary_signature)
+
+        return [
+            candidate
+            for candidate in control_candidates
+            if candidate in move_destinations
+        ][:4]
 
     def _normalize_measurement_target_phrase(self, phrase: str) -> str:
         normalized = self._normalize_runtime_text(phrase)
@@ -7472,6 +7564,7 @@ class GWTAutogenAgent(AutogenAgent):
         self,
         *,
         action: str,
+        available_actions: list[str],
         family: str,
         current_phase: str,
         current_room: str,
@@ -7561,6 +7654,41 @@ class GWTAutogenAgent(AutogenAgent):
         latest_direct_measurement = self._get_latest_measurement(direct=True)
         direct_measurement_ready = latest_direct_measurement is not None
         property_resolved = self._measurement_property_is_resolved(task_contract)
+        control_candidates = set(
+            self._get_measurement_control_candidate_signatures(
+                actions=available_actions, task_contract=task_contract
+            )
+        )
+        setup_control_candidate = bool(
+            self._measurement_property_requires_event(task_contract)
+            and direct_measurement_ready
+            and not self._measurement_property_event_observed
+            and not active_enclosure
+            and control_candidates
+        )
+        control_candidate_action = bool(
+            control_candidates
+            and (
+                referent_signature in control_candidates
+                or primary_signature in control_candidates
+                or destination_signature in control_candidates
+            )
+        )
+        opens_control_candidate = bool(
+            family == "device_control"
+            and primary_signature in control_candidates
+            and normalized.startswith("open ")
+        )
+        activates_control_candidate = bool(
+            family == "device_control"
+            and primary_signature in control_candidates
+            and normalized.startswith(("activate ", "turn on "))
+        )
+        relocates_target_to_control_candidate = bool(
+            family in {"relocation", "transfer_or_transform"}
+            and primary_signature == measurement_target
+            and destination_signature in control_candidates
+        )
         room_referent_match = bool(current_room and referent_signature == current_room)
         referent_room_state = self._search_location_states.get(referent_signature, {})
         exhausted_room_referent = bool(
@@ -7717,6 +7845,8 @@ class GWTAutogenAgent(AutogenAgent):
                     score += 14
                 else:
                     score -= 8
+                if setup_control_candidate and subject_matches_target:
+                    score -= 42 if instrument_primary_match else 32
             elif family == "device_control":
                 if self._action_mentions_door(action, family=family):
                     score -= 8
@@ -7728,6 +7858,13 @@ class GWTAutogenAgent(AutogenAgent):
                     score += 12
                 else:
                     score += 6
+                if setup_control_candidate:
+                    if opens_control_candidate:
+                        score += 62
+                    elif activates_control_candidate:
+                        score += 54
+                    elif control_candidate_action:
+                        score += 18
             elif family in {"transfer_or_transform", "relocation"}:
                 if (
                     referent_matches_target
@@ -7737,11 +7874,15 @@ class GWTAutogenAgent(AutogenAgent):
                     score += 10
                 else:
                     score -= 6
+                if setup_control_candidate and relocates_target_to_control_candidate:
+                    score += 34
             elif family == "inspect":
                 if referent_matches_target or touches_active_enclosure:
                     score += 10
                 else:
                     score += 2
+                if setup_control_candidate and referent_signature in control_candidates:
+                    score += 20
             elif family == "focus":
                 score += (
                     4 if referent_matches_target or instrument_referent_match else -8
@@ -8095,6 +8236,7 @@ class GWTAutogenAgent(AutogenAgent):
         self,
         action: str,
         *,
+        available_actions: list[str],
         current_phase: str,
         task_keywords: list[str],
         grounded_tokens: list[str],
@@ -8653,6 +8795,7 @@ class GWTAutogenAgent(AutogenAgent):
         elif measurement_task:
             score += self._score_measurement_action(
                 action=action,
+                available_actions=available_actions,
                 family=family,
                 current_phase=current_phase,
                 current_room=current_room,
@@ -8778,6 +8921,7 @@ class GWTAutogenAgent(AutogenAgent):
             family_counts[family] = family_counts.get(family, 0) + 1
             score, grounded_hits, family_priority = self._score_action_for_shortlist(
                 action,
+                available_actions=actions,
                 current_phase=current_phase,
                 task_keywords=task_keywords,
                 grounded_tokens=grounded_tokens,
