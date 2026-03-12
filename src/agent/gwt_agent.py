@@ -2222,6 +2222,58 @@ class GWTAutogenAgent(AutogenAgent):
             return "needs_transition_evidence"
         return "needs_direct_measurement"
 
+    def _update_measurement_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        if not self._is_measurement_task():
+            return
+        task_contract = self._get_task_contract()
+        role_token_sets = self._get_task_role_token_sets(task_contract)
+        grounded_tokens = set(self._get_observation_grounded_tokens())
+        instrument_grounded = self._role_is_grounded(
+            grounded_tokens, role_token_sets["measurement_instrument"]
+        )
+
+        previous_observation = ""
+        if self.curr_episodic_memory:
+            try:
+                previous_observation = json.loads(self.curr_episodic_memory[-1]).get(
+                    "resulting_observation", ""
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_observation = ""
+
+        room_signature = self._get_current_location_signature(
+            observation
+        ) or self._get_current_location_signature(previous_observation)
+        if room_signature:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if instrument_grounded:
+                room_state["target_grounded"] = True
+
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+        if not room_signature or instrument_grounded:
+            return
+
+        family = self._classify_action_family(action)
+        if family == "inspect":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            room_state["local_exploration"] += 1
+        elif family == "device_control":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            if self._action_mentions_door(action, family=family):
+                return
+            room_state["local_exploration"] += 1
+
     def _update_measurement_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -2487,6 +2539,30 @@ class GWTAutogenAgent(AutogenAgent):
             not room_state.get("target_grounded")
             and room_state.get("local_exploration", 0) >= 2
         )
+
+    def _measurement_instrument_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_measurement_task(contract):
+            return False
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        role_token_sets = self._get_task_role_token_sets(contract)
+        if self._role_is_grounded(
+            grounded_token_set, role_token_sets["measurement_instrument"]
+        ):
+            return False
+        if visible_doors < 1 or not current_room:
+            return False
+        room_state = self._search_location_states.get(current_room, {})
+        return bool(room_state.get("local_exploration", 0) >= 2)
 
     def _canonicalize_unsupported_substance_action(
         self, suggested_action: str, admissible_commands: list[str]
@@ -5858,6 +5934,9 @@ class GWTAutogenAgent(AutogenAgent):
         action: str,
         family: str,
         current_phase: str,
+        current_room: str,
+        room_frontier_action: bool,
+        room_search_stalled: bool,
         content_token_set: set[str],
         grounded_token_set: set[str],
         task_contract: dict,
@@ -5930,19 +6009,82 @@ class GWTAutogenAgent(AutogenAgent):
         latest_direct_measurement = self._get_latest_measurement(direct=True)
         direct_measurement_ready = latest_direct_measurement is not None
         property_resolved = self._measurement_property_is_resolved(task_contract)
+        room_referent_match = bool(current_room and referent_signature == current_room)
         score = 0
 
         if current_phase == "locate_instrument":
             if family == "focus":
-                score += (
-                    18 if referent_matches_target or instrument_referent_match else -8
-                )
+                if instrument_referent_match:
+                    score += 18
+                elif referent_matches_target:
+                    score -= 48
+                else:
+                    score -= 32
             elif family == "inspect":
-                score += 10 if instrument_referent_match else 2
-            elif family == "relocation" and instrument_referent_match:
-                score += 6
-            elif family == "tool_application" and instrument_primary_match:
-                score += 4
+                if instrument_referent_match:
+                    score += 12
+                elif referent_matches_target or primary_matches_target:
+                    score -= 30
+                elif room_referent_match:
+                    score += 8
+                elif normalized.startswith(
+                    "look in "
+                ) and self._is_container_like_action(action, family=family):
+                    score += 2
+                elif self._is_container_like_action(action, family=family):
+                    score -= 4
+                elif room_frontier_action:
+                    score += 8 if room_search_stalled else 0
+                else:
+                    score -= 12
+            elif family == "device_control":
+                if instrument_referent_match:
+                    score += 10
+                elif self._action_mentions_door(action, family=family):
+                    score += 12 if room_search_stalled else 2
+                elif normalized.startswith("open ") and self._is_container_like_action(
+                    action, family=family
+                ):
+                    score += 20
+                elif self._is_container_like_action(action, family=family):
+                    score += 4
+                else:
+                    score -= 8
+            elif family == "relocation":
+                if instrument_referent_match:
+                    score += 6
+                elif referent_matches_target or primary_matches_target:
+                    score -= 24
+                elif room_frontier_action:
+                    score += 14 if room_search_stalled else 0
+                else:
+                    score -= 14
+                    if normalized.startswith(("move ", "pick up ", "take ", "grab ")):
+                        score -= 8
+            elif family == "tool_application":
+                if subject_matches_target:
+                    score -= 24
+                else:
+                    score += 4 if instrument_primary_match else -12
+            elif family in {"transfer_or_transform", "relation"}:
+                score -= (
+                    24 if (referent_matches_target or primary_matches_target) else -16
+                )
+
+            if room_search_stalled:
+                if room_frontier_action:
+                    if family == "inspect":
+                        score += 6
+                    elif family == "device_control":
+                        score += 8
+                    elif family == "relocation":
+                        score += 10
+                elif family == "inspect" and not instrument_referent_match:
+                    score -= 24 if not room_referent_match else 12
+                elif family == "focus" and not instrument_referent_match:
+                    score -= 24
+                elif family == "device_control" and not instrument_referent_match:
+                    score -= 8
 
         elif current_phase == "locate_measured_target":
             if family == "focus":
@@ -6392,6 +6534,14 @@ class GWTAutogenAgent(AutogenAgent):
             task_contract=task_contract,
             grounded_tokens=grounded_token_set,
         )
+        measurement_instrument_search_stalled = (
+            self._measurement_instrument_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+                grounded_tokens=grounded_token_set,
+            )
+        )
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -6695,6 +6845,9 @@ class GWTAutogenAgent(AutogenAgent):
                 action=action,
                 family=family,
                 current_phase=current_phase,
+                current_room=current_room,
+                room_frontier_action=room_frontier_action,
+                room_search_stalled=measurement_instrument_search_stalled,
                 content_token_set=content_token_set,
                 grounded_token_set=grounded_token_set,
                 task_contract=task_contract,
@@ -7289,6 +7442,10 @@ class GWTAutogenAgent(AutogenAgent):
             observation=self.adapter.observation,
         )
         self._update_artifact_creation_tracking(self.adapter.observation)
+        self._update_measurement_search_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
         self._update_measurement_tracking(
             action=action,
             observation=self.adapter.observation,
