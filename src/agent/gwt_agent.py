@@ -562,6 +562,7 @@ class GWTAutogenAgent(AutogenAgent):
     )
     _HARD_FAILURE_RE = re.compile(
         r"(not in the list of admissible actions|not admissible|not recognized|"
+        r"no known action matches(?: that input)?|"
         r"can't|cannot|failed|nothing happens|nothing is burning|not movable|"
         r"do not see|don't see|no such)",
         re.IGNORECASE,
@@ -4768,6 +4769,11 @@ class GWTAutogenAgent(AutogenAgent):
             (referent_signature and referent_signature in source_candidates)
             or (source_signature and source_signature in source_candidates)
         )
+        invalid_referent_attempts = self._get_invalid_referent_attempts(
+            family,
+            referent_signature,
+            source_signature,
+        )
         unsupported_substance_tokens = {
             token
             for token in content_token_set
@@ -4907,6 +4913,16 @@ class GWTAutogenAgent(AutogenAgent):
             and source_candidate_match
         ):
             score += 5
+        if (
+            invalid_referent_attempts
+            and current_phase
+            in {"locate_substance", "probe_sources", "confirm_referent"}
+            and not (substance_role_hits or grounded_substance_match)
+        ):
+            if family in {"inspect", "device_control"}:
+                score -= 10 + invalid_referent_attempts * 6
+            elif family == "focus":
+                score -= 8 + invalid_referent_attempts * 4
 
         return score
 
