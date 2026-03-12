@@ -993,6 +993,11 @@ class GWTAutogenAgent(AutogenAgent):
                 if substance not in role_phrases["primary_targets"]:
                     role_phrases["primary_targets"].append(substance)
         destination_container, destination_room = self._extract_destination_roles(task)
+        if conditional_branch_task:
+            if destination_container in conditional_branch_targets:
+                destination_container = ""
+            if destination_room in conditional_branch_targets:
+                destination_room = ""
         if (
             destination_container
             and destination_container not in role_phrases["supporting_targets"]
@@ -1633,6 +1638,10 @@ class GWTAutogenAgent(AutogenAgent):
         return "", "", "", []
 
     def _normalize_conditional_branch_subject(self, phrase: str) -> str:
+        if re.search(r"\bsubstance\b", phrase, flags=re.IGNORECASE):
+            normalized_substance = self._normalize_measurement_target_phrase(phrase)
+            if normalized_substance:
+                return normalized_substance
         normalized = self._normalize_task_phrase(phrase, role="primary_targets")
         if not normalized:
             return ""
@@ -1657,6 +1666,29 @@ class GWTAutogenAgent(AutogenAgent):
         normalized = re.sub(r"^(?:it|this|that)\s+is\s+", "", normalized)
         normalized = normalized.strip(" .,:;")
         return normalized
+
+    def _extract_conditional_branch_target(self, branch_action: str) -> tuple[str, str]:
+        normalized_action = self._normalize_runtime_text(branch_action)
+        if not normalized_action:
+            return "", ""
+
+        focus_match = re.match(r"^focus on\s+(?:the\s+)?(.+?)$", normalized_action)
+        if focus_match:
+            branch_target = self._normalize_task_phrase(
+                focus_match.group(1), role="supporting_targets"
+            )
+            if branch_target:
+                return branch_target, "focus"
+            return "", ""
+
+        destination_container, destination_room = self._extract_destination_roles(
+            normalized_action
+        )
+        if destination_container:
+            return destination_container, "destination"
+        if destination_room:
+            return destination_room, "destination"
+        return "", ""
 
     def _extract_conditional_branch_condition_tokens(
         self,
@@ -1705,17 +1737,15 @@ class GWTAutogenAgent(AutogenAgent):
         conditional_branch_targets: list[str] = []
         conditional_branches: list[dict] = []
 
-        branch_pattern = re.compile(
-            r"\bif\s+(.+?),\s*focus on\s+(?:the\s+)?(.+?)(?=$|[.;,\n])"
-        )
-        raw_branches: list[tuple[str, str]] = []
+        branch_pattern = re.compile(r"(?:^|[.;\n])\s*if\s+(.+?),\s*(.+?)(?=$|[.;\n])")
+        raw_branches: list[tuple[str, str, str]] = []
         for match in branch_pattern.finditer(normalized_task):
-            branch_target = self._normalize_task_phrase(
-                match.group(2), role="supporting_targets"
+            branch_target, branch_mode = self._extract_conditional_branch_target(
+                match.group(2)
             )
-            if not branch_target:
+            if not branch_target or not branch_mode:
                 continue
-            raw_branches.append((match.group(1), branch_target))
+            raw_branches.append((match.group(1), branch_target, branch_mode))
             if branch_target not in conditional_branch_targets:
                 conditional_branch_targets.append(branch_target)
             if len(conditional_branch_targets) >= 2:
@@ -1742,6 +1772,11 @@ class GWTAutogenAgent(AutogenAgent):
                 1,
                 0,
             ),
+            (
+                r"\b(?:determine|identify)\s+(?:whether|if)\s+(?:an?\s+|the\s+)?(.+?)\s+is\s+.+?(?=$|[.;,\n]|\bif\b)",
+                1,
+                0,
+            ),
         )
         for pattern, subject_index, target_index in inference_patterns:
             match = re.search(pattern, normalized_task)
@@ -1759,7 +1794,7 @@ class GWTAutogenAgent(AutogenAgent):
         if not evidence_target:
             evidence_target = branch_subject
 
-        for raw_condition, branch_target in raw_branches[:2]:
+        for raw_condition, branch_target, branch_mode in raw_branches[:2]:
             condition = self._normalize_conditional_branch_condition(raw_condition)
             condition_tokens = self._extract_conditional_branch_condition_tokens(
                 condition,
@@ -1773,6 +1808,7 @@ class GWTAutogenAgent(AutogenAgent):
                 {
                     "condition": condition,
                     "condition_tokens": condition_tokens,
+                    "mode": branch_mode,
                     "target": branch_target,
                 }
             )
@@ -1802,6 +1838,21 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_conditional_branch_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("conditional_branch_task"))
+
+    def _get_conditional_branch_metadata(
+        self,
+        *,
+        target: str | None = None,
+        task_contract: dict | None = None,
+    ) -> dict:
+        contract = task_contract or self._get_task_contract()
+        branch_target = target or self._selected_conditional_branch_target or ""
+        if not branch_target:
+            return {}
+        for branch in contract.get("conditional_branches", []):
+            if branch.get("target") == branch_target:
+                return branch
+        return {}
 
     def _state_change_target_is_grounded(
         self,
@@ -7207,6 +7258,21 @@ class GWTAutogenAgent(AutogenAgent):
             self._selected_conditional_branch_target
             and destination_signature == self._selected_conditional_branch_target
         )
+        selected_branch_metadata = self._get_conditional_branch_metadata(
+            target=self._selected_conditional_branch_target,
+            task_contract=task_contract,
+        )
+        selected_branch_mode = selected_branch_metadata.get("mode", "focus")
+        primary_target_referent_match = self._signature_matches_role(
+            referent_signature, role_token_sets["primary_targets"]
+        )
+        primary_target_primary_match = self._signature_matches_role(
+            primary_signature, role_token_sets["primary_targets"]
+        )
+        selected_branch_destination_commit = bool(
+            selected_branch_destination_match
+            and (primary_target_referent_match or primary_target_primary_match)
+        )
         branch_action = bool(
             branch_full_match
             or branch_referent_match
@@ -7261,38 +7327,73 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 4
             elif family == "relocation":
                 score += 8 if (primary_role_hits or support_role_hits) else 3
-            elif family in {
-                "relation",
-                "transfer_or_transform",
-                "tool_application",
-            }:
+            elif family == "relation":
+                score += 10 if (primary_role_hits or support_role_hits) else -8
+            elif family == "tool_application":
+                score += 8 if (primary_role_hits or support_role_hits) else -8
+            elif family == "transfer_or_transform":
                 score -= 90
 
             if branch_action:
-                score -= 120
+                score -= 180
                 if family == "focus":
-                    score -= 12
+                    score -= 120
+                elif (
+                    family in {"relocation", "transfer_or_transform"}
+                    and branch_destination_match
+                ):
+                    score -= 160
 
         elif current_phase == "execute_branch":
-            if family == "focus":
-                score += (
-                    140
-                    if selected_branch_match
-                    else 132
-                    if selected_branch_primary_match
-                    else -90
-                    if branch_action
-                    else -20
-                )
-            elif family == "inspect" and not branch_action:
-                score -= 30
-            elif branch_action:
-                if selected_branch_match or selected_branch_primary_match:
-                    score += 20
-                elif selected_branch_destination_match:
-                    score += 14
-                else:
-                    score -= 40
+            if selected_branch_mode == "destination":
+                if family in {"relocation", "transfer_or_transform"}:
+                    if selected_branch_destination_commit:
+                        score += 160
+                    elif selected_branch_destination_match:
+                        score += 24
+                    elif branch_action:
+                        score -= 80
+                elif family == "focus":
+                    if selected_branch_match or selected_branch_primary_match:
+                        score -= 18
+                    elif branch_action:
+                        score -= 82
+                    elif primary_role_hits:
+                        score += 6
+                    else:
+                        score -= 12
+                elif family == "inspect":
+                    if selected_branch_destination_commit:
+                        score += 18
+                    elif branch_action:
+                        score -= 24
+                    elif primary_role_hits or support_role_hits:
+                        score += 2
+                elif branch_action:
+                    if selected_branch_destination_match:
+                        score -= 8
+                    else:
+                        score -= 40
+            else:
+                if family == "focus":
+                    score += (
+                        140
+                        if selected_branch_match
+                        else 132
+                        if selected_branch_primary_match
+                        else -90
+                        if branch_action
+                        else -20
+                    )
+                elif family == "inspect" and not branch_action:
+                    score -= 30
+                elif branch_action:
+                    if selected_branch_match or selected_branch_primary_match:
+                        score += 20
+                    elif selected_branch_destination_match:
+                        score += 14
+                    else:
+                        score -= 40
 
         if branch_action and not self._selected_conditional_branch_target:
             score -= 40

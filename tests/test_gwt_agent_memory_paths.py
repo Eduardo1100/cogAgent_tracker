@@ -2707,6 +2707,108 @@ def test_conditional_branch_resolution_promotes_selected_branch_target(tmp_path)
     assert summary["task_relevant_action_shortlist"] == ["focus on red box"]
 
 
+def test_conditional_branch_transfer_task_contract_avoids_fixed_destination(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine if unknown substance B is electrically "
+        "conductive. The unknown substance B is located around the workshop. "
+        "First, focus on the unknown substance B. If it is electrically "
+        "conductive, place it in the red box. If it is electrically "
+        "nonconductive, place it in the green box."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["conditional_branch_task"] is True
+    assert contract["conditional_branch_subject"] == ["unknown substance b"]
+    assert contract["conditional_branch_evidence_target"] == ["unknown substance b"]
+    assert contract["conditional_branch_targets"] == ["red box", "green box"]
+    assert contract["conditional_branches"][0]["mode"] == "destination"
+    assert contract["conditional_branches"][1]["mode"] == "destination"
+    assert contract["destination_container"] == []
+    assert contract["primary_targets"] == ["unknown substance b"]
+
+
+def test_conditional_branch_transfer_shortlist_waits_for_evidence(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine if unknown substance B is electrically "
+        "conductive. The unknown substance B is located around the workshop. "
+        "First, focus on the unknown substance B. If it is electrically "
+        "conductive, place it in the red box. If it is electrically "
+        "nonconductive, place it in the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the workshop. In it, you see unknown substance B, "
+            "a red box, a green box, a battery, and a switch."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at unknown substance",
+            "focus on unknown substance",
+            "connect unknown substance to battery",
+            "look at battery",
+            "activate switch",
+            "move unknown substance to red box",
+            "move unknown substance to green box",
+            "focus on red box",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "gather_branch_evidence"
+    assert "look at unknown substance" in shortlist
+    assert "look at battery" in shortlist
+    assert "activate switch" in shortlist
+    assert "move unknown substance to red box" not in shortlist
+    assert "move unknown substance to green box" not in shortlist
+    assert "focus on red box" not in shortlist
+
+
+def test_conditional_branch_transfer_execute_branch_prefers_selected_destination(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine if unknown substance B is electrically "
+        "conductive. The unknown substance B is located around the workshop. "
+        "First, focus on the unknown substance B. If it is electrically "
+        "conductive, place it in the red box. If it is electrically "
+        "nonconductive, place it in the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._selected_conditional_branch_target = "red box"
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the workshop. In it, you see unknown substance B, "
+            "a red box, a green box, a battery, and a red light bulb."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move unknown substance to red box",
+            "focus on red box",
+            "move unknown substance to green box",
+            "look at unknown substance",
+            "connect unknown substance to battery",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "execute_branch"
+    assert shortlist[0] == "move unknown substance to red box"
+    assert "move unknown substance to green box" not in shortlist[:2]
+
+
 def test_comparison_task_contract_tracks_compared_targets_and_property(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
