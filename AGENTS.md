@@ -81,6 +81,7 @@
     - `agent-iter-18-measurement-instrument-search`
     - `agent-iter-19-artifact-room-frontier`
     - `agent-iter-20-room-navigation-frontier`
+    - `agent-iter-21-growth-task-grounding`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.

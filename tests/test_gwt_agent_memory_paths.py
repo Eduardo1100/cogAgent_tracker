@@ -1008,6 +1008,91 @@ def test_lifecycle_task_contract_sets_lifecycle_sequence_mode(tmp_path):
     assert contract["required_families"] == ["focus"]
 
 
+def test_growth_task_contract_uses_growth_mode_not_inferred_search(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to grow a apple. This will require growing several plants, "
+        "and them being crosspollinated to produce fruit. Seeds can be found in "
+        "the kitchen. To complete the task, focus on the grown apple."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["growth_task"] is True
+    assert contract["inferred_search_mode"] is False
+    assert contract["support_families"] == ["inspect"]
+
+
+def test_growth_task_switches_to_mechanism_phase_after_seed_is_grounded(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to grow a apple. This will require growing several plants, "
+        "and them being crosspollinated to produce fruit. Seeds can be found in "
+        "the kitchen. To complete the task, focus on the grown apple."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.recent_hypothesis_tests = [
+        {
+            "family": "focus",
+            "action": "focus on apple seed",
+            "outcome": "evidence",
+        }
+    ]
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. In it, you see: a flower pot 1 "
+            "(containing soil), a flower pot 2 (containing soil), and a shovel."
+        )
+    }
+
+    assert agent._get_current_phase() == "test_mechanism"
+
+
+def test_growth_task_shortlist_includes_seed_transfer_once_precursor_is_grounded(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to grow a apple. This will require growing several plants, "
+        "and them being crosspollinated to produce fruit. Seeds can be found in "
+        "the kitchen. To complete the task, focus on the grown apple."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.recent_hypothesis_tests = [
+        {
+            "family": "focus",
+            "action": "focus on apple seed",
+            "outcome": "evidence",
+        }
+    ]
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. In it, you see: a flower pot 1 "
+            "(containing soil), a flower pot 2 (containing soil), a bee hive, "
+            "and a shovel."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on apple seed in ceramic cup",
+            "look at flower pot 1",
+            "move apple seed in ceramic cup to flower pot 1",
+            "move apple seed in ceramic cup to flower pot 2",
+            "open bee hive",
+            "open door to outside",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "test_mechanism"
+    assert shortlist[0] == "move apple seed in ceramic cup to flower pot 1"
+    assert "move apple seed in ceramic cup to flower pot 1" in shortlist
+
+
 def test_container_focus_does_not_advance_lifecycle_progress_without_stage_evidence(
     tmp_path,
 ):

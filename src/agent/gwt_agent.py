@@ -246,6 +246,31 @@ class GWTAutogenAgent(AutogenAgent):
         "lifecycle",
         "life cycle",
     )
+    _GROWTH_TASK_HINTS = (
+        "grow",
+        "growing",
+        "grown",
+        "pollinate",
+        "pollinated",
+        "crosspollinate",
+        "crosspollinated",
+        "cross pollinate",
+        "cross pollinated",
+        "produce fruit",
+        "bear fruit",
+        "bearing fruit",
+    )
+    _GROWTH_TASK_TARGET_HINTS = (
+        "seed",
+        "germinating",
+        "seedling",
+        "sapling",
+        "flower",
+        "blossom",
+        "pollen",
+        "fruit",
+        "grown",
+    )
     _TASK_ROLE_PATTERNS = {
         "primary_targets": (
             r"\bfocus on\s+(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
@@ -763,11 +788,23 @@ class GWTAutogenAgent(AutogenAgent):
             conditional_branch_evidence_target = ""
             conditional_branch_targets = []
             conditional_branches = []
+        growth_task = bool(
+            any(
+                self._task_contains_hint(task_lower, hint)
+                for hint in self._GROWTH_TASK_HINTS
+            )
+            and not lifecycle_sequence
+            and not state_change_task
+            and not artifact_creation_task
+            and not measurement_task
+            and not conditional_branch_task
+        )
         inferred_search_mode = bool(
             role_phrases["primary_targets"]
             and not explicit_search_mode
             and not candidate_classes
             and not lifecycle_sequence
+            and not growth_task
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
@@ -812,6 +849,7 @@ class GWTAutogenAgent(AutogenAgent):
         if (
             explicit_search_mode
             or inferred_search_mode
+            or growth_task
             or state_change_task
             or conditional_branch_task
         ) and "inspect" not in required_families:
@@ -973,6 +1011,10 @@ class GWTAutogenAgent(AutogenAgent):
                 continue
             if token not in target_entities:
                 target_entities.append(token)
+        if growth_task:
+            for token in self._GROWTH_TASK_TARGET_HINTS:
+                if token not in target_entities:
+                    target_entities.append(token)
 
         return {
             "required_families": required_families,
@@ -981,6 +1023,7 @@ class GWTAutogenAgent(AutogenAgent):
             "ordering_cues": ordering_cues,
             "procedural_sequence": procedural_sequence,
             "lifecycle_sequence": lifecycle_sequence,
+            "growth_task": growth_task,
             "state_change_task": state_change_task,
             "artifact_creation_task": artifact_creation_task,
             "measurement_task": measurement_task,
@@ -1103,6 +1146,10 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_lifecycle_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("lifecycle_sequence"))
+
+    def _is_growth_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("growth_task"))
 
     def _extract_state_change_goal(self, task: str) -> tuple[list[str], str, str]:
         normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
@@ -3246,6 +3293,28 @@ class GWTAutogenAgent(AutogenAgent):
         return self._role_is_grounded(
             grounded_token_set, role_token_sets["primary_targets"]
         )
+
+    def _growth_task_has_precursor_signal(
+        self,
+        observation: str,
+        *,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_growth_task(contract):
+            return False
+
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        if self._primary_target_is_grounded(contract, grounded_token_set):
+            return True
+
+        if self._get_visible_lifecycle_stage_labels(observation):
+            return True
+
+        return bool(grounded_token_set & set(self._GROWTH_TASK_TARGET_HINTS))
 
     def _supporting_target_is_grounded(
         self,
@@ -6527,6 +6596,38 @@ class GWTAutogenAgent(AutogenAgent):
             ):
                 return "confirm_primary_target"
             return "locate_primary_target"
+        if self._is_growth_task(task_contract):
+            current_observation = (self.percept or {}).get("resulting_observation", "")
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            if self._primary_target_is_grounded(task_contract, grounded_tokens):
+                if "focus" in task_contract.get(
+                    "required_families", []
+                ) and not self._role_focus_completed(
+                    role_token_sets["primary_targets"]
+                ):
+                    return "confirm_primary_target"
+                return "verify_outcome"
+            if not self._growth_task_has_precursor_signal(
+                current_observation,
+                task_contract=task_contract,
+                grounded_tokens=grounded_tokens,
+            ):
+                return "locate_primary_target"
+            mechanism_progress = any(
+                entry["observable_change_attempts"] > 0
+                for entry in self.episode_hypothesis_ledger.values()
+                if entry["family"]
+                in {
+                    "relation",
+                    "tool_application",
+                    "transfer_or_transform",
+                    "device_control",
+                }
+            )
+            if mechanism_progress:
+                return "commit_to_goal"
+            return "test_mechanism"
         if self._is_inferred_target_search_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             role_token_sets = self._get_task_role_token_sets(task_contract)
