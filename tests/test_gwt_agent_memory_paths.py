@@ -3274,6 +3274,68 @@ def test_relation_search_prefers_exit_from_local_dead_end(tmp_path):
     assert "open cupboard" not in shortlist
 
 
+def test_relation_locate_supporting_source_prefers_inferred_renewable_candidate(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {"resulting_observation": "You focus on the red light bulb."}
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at solar panel",
+            "look at gas generator",
+            "look at red light bulb cathode",
+            "open freezer",
+            "activate switch",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_supporting_source"
+    assert summary["relation_frontier"]["support_candidates"][0] == "solar panel"
+    assert "look at solar panel" in shortlist
+    assert "open freezer" not in shortlist
+    assert "activate switch" not in shortlist
+
+
+def test_relation_support_candidate_grounding_advances_abstract_source_phase(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = "You are in the workshop. You see a red light bulb and a solar panel."
+    agent.percept = {"resulting_observation": observation}
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+    agent._update_relation_task_tracking(
+        action="look at solar panel",
+        observation=observation,
+    )
+
+    frontier = agent._get_relation_frontier_snapshot(
+        ["look at solar panel", "activate switch"]
+    )
+
+    assert frontier["supporting_source_grounded"] is True
+    assert agent._get_current_phase() == "inspect_target_mechanism"
+
+
 def test_relation_frontier_prefers_local_mechanism_over_unrelated_pairs(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
