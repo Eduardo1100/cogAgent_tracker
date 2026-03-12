@@ -1758,10 +1758,38 @@ class GWTAutogenAgent(AutogenAgent):
                     grounded_labels.append(label)
         return grounded_labels[:6]
 
-    def _update_artifact_creation_tracking(self, observation: str) -> None:
+    def _extract_grounded_artifact_mentions_from_action(self, action: str) -> list[str]:
+        task_contract = self._get_task_contract()
+        if not self._is_artifact_creation_task(task_contract):
+            return []
+
+        artifact_types = task_contract.get("artifact_type", [])
+        if not artifact_types:
+            return []
+
+        artifact_type = artifact_types[0]
+        normalized_action = self._normalize_runtime_text(action)
+        if not normalized_action:
+            return []
+
+        grounded_labels: list[str] = []
+        patterns = (
+            rf"\b(?:focus on|look in|look at|move|pick up|take|grab|pour|dunk|mix|fill|empty|insert|place|use|heat|cool|boil|cook)\s+([a-z0-9][a-z0-9\s-]{{0,50}}?\b{re.escape(artifact_type)}\b)(?=$|\s+\b(?:to|into|in|on|with|using|from)\b|[).,;])",
+            rf"\bcontaining\s+([a-z0-9][a-z0-9\s-]{{0,40}}?\b{re.escape(artifact_type)}\b)(?=$|\s+\b(?:to|into|in|on|with|using|from)\b|[).,;])",
+            rf"\bfilled with\s+([a-z0-9][a-z0-9\s-]{{0,40}}?\b{re.escape(artifact_type)}\b)(?=$|\s+\b(?:to|into|in|on|with|using|from)\b|[).,;])",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, normalized_action):
+                label = self._normalize_grounded_artifact_label(match.group(1))
+                if label and label not in grounded_labels:
+                    grounded_labels.append(label)
+        return grounded_labels[:6]
+
+    def _record_grounded_artifact_labels(self, labels: list[str]) -> None:
         if not self._is_artifact_creation_task():
             return
-        for label in self._extract_grounded_artifact_mentions(observation):
+
+        for label in labels:
             entry = self._grounded_artifacts.setdefault(
                 label,
                 {
@@ -1770,6 +1798,28 @@ class GWTAutogenAgent(AutogenAgent):
                 },
             )
             entry["last_seen_timestep"] = self.num_actions_taken
+
+    def _update_artifact_creation_tracking(
+        self, observation: str, *, action: str | None = None
+    ) -> None:
+        if not self._is_artifact_creation_task():
+            return
+
+        self._record_grounded_artifact_labels(
+            self._extract_grounded_artifact_mentions(observation)
+        )
+        if not action or action == "None":
+            return
+
+        normalized_observation = self._normalize_runtime_text(observation)
+        if self._HARD_FAILURE_RE.search(observation) or "ambiguous request" in (
+            normalized_observation
+        ):
+            return
+
+        self._record_grounded_artifact_labels(
+            self._extract_grounded_artifact_mentions_from_action(action)
+        )
 
     def _update_artifact_creation_search_tracking(
         self, *, action: str | None, observation: str
@@ -7881,7 +7931,10 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
-        self._update_artifact_creation_tracking(self.adapter.observation)
+        self._update_artifact_creation_tracking(
+            self.adapter.observation,
+            action=action,
+        )
         self._update_artifact_creation_search_tracking(
             action=action,
             observation=self.adapter.observation,
