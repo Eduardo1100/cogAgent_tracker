@@ -1669,6 +1669,46 @@ def test_state_change_phase_switches_to_probe_sources_after_container_search(tmp
     assert "sink" in snapshot["source_candidates"]
 
 
+def test_state_change_tracking_records_local_room_search_before_target_grounding(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to freeze water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the kitchen. In it, you see a sink, a cupboard, "
+        "and a fridge. You also see: A door to the hallway (that is open), "
+        "A door to the bathroom (that is closed), A door to the outside "
+        "(that is closed)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(
+        action="look in kitchen",
+        observation=observation,
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(
+        action="open cupboard",
+        observation=observation,
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(
+        action="open door to bathroom",
+        observation=observation,
+    )
+
+    assert agent._search_location_states["kitchen"] == {
+        "local_exploration": 2,
+        "target_grounded": False,
+    }
+
+
 def test_state_change_shortlist_prefers_source_candidates_after_container_exhaustion(
     tmp_path,
 ):
@@ -1707,6 +1747,52 @@ def test_state_change_shortlist_prefers_source_candidates_after_container_exhaus
     assert "activate sink" in shortlist
     assert "move bowl to kitchen" not in shortlist
     assert "focus on kitchen" not in shortlist
+
+
+def test_state_change_shortlist_reopens_room_frontier_after_local_probe_stall(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to freeze water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._search_location_states["kitchen"] = {
+        "local_exploration": 3,
+        "target_grounded": False,
+    }
+    observation = (
+        "This room is called the kitchen. In it, you see a substance called air, "
+        "a freezer, a fridge, and a sink. You also see: A door to the hallway "
+        "(that is open), A door to the bathroom (that is closed), A door to the "
+        "outside (that is closed)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+    agent.admissible_actions = [
+        "focus on air",
+        "open freezer",
+        "open fridge",
+        "look in sink",
+        "activate sink",
+        "go to hallway",
+        "open door to bathroom",
+        "look at door to bathroom",
+    ]
+
+    summary = agent._summarize_admissible_actions(
+        agent.admissible_actions,
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_substance"
+    assert "look at door to bathroom" in shortlist
+    assert "open door to bathroom" in shortlist
+    assert "focus on air" not in shortlist
+    assert "open freezer" not in shortlist
 
 
 def test_state_change_probe_shortlist_ignores_non_target_grounded_substances(tmp_path):

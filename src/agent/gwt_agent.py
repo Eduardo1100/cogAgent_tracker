@@ -1869,20 +1869,45 @@ class GWTAutogenAgent(AutogenAgent):
         if not self._is_state_change_task():
             return
         self._update_grounded_substances(observation)
+        task_contract = self._get_task_contract()
+        grounded_tokens = set(self._get_observation_grounded_tokens())
+        room_signature = self._get_current_location_signature(observation)
+        target_grounded = self._state_change_target_is_grounded(
+            task_contract, grounded_tokens
+        )
+        if room_signature:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if target_grounded:
+                room_state["target_grounded"] = True
         if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
             return
 
         family = self._classify_action_family(action)
+        if room_signature and not target_grounded:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if family in {"inspect", "device_control"} and not (
+                self._action_targets_room_frontier(action, observation, family=family)
+            ):
+                room_state["local_exploration"] += 1
         if family not in {"inspect", "device_control"}:
             return
 
         if not self._is_container_like_action(action, family=family):
             return
 
-        grounded_tokens = set(self._get_observation_grounded_tokens())
-        if self._state_change_target_is_grounded(
-            self._get_task_contract(), grounded_tokens
-        ):
+        if target_grounded:
             return
 
         normalized = self._normalize_runtime_text(action)
@@ -2436,6 +2461,30 @@ class GWTAutogenAgent(AutogenAgent):
         snapshot = self._get_substance_search_snapshot()
         return len(snapshot.get("exhausted_containers", [])) >= 2 and bool(
             snapshot.get("source_candidates")
+        )
+
+    def _state_change_room_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_state_change_task(contract):
+            return False
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        if self._state_change_target_is_grounded(contract, grounded_token_set):
+            return False
+        if visible_doors < 2 or not current_room:
+            return False
+        room_state = self._search_location_states.get(current_room, {})
+        return bool(
+            not room_state.get("target_grounded")
+            and room_state.get("local_exploration", 0) >= 2
         )
 
     def _canonicalize_unsupported_substance_action(
@@ -4964,6 +5013,8 @@ class GWTAutogenAgent(AutogenAgent):
         action: str,
         family: str,
         current_phase: str,
+        room_frontier_action: bool,
+        room_search_stalled: bool,
         content_token_set: set[str],
         grounded_token_set: set[str],
         task_contract: dict,
@@ -5144,6 +5195,37 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform",
             }:
                 score += 2 if (substance_role_hits or primary_role_hits) else -10
+
+        if (
+            room_search_stalled
+            and not substance_grounded
+            and current_phase in {"locate_substance", "probe_sources"}
+        ):
+            if room_frontier_action:
+                if family == "inspect":
+                    score += 10
+                    if normalized.startswith("look around"):
+                        score += 4
+                elif family == "device_control":
+                    score += 14
+                elif family == "relocation":
+                    score += 22
+            elif family == "inspect":
+                if source_candidate_match:
+                    score += 3
+                elif self._is_container_like_action(action, family=family):
+                    score -= 12
+            elif family == "device_control":
+                if source_candidate_match:
+                    score += 4
+                elif self._is_container_like_action(action, family=family):
+                    score -= 14
+            elif family == "relocation":
+                score -= 6
+            elif family == "focus" and not (
+                substance_full_match or grounded_substance_match
+            ):
+                score -= 10
 
         if not substance_grounded:
             if family == "focus" and not substance_role_hits:
@@ -6300,6 +6382,12 @@ class GWTAutogenAgent(AutogenAgent):
         room_frontier_action = self._action_targets_room_frontier(
             action, current_observation, family=family
         )
+        state_change_room_search_stalled = self._state_change_room_search_stalled(
+            current_room=current_room,
+            visible_doors=visible_doors,
+            task_contract=task_contract,
+            grounded_tokens=grounded_token_set,
+        )
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -6636,6 +6724,8 @@ class GWTAutogenAgent(AutogenAgent):
                 action=action,
                 family=family,
                 current_phase=current_phase,
+                room_frontier_action=room_frontier_action,
+                room_search_stalled=state_change_room_search_stalled,
                 content_token_set=content_token_set,
                 grounded_token_set=grounded_token_set,
                 task_contract=task_contract,
