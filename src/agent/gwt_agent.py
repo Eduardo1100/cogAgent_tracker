@@ -1956,14 +1956,16 @@ class GWTAutogenAgent(AutogenAgent):
         if not normalized:
             return ""
 
-        destination_match = re.search(
-            r"\b(?:to|into|in|on)\b\s+([a-z0-9][a-z0-9\s-]{0,60})$",
-            normalized,
+        destination_matches = list(
+            re.finditer(
+                r"\b(?:to|into|in|on)\b\s+([a-z0-9][a-z0-9\s-]{0,60}?)(?=\s+\b(?:to|into|in|on)\b|$)",
+                normalized,
+            )
         )
-        if not destination_match:
+        if not destination_matches:
             return ""
         destination_tokens = self._extract_runtime_tokens(
-            destination_match.group(1),
+            destination_matches[-1].group(1),
             stopwords=self._RUNTIME_TOKEN_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
             limit=6,
         )
@@ -2915,6 +2917,7 @@ class GWTAutogenAgent(AutogenAgent):
         patterns = (
             r"\b(?:room|location)\s+is\s+called\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
             r"\byou\s+are\s+in\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
+            r"\byou\s+move\s+to\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?:[.,\n]|$)",
         )
         location_tokens: list[str] = []
         for pattern in patterns:
@@ -3424,9 +3427,136 @@ class GWTAutogenAgent(AutogenAgent):
             "support_confirmed": False,
             "stalled_confirmations": 0,
             "status": "active",
+            "aliases": [],
+            "last_seen_room": "",
         }
         self._candidate_states[candidate] = state
         return state
+
+    def _get_candidate_labels(self, candidate: str) -> list[str]:
+        if not candidate:
+            return []
+        labels = [candidate]
+        state = self._candidate_states.get(candidate, {})
+        for alias in state.get("aliases", []):
+            if alias and alias not in labels:
+                labels.append(alias)
+        return labels
+
+    def _record_candidate_alias(
+        self, candidate: str, alias: str, task_contract: dict | None = None
+    ) -> None:
+        if not candidate or not alias:
+            return
+        contract = task_contract or self._get_task_contract()
+        normalized_alias = self._phrase_to_referent_signature(alias)
+        if (
+            not normalized_alias
+            or normalized_alias == candidate
+            or self._is_support_referent(normalized_alias, contract)
+        ):
+            return
+        alias_tokens = set(self._extract_runtime_tokens(normalized_alias, limit=6))
+        if not alias_tokens:
+            return
+        state = self._get_candidate_state(candidate)
+        aliases = state.setdefault("aliases", [])
+        if normalized_alias not in aliases:
+            aliases.append(normalized_alias)
+            state["aliases"] = aliases[-6:]
+
+    def _candidate_signature_matches(self, candidate: str, signature: str) -> bool:
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return False
+        for label in self._get_candidate_labels(candidate):
+            label_tokens = self._referent_tokens(label)
+            if not label_tokens:
+                continue
+            overlap = signature_tokens & label_tokens
+            if signature_tokens == label_tokens:
+                return True
+            if len(signature_tokens) >= 2 and signature_tokens.issubset(label_tokens):
+                return True
+            if len(label_tokens) >= 2 and label_tokens.issubset(signature_tokens):
+                return True
+            if len(overlap) >= 2:
+                return True
+        return False
+
+    def _candidate_observed(self, candidate: str, observation: str) -> bool:
+        observation_tokens = set(self._extract_runtime_tokens(observation, limit=36))
+        if not observation_tokens:
+            return False
+        for label in self._get_candidate_labels(candidate):
+            label_tokens = self._referent_tokens(label)
+            if label_tokens and label_tokens.issubset(observation_tokens):
+                return True
+        return False
+
+    def _extract_observation_candidate_alias(
+        self, observation: str, *, family: str | None = None
+    ) -> str:
+        normalized = self._normalize_runtime_text(observation)
+        if not normalized:
+            return ""
+
+        patterns = []
+        if family == "focus":
+            patterns.append(r"\byou\s+focus\s+on\s+(?:the\s+)?(.+?)(?:[.!?,]|$)")
+        if family in {"relocation", "transfer_or_transform"}:
+            patterns.append(
+                r"\byou\s+move\s+(?:the\s+)?(.+?)\s+to\s+(?:the\s+)?[a-z0-9][a-z0-9\s-]{0,60}(?:[.!?,]|$)"
+            )
+        patterns.append(
+            r"^\s*(?:a|an|the)\s+(.+?)(?=\s+(?:in|with|that|which|currently|containing|on)\b|[.,\n]|$)"
+        )
+
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            alias = self._phrase_to_referent_signature(match.group(1))
+            if alias:
+                return alias
+        return ""
+
+    def _resolve_candidate_room_signature(
+        self, observation: str, previous_observation: str
+    ) -> str:
+        return self._get_current_location_signature(
+            observation
+        ) or self._get_current_location_signature(previous_observation)
+
+    def _signature_looks_like_room(
+        self, signature: str, observation: str, previous_observation: str
+    ) -> bool:
+        if not signature:
+            return False
+        signature_tokens = self._referent_tokens(signature)
+        room_like_noncandidate_tokens = self._NON_CANDIDATE_REFERENT_TOKENS - {
+            "agent",
+            "air",
+            "door",
+            "inventory",
+            "living",
+            "room",
+            "studio",
+        }
+        if signature_tokens and signature_tokens.issubset(
+            room_like_noncandidate_tokens
+        ):
+            return True
+        known_rooms = set(self._extract_visible_room_targets(observation))
+        known_rooms.update(self._extract_visible_room_targets(previous_observation))
+        current_room = self._get_current_location_signature(observation)
+        previous_room = self._get_current_location_signature(previous_observation)
+        if current_room:
+            known_rooms.add(current_room)
+        if previous_room:
+            known_rooms.add(previous_room)
+        known_rooms.update(self._get_task_contract().get("destination_room", []))
+        return signature in known_rooms
 
     @staticmethod
     def _normalize_observation_signature(observation: str) -> str:
@@ -3473,8 +3603,14 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         contract = task_contract or self._get_task_contract()
         observation_tokens = set(self._extract_runtime_tokens(observation, limit=32))
-        candidate_tokens = set(self._extract_runtime_tokens(candidate, limit=6))
-        if not candidate_tokens or not candidate_tokens.issubset(observation_tokens):
+        candidate_visible = any(
+            label_tokens and label_tokens.issubset(observation_tokens)
+            for label_tokens in (
+                self._referent_tokens(label)
+                for label in self._get_candidate_labels(candidate)
+            )
+        )
+        if not candidate_visible:
             return False
 
         role_token_sets = self._get_task_role_token_sets(contract)
@@ -3502,6 +3638,15 @@ class GWTAutogenAgent(AutogenAgent):
         family = self._classify_action_family(executed_action)
         referent = self._get_action_referent_signature(executed_action, family=family)
         candidate = self._get_candidate_action_target(executed_action, family=family)
+        destination_signature = self._extract_action_destination_signature(
+            executed_action, family=family
+        )
+        observation_alias = self._extract_observation_candidate_alias(
+            observation, family=family
+        )
+        candidate_room = self._resolve_candidate_room_signature(
+            observation, previous_observation
+        )
         normalized_observation = self._normalize_observation_signature(observation)
         previous_signature = self._normalize_observation_signature(previous_observation)
         observation_stalled = normalized_observation == previous_signature
@@ -3509,6 +3654,9 @@ class GWTAutogenAgent(AutogenAgent):
         if family == "focus" and candidate:
             state = self._get_candidate_state(candidate)
             state["focused"] = True
+            if candidate_room:
+                state["last_seen_room"] = candidate_room
+            self._record_candidate_alias(candidate, observation_alias)
             if candidate not in self._rejected_candidates:
                 self._active_candidate = candidate
 
@@ -3517,14 +3665,35 @@ class GWTAutogenAgent(AutogenAgent):
             return
 
         active_state = self._get_candidate_state(active_candidate)
-        active_candidate_tokens = set(
-            self._extract_runtime_tokens(active_candidate, limit=6)
+        candidate_matches_active = bool(
+            candidate and self._candidate_signature_matches(active_candidate, candidate)
         )
-        action_tokens = set(self._extract_runtime_tokens(executed_action, limit=12))
+        if not candidate_matches_active and observation_alias:
+            candidate_matches_active = self._candidate_signature_matches(
+                active_candidate, observation_alias
+            )
+        if candidate_matches_active:
+            if candidate:
+                self._record_candidate_alias(active_candidate, candidate)
+            if family in {"focus", "inspect"} and referent:
+                self._record_candidate_alias(active_candidate, referent)
+            self._record_candidate_alias(active_candidate, observation_alias)
+            if family in {"focus", "inspect"} and candidate_room:
+                active_state["last_seen_room"] = candidate_room
+            elif (
+                family in {"relocation", "transfer_or_transform"}
+                and destination_signature
+                and self._signature_looks_like_room(
+                    destination_signature, observation, previous_observation
+                )
+            ):
+                active_state["last_seen_room"] = destination_signature
+            elif family in {"relocation", "transfer_or_transform"} and candidate_room:
+                active_state["last_seen_room"] = candidate_room
+
         if (
             family in {"relocation", "transfer_or_transform"}
-            and active_candidate_tokens
-            and active_candidate_tokens.issubset(action_tokens)
+            and candidate_matches_active
         ):
             if self._observation_confirms_candidate_destination(
                 active_candidate, observation
@@ -3541,7 +3710,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
         support_referent = self._is_support_referent(referent)
         if family in {"focus", "inspect"} and (
-            referent == active_candidate or support_referent
+            candidate_matches_active or support_referent
         ):
             if active_state["support_confirmed"] and (
                 repeated_confirmation or observation_stalled
@@ -3574,6 +3743,16 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["destination_room"] = task_contract["destination_room"][:1]
         if self._active_candidate:
             snapshot["active_candidate"] = self._active_candidate
+            active_state = self._candidate_states.get(self._active_candidate, {})
+            if active_state.get("last_seen_room"):
+                snapshot["active_candidate_room"] = active_state["last_seen_room"]
+            aliases = [
+                alias
+                for alias in active_state.get("aliases", [])
+                if alias != self._active_candidate
+            ]
+            if aliases:
+                snapshot["active_candidate_aliases"] = aliases[-2:]
         if self._rejected_candidates:
             snapshot["rejected_candidates"] = self._rejected_candidates[-3:]
         return snapshot
@@ -6250,10 +6429,66 @@ class GWTAutogenAgent(AutogenAgent):
                 if self._active_candidate
                 else {}
             )
+            active_candidate_room = active_candidate_state.get("last_seen_room", "")
+            active_candidate_room_tokens = (
+                self._referent_tokens(active_candidate_room)
+                if active_candidate_room
+                else set()
+            )
+            active_candidate_visible = bool(
+                self._active_candidate
+                and self._candidate_observed(
+                    self._active_candidate, current_observation
+                )
+            )
+            active_candidate_match = bool(
+                self._active_candidate
+                and (
+                    self._candidate_signature_matches(
+                        self._active_candidate, candidate_target
+                    )
+                    or self._candidate_signature_matches(
+                        self._active_candidate, referent_signature
+                    )
+                )
+            )
+            reacquire_active_candidate = (
+                bool(self._active_candidate)
+                and bool(active_candidate_room)
+                and current_room != active_candidate_room
+                and not active_candidate_visible
+                and not active_candidate_state.get("relocated")
+            )
+            room_reacquisition_action = bool(
+                active_candidate_room_tokens
+                and active_candidate_room_tokens.issubset(content_token_set)
+            )
             if family == "focus" and support_referent:
                 score -= 24
             elif family == "inspect" and support_referent:
                 score -= 8
+
+            if active_candidate_match:
+                if family == "relocation":
+                    score += 14
+                    if support_role_hits:
+                        score += 6
+                elif family == "transfer_or_transform":
+                    score += 8
+                elif family == "inspect" and not active_candidate_state.get(
+                    "support_confirmed"
+                ):
+                    score += 4
+
+            if reacquire_active_candidate:
+                if family == "relocation" and room_reacquisition_action:
+                    score += 18
+                elif family == "device_control" and room_reacquisition_action:
+                    score += 14
+                elif family == "inspect" and room_reacquisition_action:
+                    score += 8
+                elif support_role_hits and family in {"relocation", "device_control"}:
+                    score -= 8
 
             if candidate_target:
                 if candidate_target in self._rejected_candidates:
