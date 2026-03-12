@@ -1623,3 +1623,115 @@ def test_invalid_measurement_exact_action_is_retired_from_shortlist(tmp_path):
     shortlist = summary["task_relevant_action_shortlist"]
     assert "use thermometer on solid unknown substance c" in shortlist
     assert "use thermometer on orange box" not in shortlist
+
+
+def test_artifact_creation_task_contract_tracks_artifact_roles_and_cleans_tokens(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Use chemistry to create green-blue paint. When part-way done, focus on the "
+        "intermediate (secondary color) paint. When completely done, focus on the "
+        "green paint."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["artifact_creation_task"] is True
+    assert contract["artifact_type"] == ["paint"]
+    assert contract["artifact_intermediate_targets"] == [
+        "intermediate secondary color paint"
+    ]
+    assert contract["artifact_final_targets"] == ["green paint"]
+    assert "paint" in contract["target_entities"]
+    assert "green" in contract["target_entities"]
+    assert "when" not in contract["target_entities"]
+    assert "part" not in contract["target_entities"]
+    assert "way" not in contract["target_entities"]
+    assert "done" not in contract["target_entities"]
+
+
+def test_artifact_creation_shortlist_prefers_missing_ingredient_search_to_empty_transfer(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Use chemistry to create green-blue paint. When part-way done, focus on the "
+        "intermediate (secondary color) paint. When completely done, focus on the "
+        "green paint."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the art studio. In it, you see a cup containing blue "
+        "paint, an empty wood cup, a drawer, and the door to the workshop."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_artifact_creation_tracking(observation)
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look in drawer",
+            "open workshop door",
+            "look around",
+            "pour blue paint into wood cup",
+            "move blue paint to wood cup",
+            "focus on blue paint",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "find_missing_ingredient_or_reagent"
+    assert "look in drawer" in shortlist
+    assert "open workshop door" in shortlist
+    assert "pour blue paint into wood cup" not in shortlist
+    assert "move blue paint to wood cup" not in shortlist
+
+
+def test_artifact_creation_shortlist_downranks_wrong_type_color_distractors(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Use chemistry to create green-blue paint. When part-way done, focus on the "
+        "intermediate (secondary color) paint. When completely done, focus on the "
+        "green paint."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the workshop. In it, you see a green light bulb, "
+        "a green paint can, and a freezer."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_artifact_creation_tracking(observation)
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at green light bulb",
+            "focus on green light bulb",
+            "look at green paint can",
+            "focus on green paint can",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "look at green paint can" in shortlist
+    assert "focus on green paint can" in shortlist
+    assert "look at green light bulb" not in shortlist
+    assert "focus on green light bulb" not in shortlist
+
+
+def test_canonicalize_room_transition_prefers_opening_required_door(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    canonical = agent._canonicalize_suggested_action(
+        "go to workshop",
+        [
+            "open workshop door",
+            "look at workshop",
+            "go to hallway",
+        ],
+    )
+
+    assert canonical == "open workshop door"
