@@ -2479,9 +2479,59 @@ def test_measurement_search_frontier_reappears_after_local_instrument_search(
     shortlist = summary["task_relevant_action_shortlist"]
     assert agent._search_location_states["art studio"]["local_exploration"] == 2
     assert summary["current_phase"] == "locate_instrument"
-    assert "open cupboard" in shortlist
     assert "go to hallway" in shortlist
+    assert "open cupboard" not in shortlist
+    assert "look at art studio" not in shortlist
     assert "focus on cup containing red paint in art studio" not in shortlist
+
+
+def test_measurement_shortlist_avoids_revisiting_exhausted_room_frontier(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the temperature of unknown substance B, "
+        "which is located around the living room. First, focus on the "
+        "thermometer. Next, focus on the unknown substance B. If the unknown "
+        "substance B temperature is above 100.0 degrees celsius, place it in "
+        "the red box. If the unknown substance B temperature is below 100.0 "
+        "degrees celsius, place it in the green box. The boxes are located "
+        "around the bathroom."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._search_location_states["living"] = {
+        "local_exploration": 2,
+        "target_grounded": False,
+    }
+    agent._search_location_states["hallway"] = {
+        "local_exploration": 0,
+        "target_grounded": False,
+    }
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see the agent, "
+            "a substance called air, a picture. You also see: A door to "
+            "the living room (that is open). A door to the bedroom "
+            "(that is closed)."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on living room",
+            "look at living room",
+            "go to living room",
+            "open bedroom door",
+            "look at hallway",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_instrument"
+    assert "open bedroom door" in shortlist
+    assert "focus on living room" not in shortlist
+    assert "look at living room" not in shortlist
+    assert "go to living room" not in shortlist
 
 
 def test_measurement_transition_event_requires_confirming_measurement(tmp_path):
