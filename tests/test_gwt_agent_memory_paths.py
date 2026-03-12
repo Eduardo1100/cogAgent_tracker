@@ -714,6 +714,8 @@ def test_task_contract_preserves_primary_target_and_relation_roles(tmp_path):
     assert contract["primary_targets"] == ["red light bulb"]
     assert contract["supporting_targets"] == ["renewable power source"]
     assert contract["required_relations"] == ["electrical circuit"]
+    assert contract["inferred_search_mode"] is True
+    assert contract["relation_mechanism_task"] is True
     assert "red" in contract["target_entities"]
     assert "circuit" in contract["target_entities"]
     assert "create" not in contract["target_entities"]
@@ -740,21 +742,24 @@ def test_ordered_target_progress_preserves_discriminative_target_modifiers(tmp_p
 def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
-        "Turn on the red light bulb by powering it using a renewable power source. "
+        "Turn on the red light bulb by powering it using the solar panel. "
         "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
     )
     agent.task_status = "INCOMPLETE"
     agent._reset_episode_reasoning_state()
-    agent.percept = {
-        "resulting_observation": (
-            "You are in the workshop. You see a red light bulb, a red light bulb anode, "
-            "a red light bulb cathode, a red wire, a solar cell, a blue light bulb, "
-            "a green light bulb, and a freezer."
-        )
-    }
+    observation = (
+        "You are in the workshop. You see a red light bulb, a red light bulb anode, "
+        "a red light bulb cathode, a red wire, a solar panel, a blue light bulb, "
+        "a green light bulb, and a freezer."
+    )
+    agent.percept = {"resulting_observation": observation}
     agent._update_ordered_target_progress(
         executed_action="focus on red light bulb",
         observation="You focus on the red light bulb.",
+    )
+    agent._update_relation_task_tracking(
+        action="look at solar panel",
+        observation=observation,
     )
 
     summary = agent._summarize_admissible_actions(
@@ -764,7 +769,7 @@ def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_p
             "look at blue light bulb",
             "look at red light bulb cathode",
             "connect red wire to red light bulb cathode",
-            "connect solar cell to red wire",
+            "connect solar panel to red wire",
         ],
         shortlist_limit=3,
     )
@@ -772,7 +777,7 @@ def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_p
     shortlist = summary["task_relevant_action_shortlist"]
     assert "look at red light bulb cathode" in shortlist
     assert "connect red wire to red light bulb cathode" in shortlist
-    assert "connect solar cell to red wire" in shortlist
+    assert "connect solar panel to red wire" in shortlist
     assert "open freezer" not in shortlist
     assert "look at blue light bulb" not in shortlist
 
@@ -1735,3 +1740,166 @@ def test_canonicalize_room_transition_prefers_opening_required_door(tmp_path):
     )
 
     assert canonical == "open workshop door"
+
+
+def test_relation_task_phase_locates_primary_target_before_generic_act(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. Here you see the door to the art studio, "
+            "the door to the bedroom, and the door to the workshop."
+        )
+    }
+
+    assert agent._get_current_phase() == "locate_primary_target"
+
+
+def test_relation_search_prefers_exit_from_local_dead_end(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using a renewable power source. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the art studio. Here you see blue paint, an empty cup, "
+        "and the door to the hallway."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_relation_task_tracking(
+        action="look at blue paint",
+        observation=observation,
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look around",
+            "look at blue paint",
+            "open cupboard",
+            "go to hallway",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_primary_target"
+    assert "go to hallway" in shortlist
+    assert "open cupboard" not in shortlist
+
+
+def test_relation_frontier_prefers_local_mechanism_over_unrelated_pairs(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using the solar panel. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "You are in the workshop. You see a red light bulb, a red light bulb cathode, "
+        "a solar panel, a switch, a blue light bulb, and a buzzer."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+    agent._update_relation_task_tracking(
+        action="look at solar panel",
+        observation=observation,
+    )
+    agent._target_status_by_referent["red light bulb"] = "off"
+    agent._get_hypothesis_entry("relation")["tests"] = 1
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at solar panel",
+            "look at red light bulb cathode",
+            "activate switch",
+            "connect anode in buzzer to blue light bulb cathode",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "integrate_control_or_verify"
+    assert summary["relation_frontier"]["frontier_entities"]
+    assert "look at red light bulb cathode" in shortlist
+    assert "activate switch" in shortlist
+    assert "connect anode in buzzer to blue light bulb cathode" not in shortlist
+
+
+def test_invalid_control_guess_shifts_relation_shortlist_to_adjacent_control(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using the solar panel. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = "You are in the workshop. You see a red light bulb, a solar panel, and a switch."
+    agent.percept = {"resulting_observation": observation}
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+    agent._target_status_by_referent["red light bulb"] = "off"
+    agent._get_hypothesis_entry("relation")["tests"] = 1
+    agent._record_invalid_referent_attempt(
+        family="device_control",
+        action="activate solar panel",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "activate solar panel",
+            "activate switch",
+            "look at switch",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "integrate_control_or_verify"
+    assert shortlist[0] == "activate switch"
+
+
+def test_update_percept_exposes_relation_frontier_runtime_context(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Turn on the red light bulb by powering it using the solar panel. "
+        "First, focus on the red light bulb. Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent.curr_episodic_memory = []
+    agent.num_actions_taken = 1
+    agent.max_actions = 35
+    agent.action_agent = SimpleNamespace(system_message="")
+    agent._action_agent_base_prompt = "BASE ACTION PROMPT"
+    agent._reset_episode_reasoning_state()
+    agent.admissible_actions = ["look around"]
+    agent.adapter = SimpleNamespace(
+        admissible_actions=[
+            "look around",
+            "look at solar panel",
+            "focus on red light bulb",
+            "activate switch",
+        ],
+        observation=(
+            "You are in the workshop. You see a red light bulb, a solar panel, "
+            "and a switch."
+        ),
+    )
+
+    agent.update_percept("look at solar panel")
+
+    assert "relation_frontier" in agent.percept
+    assert agent.percept["relation_frontier"]["primary_target_grounded"] is True
+    assert "Relation frontier snapshot" in agent.action_agent.system_message
