@@ -7504,6 +7504,13 @@ class GWTAutogenAgent(AutogenAgent):
         direct_measurement_ready = latest_direct_measurement is not None
         property_resolved = self._measurement_property_is_resolved(task_contract)
         room_referent_match = bool(current_room and referent_signature == current_room)
+        referent_room_state = self._search_location_states.get(referent_signature, {})
+        exhausted_room_referent = bool(
+            referent_signature
+            and referent_signature != current_room
+            and referent_room_state.get("local_exploration", 0) >= 2
+            and not referent_room_state.get("target_grounded")
+        )
         score = 0
 
         if current_phase == "locate_instrument":
@@ -7514,19 +7521,23 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 48
                 else:
                     score -= 32
+                if exhausted_room_referent:
+                    score -= 18
             elif family == "inspect":
                 if instrument_referent_match:
                     score += 12
                 elif referent_matches_target or primary_matches_target:
                     score -= 30
+                elif exhausted_room_referent:
+                    score -= 18
                 elif room_referent_match:
-                    score += 8
+                    score += -4 if room_search_stalled else 8
                 elif normalized.startswith(
                     "look in "
                 ) and self._is_container_like_action(action, family=family):
-                    score += 2
+                    score += -4 if room_search_stalled else 2
                 elif self._is_container_like_action(action, family=family):
-                    score -= 4
+                    score -= 8 if room_search_stalled else 4
                 elif room_frontier_action:
                     score += 8 if room_search_stalled else 0
                 else:
@@ -7535,13 +7546,19 @@ class GWTAutogenAgent(AutogenAgent):
                 if instrument_referent_match:
                     score += 10
                 elif self._action_mentions_door(action, family=family):
-                    score += 12 if room_search_stalled else 2
+                    score += (
+                        -10
+                        if exhausted_room_referent
+                        else 12
+                        if room_search_stalled
+                        else 2
+                    )
                 elif normalized.startswith("open ") and self._is_container_like_action(
                     action, family=family
                 ):
-                    score += 20
+                    score += 4 if room_search_stalled else 20
                 elif self._is_container_like_action(action, family=family):
-                    score += 4
+                    score += -4 if room_search_stalled else 4
                 else:
                     score -= 8
             elif family == "relocation":
@@ -7550,7 +7567,13 @@ class GWTAutogenAgent(AutogenAgent):
                 elif referent_matches_target or primary_matches_target:
                     score -= 24
                 elif room_frontier_action:
-                    score += 14 if room_search_stalled else 0
+                    score += (
+                        -18
+                        if exhausted_room_referent
+                        else 14
+                        if room_search_stalled
+                        else 0
+                    )
                 else:
                     score -= 14
                     if normalized.startswith(("move ", "pick up ", "take ", "grab ")):
@@ -7567,18 +7590,35 @@ class GWTAutogenAgent(AutogenAgent):
 
             if room_search_stalled:
                 if room_frontier_action:
-                    if family == "inspect":
-                        score += 6
-                    elif family == "device_control":
-                        score += 8
-                    elif family == "relocation":
+                    if exhausted_room_referent:
+                        if family == "inspect":
+                            score -= 18
+                        elif family == "device_control":
+                            score -= 18
+                        elif family == "relocation":
+                            score -= 24
+                    elif family == "inspect":
                         score += 10
+                    elif family == "device_control":
+                        score += 12
+                    elif family == "relocation":
+                        score += 14
                 elif family == "inspect" and not instrument_referent_match:
-                    score -= 24 if not room_referent_match else 12
+                    if room_referent_match:
+                        score -= 18
+                    elif self._is_container_like_action(action, family=family):
+                        score -= 10
+                    else:
+                        score -= 24
                 elif family == "focus" and not instrument_referent_match:
-                    score -= 24
+                    score -= (
+                        36 if room_referent_match or exhausted_room_referent else 24
+                    )
                 elif family == "device_control" and not instrument_referent_match:
-                    score -= 8
+                    if self._is_container_like_action(action, family=family):
+                        score -= 14
+                    else:
+                        score -= 8
 
         elif current_phase == "locate_measured_target":
             if family == "focus":
