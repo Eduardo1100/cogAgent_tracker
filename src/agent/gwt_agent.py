@@ -378,6 +378,63 @@ class GWTAutogenAgent(AutogenAgent):
         "toggle",
         "trigger",
     }
+    _ABSTRACT_SUPPORT_ROLE_HINTS = {
+        "electric",
+        "electrical",
+        "electricity",
+        "energy",
+        "power",
+        "renewable",
+        "source",
+        "supply",
+    }
+    _POWER_SOURCE_HINTS = {
+        "battery",
+        "cell",
+        "charger",
+        "dynamo",
+        "generator",
+        "outlet",
+        "panel",
+        "photovoltaic",
+        "reactor",
+        "socket",
+        "solar",
+        "supply",
+        "turbine",
+        "wind",
+    }
+    _RENEWABLE_SOURCE_HINTS = {
+        "hydro",
+        "photovoltaic",
+        "renewable",
+        "solar",
+        "sun",
+        "sunlight",
+        "turbine",
+        "water",
+        "waterwheel",
+        "wind",
+    }
+    _NON_RENEWABLE_SOURCE_HINTS = {
+        "coal",
+        "diesel",
+        "fossil",
+        "fuel",
+        "gas",
+        "petrol",
+    }
+    _POWER_SINK_HINTS = {
+        "anode",
+        "bulb",
+        "buzzer",
+        "cathode",
+        "component",
+        "light",
+        "motor",
+        "terminal",
+        "wire",
+    }
     _RELATION_BRIDGE_HINTS = {
         "adapter",
         "cable",
@@ -3869,9 +3926,206 @@ class GWTAutogenAgent(AutogenAgent):
             self._get_observation_grounded_tokens()
         )
         role_token_sets = self._get_task_role_token_sets(contract)
-        return self._role_is_grounded(
+        if self._role_is_grounded(
             grounded_token_set, role_token_sets["supporting_targets"]
+        ):
+            return True
+        if not self._relation_support_role_uses_candidate_inference(
+            task_contract=contract
+        ):
+            return False
+
+        for candidate in self._get_relation_support_candidate_signatures(
+            task_contract=contract
+        ):
+            if not self._relation_support_candidate_can_ground(
+                candidate,
+                task_contract=contract,
+                role_token_sets=role_token_sets,
+            ):
+                continue
+            if self._relation_support_candidate_is_grounded(
+                candidate, grounded_tokens=grounded_token_set
+            ):
+                return True
+        return False
+
+    def _relation_support_role_uses_candidate_inference(
+        self, *, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not (
+            self._is_relation_mechanism_task(contract)
+            or self._is_inferred_target_search_task(contract)
+        ):
+            return False
+        role_token_sets = self._get_task_role_token_sets(contract)
+        return any(
+            token_set and bool(token_set & self._ABSTRACT_SUPPORT_ROLE_HINTS)
+            for token_set in role_token_sets["supporting_targets"]
         )
+
+    def _score_relation_support_candidate_signature(
+        self,
+        signature: str,
+        *,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+    ) -> int:
+        contract = task_contract or self._get_task_contract()
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return -24
+        if signature_tokens.issubset(self._NON_CANDIDATE_REFERENT_TOKENS):
+            return -24
+        if self._signature_matches_role(signature, role_sets["primary_targets"]):
+            return -24
+
+        support_tokens = {
+            token
+            for token_set in role_sets["supporting_targets"]
+            for token in token_set
+        }
+        support_match = self._signature_matches_role(
+            signature, role_sets["supporting_targets"]
+        )
+        power_like = bool(signature_tokens & self._POWER_SOURCE_HINTS)
+        renewable_requested = "renewable" in support_tokens
+        renewable_like = bool(signature_tokens & self._RENEWABLE_SOURCE_HINTS)
+        nonrenewable_like = bool(signature_tokens & self._NON_RENEWABLE_SOURCE_HINTS)
+        control_like = bool(signature_tokens & self._CONTROL_COMPONENT_HINTS)
+        bridge_like = bool(signature_tokens & self._RELATION_BRIDGE_HINTS)
+        sink_like = bool(signature_tokens & self._POWER_SINK_HINTS)
+
+        score = 0
+        if support_match:
+            score += 24
+        if power_like:
+            score += 12
+        if support_tokens & self._ABSTRACT_SUPPORT_ROLE_HINTS and power_like:
+            score += 6
+        if renewable_requested:
+            if renewable_like:
+                score += 12
+            elif nonrenewable_like:
+                score -= 12
+            elif power_like:
+                score -= 4
+        if control_like:
+            score -= 12
+        if bridge_like:
+            score -= 10
+        if sink_like:
+            score -= 10
+        if not (support_match or power_like or renewable_like):
+            score -= 6
+        return score
+
+    def _relation_support_candidate_can_ground(
+        self,
+        signature: str,
+        *,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        if self._signature_matches_role(signature, role_sets["supporting_targets"]):
+            return True
+
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return False
+
+        support_tokens = {
+            token
+            for token_set in role_sets["supporting_targets"]
+            for token in token_set
+        }
+        renewable_requested = "renewable" in support_tokens
+        power_like = bool(signature_tokens & self._POWER_SOURCE_HINTS)
+        renewable_like = bool(signature_tokens & self._RENEWABLE_SOURCE_HINTS)
+        nonrenewable_like = bool(signature_tokens & self._NON_RENEWABLE_SOURCE_HINTS)
+        if renewable_requested:
+            return renewable_like and not nonrenewable_like
+        if support_tokens & self._ABSTRACT_SUPPORT_ROLE_HINTS:
+            return power_like and not nonrenewable_like
+        return False
+
+    def _relation_support_candidate_is_grounded(
+        self, signature: str, *, grounded_tokens: set[str] | None = None
+    ) -> bool:
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        signature_tokens = self._referent_tokens(signature)
+        if not signature_tokens:
+            return False
+        if signature_tokens.issubset(grounded_token_set):
+            return True
+        if any(
+            self._signature_matches_frontier(signature, [completed_target])
+            for completed_target in self._completed_focus_targets
+        ):
+            return True
+        return any(
+            self._signature_matches_frontier(signature, [referent])
+            and self._referent_is_visible(referent)
+            for referent in self._relation_frontier_referents[-6:]
+        )
+
+    def _get_relation_support_candidate_signatures(
+        self,
+        actions: list[str] | None = None,
+        task_contract: dict | None = None,
+    ) -> list[str]:
+        contract = task_contract or self._get_task_contract()
+        if not contract.get("supporting_targets"):
+            return []
+
+        role_token_sets = self._get_task_role_token_sets(contract)
+        candidate_profiles: dict[str, dict[str, int]] = {}
+        for action in actions if actions is not None else self.admissible_actions:
+            family = self._classify_action_family(action)
+            if family not in {"inspect", "focus", "device_control"}:
+                continue
+            if self._action_mentions_door(action, family=family):
+                continue
+            referent = self._extract_action_primary_object_signature(
+                action, family=family
+            )
+            if not referent:
+                continue
+            profile = candidate_profiles.setdefault(
+                referent,
+                {"inspect": 0, "focus": 0, "device_control": 0},
+            )
+            profile[family] += 1
+        for referent in self._relation_frontier_referents[-6:]:
+            if not referent:
+                continue
+            candidate_profiles.setdefault(
+                referent,
+                {"inspect": 0, "focus": 0, "device_control": 0},
+            )
+
+        ranked_candidates: list[tuple[int, str]] = []
+        for candidate, profile in candidate_profiles.items():
+            score = self._score_relation_support_candidate_signature(
+                candidate,
+                task_contract=contract,
+                role_token_sets=role_token_sets,
+            )
+            if score <= 0:
+                continue
+            score += profile["inspect"] * 4
+            score += profile["focus"] * 2
+            score += profile["device_control"] * 2
+            ranked_candidates.append((score, candidate))
+
+        ranked_candidates.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+        return [candidate for _, candidate in ranked_candidates[:4]]
 
     def _get_current_location_signature(self, observation: str) -> str:
         return " ".join(self._extract_current_location_tokens(observation)[:4])
@@ -4115,6 +4369,9 @@ class GWTAutogenAgent(AutogenAgent):
         grounded_tokens = set(self._get_observation_grounded_tokens())
         role_token_sets = self._get_task_role_token_sets(contract)
         frontier_referents: list[str] = []
+        support_candidates = self._get_relation_support_candidate_signatures(
+            actions=actions, task_contract=contract
+        )
         for phrase in contract.get("primary_targets", [])[:2]:
             if phrase and phrase not in frontier_referents:
                 frontier_referents.append(phrase)
@@ -4122,6 +4379,9 @@ class GWTAutogenAgent(AutogenAgent):
             for phrase in contract.get("supporting_targets", [])[:2]:
                 if phrase and phrase not in frontier_referents:
                     frontier_referents.append(phrase)
+        for candidate in support_candidates[:3]:
+            if candidate not in frontier_referents:
+                frontier_referents.append(candidate)
         for referent in self._relation_frontier_referents[-6:]:
             if not referent:
                 continue
@@ -4150,6 +4410,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         return {
             "frontier_entities": frontier_referents[:6],
+            "support_candidates": support_candidates[:3],
             "control_candidates": control_candidates[:3],
             "primary_target_grounded": self._primary_target_is_grounded(
                 contract, grounded_tokens
@@ -6408,6 +6669,7 @@ class GWTAutogenAgent(AutogenAgent):
             task_contract=task_contract
         )
         frontier_referents = relation_snapshot.get("frontier_entities", [])
+        support_candidates = relation_snapshot.get("support_candidates", [])
         control_candidates = relation_snapshot.get("control_candidates", [])
         current_observation = (self.percept or {}).get("resulting_observation", "")
         current_room = self._get_current_location_signature(current_observation)
@@ -6420,6 +6682,9 @@ class GWTAutogenAgent(AutogenAgent):
         support_match = self._signature_matches_role(
             primary_signature, role_token_sets["supporting_targets"]
         )
+        support_candidate_match = self._signature_matches_frontier(
+            primary_signature or referent_signature, support_candidates
+        )
         frontier_match = self._signature_matches_frontier(
             primary_signature or referent_signature, frontier_referents
         )
@@ -6428,6 +6693,12 @@ class GWTAutogenAgent(AutogenAgent):
         )
         rhs_frontier_match = self._signature_matches_frontier(
             relation_rhs, frontier_referents
+        )
+        lhs_support_candidate_match = self._signature_matches_frontier(
+            relation_lhs, support_candidates
+        )
+        rhs_support_candidate_match = self._signature_matches_frontier(
+            relation_rhs, support_candidates
         )
         lhs_control_match = (
             relation_lhs in control_candidates
@@ -6503,15 +6774,43 @@ class GWTAutogenAgent(AutogenAgent):
 
         elif current_phase == "locate_supporting_source":
             if family == "focus":
-                score += 18 if support_match or support_role_hits else -10
+                score += (
+                    20
+                    if support_match or support_candidate_match or support_role_hits
+                    else -10
+                )
             elif family == "inspect":
-                score += 10 if support_match or support_role_hits else 4
+                if support_match or support_candidate_match or support_role_hits:
+                    score += 18
+                    if normalized.startswith(("look at ", "inspect ", "examine ")):
+                        score += 4
+                else:
+                    score += 4
             elif family == "device_control":
-                score += 12 if self._action_mentions_door(action, family=family) else -6
+                if self._action_mentions_door(action, family=family):
+                    score += 12
+                elif support_candidate_match:
+                    score += 6
+                else:
+                    score -= 6
             elif family == "relocation":
                 score += 6
             elif family == "relation":
-                score -= 12
+                if (lhs_support_candidate_match and rhs_frontier_match) or (
+                    rhs_support_candidate_match and lhs_frontier_match
+                ):
+                    score += 6
+                else:
+                    score -= 12
+
+            if support_candidates and family in {"inspect", "device_control"}:
+                if not (
+                    support_match
+                    or support_candidate_match
+                    or support_role_hits
+                    or frontier_match
+                ):
+                    score -= 6
 
         elif current_phase == "inspect_target_mechanism":
             if family == "inspect":
