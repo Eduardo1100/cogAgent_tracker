@@ -30,8 +30,10 @@
 - [src/storage/s3.py](/home/eduardo/Projects/cogAgent_tracker/src/storage/s3.py): MinIO/S3 client and upload helper.
 - [src/config/schema_health.py](/home/eduardo/Projects/cogAgent_tracker/src/config/schema_health.py): Alembic head/current revision enforcement.
 - [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py): primary evaluation runner. It logs experiment metadata, token usage, cost, S3 artifacts, and W&B data. On `Ctrl+C`, it now attempts to persist partial chat transcripts locally and save interrupted episode metadata to storage/DB before the experiment is marked `CANCELLED`.
+- [scripts/get_latest_experiment.py](/home/eduardo/Projects/cogAgent_tracker/scripts/get_latest_experiment.py): local helper for resolving the latest experiment row and emitting a compact JSON summary from Postgres.
+- [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py): local iteration driver that can run `make debug ENV=scienceworld`, resolve the resulting experiment, render a Codex prompt, and optionally invoke `codex exec` to continue the agent-improvement loop.
 - [scripts/backfill_experiment_metrics.py](/home/eduardo/Projects/cogAgent_tracker/scripts/backfill_experiment_metrics.py): repair utility for historical metrics and git metadata.
-- [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py): cognitive multi-agent runtime, including long-term memory path registration.
+- [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py): cognitive multi-agent runtime, including long-term memory path registration, task contracts, referent grounding, episode-local stage-aware progression for ordered focus tasks, candidate-pivoting logic for search/placement tasks, state-change task control for substance search plus transformation, generic state-of-matter parsing for substance goals, measurement-and-branch task control with hidden-referent containment plus property-aware branch gating, artifact-creation task control for ingredient search plus type-consistent product grounding, and inferred target-search plus relation-frontier control for local mechanism tasks.
 - [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory): tracked memory store split by environment (`alfworld/`, `scienceworld/`) with `memory1.txt` and `memory2.txt` per environment.
 - [src/agent/configs/ALFworld.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/ALFworld.yaml), [src/agent/configs/scienceworld.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/scienceworld.yaml), [src/agent/configs/prompts.yaml](/home/eduardo/Projects/cogAgent_tracker/src/agent/configs/prompts.yaml): agent/runtime configuration.
 - [alembic/versions/20260311_000001_initial_schema.py](/home/eduardo/Projects/cogAgent_tracker/alembic/versions/20260311_000001_initial_schema.py): current schema baseline.
@@ -49,19 +51,50 @@
 - Agent/eval work:
   - Main runner is [scripts/run_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/run_agent.py).
   - Default evaluation commands are `make train`, `make eval`, and `make debug`.
+  - For the local ScienceWorld iteration loop, prefer `make iterate-scienceworld`. It runs a random `make debug ENV=scienceworld`, resolves the latest experiment for the current branch, renders the Codex iteration prompt, and by default invokes `codex exec --full-auto`. Use `PROMPT_ONLY=1` to preview the prompt or `SKIP_DEBUG=1` to reuse the latest local experiment.
   - Environment-specific agent memory now lives under [src/agent/memory](/home/eduardo/Projects/cogAgent_tracker/src/agent/memory); preserve the `alfworld/` and `scienceworld/` split when changing memory logic or moving files.
   - ALFWorld bootstrap is handled by [scripts/bootstrap_alfworld.sh](/home/eduardo/Projects/cogAgent_tracker/scripts/bootstrap_alfworld.sh) and is expected by Docker-based flows.
   - For Docker-run evals, preserve the `exec env ... uv run python ...` pattern in [Makefile](/home/eduardo/Projects/cogAgent_tracker/Makefile) so `Ctrl+C` reaches Python instead of stopping in the shell wrapper.
-  - For iterative agent changes, prefer Graphite stacks with one meaningful agent-behavior iteration per branch.
-  - Keep `main` for merged baseline work and cross-cutting fixes that are not themselves agent-behavior iterations, such as `Ctrl+C` persistence, observability repairs, docs, or branch hygiene.
-  - Keep the stack limited to branches that are worth independent review and rollback. Fold fixups, cleanup commits, and doc-only follow-ups into the nearest meaningful branch or into `main` instead of leaving them as separate stack entries.
-  - Preferred branch naming:
-    - `agent-iter-01-<topic>`
-    - `agent-iter-02-<topic>`
-  - Increment iteration numbers in review order and stack each new agent iteration on the previous one unless you are intentionally starting a separate line of work.
+  - For iterative agent changes, prefer Graphite stacks with one focused branch per iteration. Current naming convention: `agent-iter-XX-<topic>`.
+  - Keep only meaningful agent-behavior iterations in the stack. Fold doc-only, fixup, or cleanup-only changes into the nearest meaningful iteration or directly into `main`.
+  - Use `main` for merged baseline and cross-cutting fixes such as persistence, observability, docs, or cleanup that should not stay as agent-iteration branches.
+  - Current preferred review order for the agent stack:
+    - `agent-iter-01-runtime-reasoning`
+    - `agent-iter-02-task-grounding`
+    - `agent-iter-03-referent-grounding`
+    - `agent-iter-04-stage-aware-grounding`
+    - `agent-iter-05-candidate-pivoting`
+    - `agent-iter-06-state-change-contract`
+    - `agent-iter-07-substance-grounding`
+    - `agent-iter-08-artifact-creation-grounding`
+    - `agent-iter-09-relation-frontier-grounding`
+    - `agent-iter-10-generic-state-change-parsing`
+    - `agent-iter-11-property-aware-measurement`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.
+
+## ScienceWorld Policy
+- Use ScienceWorld as a debugging surface, transcript source, and regression suite for the cognitive agent, not as the definition of intelligence or the sole optimization target.
+- Treat ScienceWorld success rate as a development signal only. Improvements must also preserve token efficiency, task generalization, and environment agnosticism.
+- Be cautious of benchmark adaptation. ScienceWorld rewards parser-specific phrasing, repeated ontologies, and environment-local task conventions that may not transfer to arbitrary environments.
+- Do not turn ScienceWorld-specific regularities into persistent agent knowledge or hand-built policies unless they can be defended as environment-agnostic cognitive structure.
+- Prefer runtime abstractions that generalize across environments:
+  - task contracts
+  - phase control
+  - grounding / referent management
+  - hypothesis retirement
+  - local mechanism tracking
+- Discount apparent gains that come mostly from:
+  - exact-command benchmark gaming
+  - memorizing recurrent task templates
+  - overfitting to objects, rooms, or affordance quirks unique to ScienceWorld
+- When evaluating agent changes, look at success rate together with:
+  - invalid action rate
+  - actions to success
+  - chat rounds
+  - tokens per successful episode
+- Prefer random-task evaluation for the main signal. Use hand-picked tasks mainly to reproduce a known failure mode and verify a targeted fix.
 
 ## Environment And Secrets
 - Copy [.env.example](/home/eduardo/Projects/cogAgent_tracker/.env.example) to `.env`; do not commit real secrets.
@@ -86,6 +119,7 @@
   - `uvx ruff check .`
   - `uvx ruff format . --check`
   - If local `uv`/`uvx` is sandbox-blocked, use the installed `pytest` / `ruff` binaries to reproduce failures, but keep final verification aligned with the `uv` commands above when possible.
+  - If you touch the local iteration helpers under [src/automation](/home/eduardo/Projects/cogAgent_tracker/src/automation), [scripts/get_latest_experiment.py](/home/eduardo/Projects/cogAgent_tracker/scripts/get_latest_experiment.py), or [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py), run `uv run pytest tests/test_iteration_workflow.py`.
 - API or storage changes:
   - verify `make up` stack health
   - hit `/health`, `/health/db`, `/health/storage`, `/health/cache`
@@ -96,6 +130,7 @@
   - prefer `make debug`
   - use `WANDB_MODE=offline` when possible for local validation
   - if you touch signal handling, interrupted runs, or per-episode persistence, run `uv run pytest tests/test_run_agent_status.py`
+  - if you touch `src/agent/gwt_agent.py` runtime scoring, task grounding, referent resolution, stage progression, candidate pivoting, state-change task control, measurement/branch task control, artifact-creation task control, or relation-frontier / inferred-search logic, run `uv run pytest tests/test_gwt_agent_memory_paths.py`
 
 ## Known Gotchas
 - [src/app.py](/home/eduardo/Projects/cogAgent_tracker/src/app.py) validates schema revision at import time, so stale DB state can break seemingly unrelated API work.
@@ -104,6 +139,13 @@
 - `make clean` and `make nuke` are destructive. Avoid them unless the user explicitly wants caches, volumes, or environments wiped.
 - Docker startup runs `uv sync --frozen` and `scripts/bootstrap_alfworld.sh`; container boots may be slow by design.
 - `Ctrl+C` now tries to preserve partial episode traces: `chat_history.txt`, `transition_log.json`, S3 chat upload, and a partial `EpisodeRun` row when the interrupt path has enough context. Hard kills such as `kill -9` still bypass this.
+- Ordered lifecycle tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) rely on episode-local stage evidence, not just raw referents. When changing ordered focus behavior, keep progress semantics tied to stage-bearing evidence rather than container names or sibling object IDs.
+- Search-and-place tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now separate primary candidates from destination/support entities. When changing candidate search behavior, avoid counting support entities like destination rooms or containers as extra primary focus targets.
+- State-change tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now separate target substances from desired transformations. Keep procedural cues like `first ... then ...` distinct from ordered-target progression, prefer locating a grounded substance before testing transformation mechanisms, and preserve generic goals like `change the state of matter of water` as state-change tasks instead of falling back to generic exploration.
+- Measurement-and-branch tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now separate instrument, measured target, and branch targets, and distinguish stable threshold properties like melting point from instantaneous temperature readings. Keep proxy readings distinct from direct target measurements, do not activate branch targets before grounded property-resolution evidence exists, and route hidden-target actions through the enclosing referent when the target is no longer visible.
+- Artifact-creation tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now preserve artifact type separately from descriptor tokens like colors. When changing creation-task behavior, keep ingredient-gap search distinct from combine/transform steps, and do not let adjective-only distractors of the wrong type outrank grounded artifact actions.
+- Relation-mechanism tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now infer target search from missing named targets and maintain an episode-local `relation_frontier`. When changing relation-task behavior, keep search broad only until the primary target/source are grounded, then prune relation and device-control reasoning to the local mechanism instead of the full combinatorial action space.
+- [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py) is intentionally local-first. It expects a reachable Postgres instance and a working `codex` CLI; if the worktree is dirty it stops by default unless `--allow-dirty` / `ALLOW_DIRTY=1` is set.
 - The README is sparse and the project metadata still uses the placeholder name `production-template`. Prefer the actual repo structure over marketing text.
 - Pytest CI runs via `uv run pytest tests/`. Keep [tests/conftest.py](/home/eduardo/Projects/cogAgent_tracker/tests/conftest.py) in mind for repo-root import resolution, and make test stubs override `sys.modules` directly instead of relying on import order.
 - [.pre-commit-config.yaml](/home/eduardo/Projects/cogAgent_tracker/.pre-commit-config.yaml) is intentionally tracked. Do not re-add it to `.gitignore`.
