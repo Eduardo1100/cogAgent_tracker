@@ -175,6 +175,65 @@ class GWTAutogenAgent(AutogenAgent):
         "use",
         "wait",
     }
+    _TASK_FAMILY_HINTS = {
+        "focus": ("focus",),
+        "inspect": ("inspect", "examine", "look at", "find", "identify", "locate"),
+        "relation": ("connect", "link", "disconnect"),
+        "relocation": ("go to", "enter", "move to", "bring", "carry", "transport"),
+        "transfer_or_transform": (
+            "fill",
+            "pour",
+            "mix",
+            "insert",
+            "place",
+            "put",
+            "transfer",
+        ),
+        "device_control": (
+            "open",
+            "close",
+            "activate",
+            "deactivate",
+            "turn on",
+            "turn off",
+        ),
+        "tool_application": ("use", "heat", "cool", "boil", "cook", "measure", "test"),
+    }
+    _TASK_ORDERING_HINTS = {
+        "ordered_sequence": (
+            "earliest",
+            "latest",
+            "first",
+            "second",
+            "third",
+            "fourth",
+            "before",
+            "after",
+            "order",
+            "ordered",
+            "sequence",
+            "starting from",
+        )
+    }
+    _TASK_ENTITY_STOPWORDS = _TASK_STOPWORDS | {
+        "acceptable",
+        "change",
+        "compound",
+        "compounds",
+        "earliest",
+        "electrically",
+        "identify",
+        "latest",
+        "life",
+        "locate",
+        "matter",
+        "point",
+        "sequence",
+        "stage",
+        "stages",
+        "starting",
+        "whether",
+    }
     _ACTION_FAMILY_PREFIXES = (
         (
             (
@@ -332,6 +391,8 @@ class GWTAutogenAgent(AutogenAgent):
         self.memory = ""
         self._episodic_rag_cache: dict = {}
         self._concept_rag_cache: dict = {}
+        self._task_contract: dict = {}
+        self._task_contract_source = ""
         self._reset_episode_reasoning_state()
 
     def _get_memory_environment_name(self) -> str:
@@ -354,6 +415,65 @@ class GWTAutogenAgent(AutogenAgent):
         self.recent_hypothesis_tests: list[dict] = []
         self._provider_fallbacks_applied: set[str] = set()
         self._last_action_shortlist: list[str] = []
+
+    def _build_task_contract(self, task: str) -> dict:
+        task_lower = (task or "").lower()
+        required_families: list[str] = []
+        family_hint_tokens: set[str] = set()
+        for family, hints in self._TASK_FAMILY_HINTS.items():
+            if any(self._task_contains_hint(task_lower, hint) for hint in hints):
+                required_families.append(family)
+                for hint in hints:
+                    family_hint_tokens.update(
+                        self._extract_runtime_tokens(
+                            hint, stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
+                        )
+                    )
+
+        ordering_cues: list[str] = []
+        ordering_tokens: set[str] = set()
+        for cue, hints in self._TASK_ORDERING_HINTS.items():
+            if any(self._task_contains_hint(task_lower, hint) for hint in hints):
+                ordering_cues.append(cue)
+                for hint in hints:
+                    ordering_tokens.update(
+                        self._extract_runtime_tokens(
+                            hint,
+                            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                        )
+                    )
+
+        target_entities = self._extract_runtime_tokens(
+            task,
+            stopwords=self._TASK_ENTITY_STOPWORDS
+            | self._ACTION_COMMAND_STOPWORDS
+            | family_hint_tokens
+            | ordering_tokens,
+            limit=8,
+        )
+
+        return {
+            "required_families": required_families,
+            "target_entities": target_entities,
+            "ordering_cues": ordering_cues,
+        }
+
+    def _get_task_contract(self) -> dict:
+        task = getattr(self, "task", "") or ""
+        if self._task_contract_source != task:
+            self._task_contract = self._build_task_contract(task)
+            self._task_contract_source = task
+        return self._task_contract
+
+    @staticmethod
+    def _task_contains_hint(task_text: str, hint: str) -> bool:
+        normalized_task = re.sub(r"\s+", " ", task_text.strip().lower())
+        normalized_hint = re.sub(r"\s+", " ", hint.strip().lower())
+        if not normalized_hint:
+            return False
+        return bool(
+            re.search(rf"(?<![a-z0-9]){re.escape(normalized_hint)}(?![a-z0-9])", normalized_task)
+        )
 
     @staticmethod
     def _normalize_runtime_text(text: str) -> str:
@@ -522,6 +642,50 @@ class GWTAutogenAgent(AutogenAgent):
                 return family
         return "other"
 
+    def _canonicalize_suggested_action(
+        self, suggested_action: str, admissible_commands: list[str]
+    ) -> str:
+        normalized = self._normalize_runtime_text(suggested_action)
+        exact_matches = {
+            self._normalize_runtime_text(command): command
+            for command in admissible_commands
+        }
+        if normalized in exact_matches:
+            return exact_matches[normalized]
+
+        family = self._classify_action_family(suggested_action)
+        suggested_tokens = set(
+            self._extract_action_content_tokens(suggested_action, family=family)
+        )
+        if not suggested_tokens:
+            return suggested_action
+
+        best_command = suggested_action
+        best_score = float("-inf")
+        for command in admissible_commands:
+            if self._classify_action_family(command) != family:
+                continue
+            command_tokens = set(
+                self._extract_action_content_tokens(command, family=family)
+            )
+            overlap = len(suggested_tokens & command_tokens)
+            if overlap == 0:
+                continue
+
+            missing = len(suggested_tokens - command_tokens)
+            extra = len(command_tokens - suggested_tokens)
+            score = overlap * 10 - missing * 5 - extra * 2
+            if suggested_tokens == command_tokens:
+                score += 10
+            elif suggested_tokens.issubset(command_tokens):
+                score += 6
+
+            if score > best_score:
+                best_score = score
+                best_command = command
+
+        return best_command if best_score >= 15 else suggested_action
+
     def _get_hypothesis_entry(self, family: str) -> dict:
         entry = self.episode_hypothesis_ledger.get(family)
         if entry is not None:
@@ -608,8 +772,10 @@ class GWTAutogenAgent(AutogenAgent):
             entry["stalled_attempts"] += 1
             entry["confidence"] = max(0.0, entry["confidence"] - 0.15)
 
+        required_families = set(self._get_task_contract().get("required_families", []))
         if (
             family in self._DEPRIORITIZE_ELIGIBLE_FAMILIES
+            and family not in required_families
             and entry["observable_change_attempts"] == 0
             and (entry["invalid_attempts"] >= 2 or entry["stalled_attempts"] >= 2)
         ):
@@ -703,16 +869,29 @@ class GWTAutogenAgent(AutogenAgent):
         content_tokens = self._extract_action_content_tokens(action, family=family)
         action_token_set = set(action_tokens)
         content_token_set = set(content_tokens)
+        grounded_token_set = set(grounded_tokens)
         task_keyword_set = set(task_keywords)
+        task_contract = self._get_task_contract()
+        required_families = set(task_contract.get("required_families", []))
+        target_entity_set = set(task_contract.get("target_entities", []))
         score = 0
 
         keyword_hits = len(action_token_set & task_keyword_set)
-        grounded_hits = len(content_token_set & set(grounded_tokens))
+        grounded_hits = len(content_token_set & grounded_token_set)
+        target_hits = len(content_token_set & target_entity_set)
         score += keyword_hits * 5
         score += grounded_hits * 6
+        score += target_hits * 5
 
         family_priority = self._get_family_priority(current_phase, family)
         score += family_priority
+
+        if family in required_families:
+            score += 7
+            if grounded_hits:
+                score += 4
+            if target_hits:
+                score += 6
 
         if family == "inspect" and (keyword_hits or grounded_hits):
             score += 5
@@ -754,7 +933,18 @@ class GWTAutogenAgent(AutogenAgent):
             score -= 2
 
         if content_token_set and grounded_hits == 0:
-            score -= 10
+            if target_hits:
+                score -= 6
+            else:
+                score -= 10
+        elif (
+            target_entity_set
+            and content_token_set
+            and grounded_hits > 0
+            and target_hits == 0
+            and family not in {"inspect", "device_control", "relocation"}
+        ):
+            score -= 3
 
         if normalized.startswith("wait"):
             score -= 10
@@ -831,6 +1021,8 @@ class GWTAutogenAgent(AutogenAgent):
             for entry in self.episode_hypothesis_ledger.values()
             if entry["status"] == "deprioritized"
         )
+        task_contract = self._get_task_contract()
+
         return {
             "total_actions": len(actions),
             "current_phase": current_phase,
@@ -838,6 +1030,7 @@ class GWTAutogenAgent(AutogenAgent):
             "salient_entities": grounded_tokens[:8],
             "task_relevant_action_shortlist": shortlist,
             "deprioritized_families": deprioritized_families,
+            "task_contract": task_contract,
         }
 
     def _build_shared_action_context(self) -> dict:
@@ -867,6 +1060,7 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Current exact task-relevant admissible shortlist: {json.dumps(summary['task_relevant_action_shortlist'])}\n"
             + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
+            + f"Task contract: {json.dumps(summary['task_contract'])}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
             + "Choose an exact shortlist string whenever possible. "
@@ -1058,6 +1252,8 @@ class GWTAutogenAgent(AutogenAgent):
         self._episodic_rag_cache.clear()
         self._concept_rag_cache.clear()
         self.task = self.adapter.task
+        self._task_contract = self._build_task_contract(self.task)
+        self._task_contract_source = self.task
         self.admissible_actions = self.adapter.admissible_actions
         self.task_status = "INCOMPLETE"
         self.curr_episodic_memory = []
@@ -1090,6 +1286,9 @@ class GWTAutogenAgent(AutogenAgent):
             "task_status": self.task_status,
             "action_attempts_left": self.max_actions - self.num_actions_taken,
         }
+        task_contract = self._get_task_contract()
+        if any(task_contract.values()):
+            self.percept["task_contract"] = task_contract
         shared_action_context = self._build_shared_action_context()
         self.percept["admissible_action_summary"] = {
             "total_actions": shared_action_context["total_actions"],
@@ -1097,6 +1296,7 @@ class GWTAutogenAgent(AutogenAgent):
             "family_counts": shared_action_context["family_counts"],
             "salient_entities": shared_action_context["salient_entities"],
             "deprioritized_families": shared_action_context["deprioritized_families"],
+            "required_families": shared_action_context["task_contract"]["required_families"],
         }
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
@@ -1574,11 +1774,14 @@ class GWTAutogenAgent(AutogenAgent):
             admissible_commands = self.adapter.admissible_actions
             assert admissible_commands, "No admissible commands found."
 
-            action, action_score = get_best_candidate(
+            previous_observation = self.percept.get("resulting_observation", "")
+            canonical_suggested_action = self._canonicalize_suggested_action(
                 suggested_action, admissible_commands
             )
+            action, action_score = get_best_candidate(
+                canonical_suggested_action, admissible_commands
+            )
             executed_action = None
-            previous_observation = self.percept.get("resulting_observation", "")
             if action_score < 0.98:
                 self.adapter.set_observation(
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
@@ -1607,7 +1810,11 @@ class GWTAutogenAgent(AutogenAgent):
                 self.rounds_left -= 1
                 reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
 
-            self.update_percept(suggested_action)
+            attempted_action = canonical_suggested_action if executed_action else suggested_action
+            self.update_percept(attempted_action)
+            if canonical_suggested_action != suggested_action:
+                self.percept["requested_action"] = suggested_action
+                self.percept["canonicalized_action"] = canonical_suggested_action
             self._update_episode_hypothesis_ledger(
                 suggested_action=suggested_action,
                 executed_action=executed_action,
