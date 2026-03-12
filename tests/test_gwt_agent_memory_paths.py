@@ -2063,6 +2063,114 @@ def test_measurement_branch_destination_is_blocked_until_property_is_resolved(
     assert "use lighter on solid unknown substance c" in shortlist
 
 
+def test_measurement_locate_instrument_shortlist_prefers_local_search_actions(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the temperature of unknown substance B, "
+        "which is located around the living room. First, focus on the "
+        "thermometer. Next, focus on the unknown substance B. If the unknown "
+        "substance B temperature is above 100.0 degrees celsius, place it in "
+        "the red box. If the unknown substance B temperature is below 100.0 "
+        "degrees celsius, place it in the green box. The boxes are located "
+        "around the bathroom."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the living room. In it, you see the agent, "
+            "a substance called air, a chair. On the chair is: nothing. "
+            "a couch. On the couch is: a white pillow. a desk. On the desk "
+            "is: a drawer. a painting. unknown substance B. You also see: "
+            "A door to the hallway (that is open)"
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on unknown substance",
+            "move unknown substance to living room",
+            "look at unknown substance",
+            "look at living room",
+            "look in living room",
+            "open drawer",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_instrument"
+    assert "open drawer" in shortlist
+    assert "focus on unknown substance" not in shortlist
+    assert "move unknown substance to living room" not in shortlist
+
+
+def test_measurement_search_frontier_reappears_after_local_instrument_search(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the temperature of unknown substance B, "
+        "which is located around the living room. First, focus on the "
+        "thermometer. Next, focus on the unknown substance B. If the unknown "
+        "substance B temperature is above 100.0 degrees celsius, place it in "
+        "the red box. If the unknown substance B temperature is below 100.0 "
+        "degrees celsius, place it in the green box. The boxes are located "
+        "around the bathroom."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    art_studio_observation = (
+        "This room is called the art studio. In it, you see the agent, a "
+        "substance called air, a large cupboard. The large cupboard door is "
+        "open. a table. On the table is: a jug (containing nothing). a wood "
+        "cup (containing red paint). a wood cup (containing yellow paint). "
+        "a wood cup (containing blue paint). You also see: A door to the "
+        "hallway (that is open)"
+    )
+    agent.percept = {"resulting_observation": art_studio_observation}
+    agent._update_measurement_search_tracking(
+        action="look at art studio",
+        observation=art_studio_observation,
+    )
+    agent.curr_episodic_memory.append(
+        json.dumps(
+            {
+                "timestep": 10,
+                "attempted_action": "look at art studio",
+                "resulting_observation": art_studio_observation,
+            }
+        )
+    )
+    agent.percept = {"resulting_observation": "The large cupboard door is now open."}
+    agent._update_measurement_search_tracking(
+        action="open cupboard",
+        observation="The large cupboard door is now open.",
+    )
+    agent.percept = {"resulting_observation": art_studio_observation}
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on cup containing red paint in art studio",
+            "look at cup containing red paint in art studio",
+            "look in cup containing red paint in art studio",
+            "look at art studio",
+            "open cupboard",
+            "go to hallway",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert agent._search_location_states["art studio"]["local_exploration"] == 2
+    assert summary["current_phase"] == "locate_instrument"
+    assert "open cupboard" in shortlist
+    assert "go to hallway" in shortlist
+    assert "focus on cup containing red paint in art studio" not in shortlist
+
+
 def test_measurement_transition_event_requires_confirming_measurement(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
