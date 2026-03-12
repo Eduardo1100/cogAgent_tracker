@@ -681,6 +681,124 @@ def test_lifecycle_search_frontier_prefers_room_exit_over_local_container_diggin
     assert "open cupboard" not in shortlist
 
 
+def test_room_frontier_relocation_requires_agent_navigation(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    observation = (
+        "This room is called the hallway. You also see: "
+        "A door to the greenhouse (that is closed)."
+    )
+
+    assert (
+        agent._action_targets_room_frontier(
+            "go to greenhouse",
+            observation,
+            family="relocation",
+        )
+        is True
+    )
+    assert (
+        agent._action_targets_room_frontier(
+            "move picture to greenhouse",
+            observation,
+            family="relocation",
+        )
+        is False
+    )
+
+
+def test_lifecycle_search_prefers_doors_over_object_transport_before_entry(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see a picture. "
+            "You also see: A door to the art studio (that is closed), "
+            "A door to the bedroom (that is closed), "
+            "A door to the greenhouse (that is closed), "
+            "A door to the kitchen (that is closed)."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move picture to art studio",
+            "move picture to bedroom",
+            "move picture to greenhouse",
+            "open art studio door",
+            "open bedroom door",
+            "open door to greenhouse",
+            "open door to kitchen",
+            "look at art studio",
+            "look at greenhouse",
+            "look around",
+        ],
+        shortlist_limit=8,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "open art studio door" in shortlist
+    assert "open bedroom door" in shortlist
+    assert "open door to greenhouse" in shortlist
+    assert "move picture to art studio" not in shortlist
+    assert "move picture to bedroom" not in shortlist
+    assert "move picture to greenhouse" not in shortlist
+
+
+def test_lifecycle_search_avoids_reentering_exhausted_room_from_hallway(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    art_studio_observation = (
+        "This room is called the art studio. In it, you see: a large cupboard. "
+        "The large cupboard door is closed. a table with a jug. "
+        "You also see: A door to the hallway (that is open)."
+    )
+    agent.percept = {"resulting_observation": art_studio_observation}
+    agent._update_lifecycle_search_tracking(
+        action="look at art studio",
+        observation=art_studio_observation,
+    )
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see a picture. "
+            "You also see: A door to the art studio (that is open), "
+            "A door to the bedroom (that is closed), "
+            "A door to the greenhouse (that is closed), "
+            "A door to the kitchen (that is closed)."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "go to art studio",
+            "look at art studio",
+            "open art studio door",
+            "move picture to art studio",
+            "open bedroom door",
+            "open door to greenhouse",
+            "open door to kitchen",
+            "look at bedroom",
+            "look at greenhouse",
+            "look around",
+        ],
+        shortlist_limit=6,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert "open bedroom door" in shortlist
+    assert "open door to greenhouse" in shortlist
+    assert "go to art studio" not in shortlist
+    assert "look at art studio" not in shortlist
+    assert "move picture to art studio" not in shortlist
+
+
 def test_shortlist_prefers_grounded_stage_targets_over_area_focus_and_distractors(
     tmp_path,
 ):

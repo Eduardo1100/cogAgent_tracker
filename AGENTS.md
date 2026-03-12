@@ -80,6 +80,7 @@
     - `agent-iter-17-state-change-room-frontier`
     - `agent-iter-18-measurement-instrument-search`
     - `agent-iter-19-artifact-room-frontier`
+    - `agent-iter-20-room-navigation-frontier`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.
@@ -152,6 +153,7 @@
 - `Ctrl+C` now tries to preserve partial episode traces: `chat_history.txt`, `transition_log.json`, S3 chat upload, and a partial `EpisodeRun` row when the interrupt path has enough context. Hard kills such as `kill -9` still bypass this.
 - Ordered lifecycle tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) rely on episode-local stage evidence, not just raw referents. When changing ordered focus behavior, keep progress semantics tied to stage-bearing evidence rather than container names or sibling object IDs.
 - Lifecycle search in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now uses a room-frontier bias before any stage evidence is grounded. When changing this behavior, keep search broad across reachable rooms and exits before drilling into local containers, and avoid hard-coding ScienceWorld room names or benchmark-specific room priorities.
+- Lifecycle room-frontier search in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now treats only door actions and agent travel as true frontier expansion while stages remain ungrounded. Do not let `move <object> to <room>` style transport commands crowd out unexplored doors, and avoid revisiting already-inspected rooms ahead of unexplored exits unless new stage-bearing evidence justifies it.
 - Search-and-place tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now separate primary candidates from destination/support entities. When changing candidate search behavior, avoid counting support entities like destination rooms or containers as extra primary focus targets.
 - Search-and-place tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now retain an episode-local last seen room plus referent aliases for the active candidate. When changing this behavior, preserve reacquisition pressure toward the candidate's last grounded room, and keep alias binding tied to observation-backed evidence rather than benchmark-specific name lists.
 - State-change tasks in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now separate target substances from desired transformations. Keep procedural cues like `first ... then ...` distinct from ordered-target progression, prefer locating a grounded substance before testing transformation mechanisms, and preserve generic goals like `change the state of matter of water` as state-change tasks instead of falling back to generic exploration.

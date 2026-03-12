@@ -3269,6 +3269,15 @@ class GWTAutogenAgent(AutogenAgent):
             re.findall(r"\bdoor to\b|\bdoor \(that is\b|\bdoor\b", observation.lower())
         )
 
+    def _is_agent_navigation_action(
+        self, action: str, *, family: str | None = None
+    ) -> bool:
+        family = family or self._classify_action_family(action)
+        if family != "relocation":
+            return False
+        normalized = self._normalize_runtime_text(action)
+        return normalized.startswith(("go to ", "enter "))
+
     def _action_mentions_door(self, action: str, *, family: str | None = None) -> bool:
         action_tokens = set(self._extract_action_content_tokens(action, family=family))
         return "door" in action_tokens or "doors" in action_tokens
@@ -3284,27 +3293,50 @@ class GWTAutogenAgent(AutogenAgent):
                 room_targets.append(signature)
         return room_targets[:6]
 
+    def _get_room_frontier_target(
+        self, action: str, observation: str, *, family: str | None = None
+    ) -> str:
+        family = family or self._classify_action_family(action)
+        if family not in {"inspect", "device_control", "relocation"}:
+            return ""
+        if family == "relocation" and not self._is_agent_navigation_action(
+            action, family=family
+        ):
+            return ""
+
+        room_targets = self._extract_visible_room_targets(observation)
+        if not room_targets:
+            return ""
+
+        referent_candidates = []
+        referent = self._get_action_referent_signature(action, family=family)
+        if referent:
+            referent_candidates.append(referent)
+        primary_object = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        if primary_object and primary_object not in referent_candidates:
+            referent_candidates.append(primary_object)
+
+        for candidate in referent_candidates:
+            for room_target in room_targets:
+                if self._signature_matches_frontier(candidate, [room_target]):
+                    return room_target
+        return ""
+
     def _action_targets_room_frontier(
         self, action: str, observation: str, *, family: str | None = None
     ) -> bool:
         family = family or self._classify_action_family(action)
         if family not in {"inspect", "device_control", "relocation"}:
             return False
+        if family == "relocation" and not self._is_agent_navigation_action(
+            action, family=family
+        ):
+            return False
         if self._action_mentions_door(action, family=family):
             return True
-
-        room_targets = self._extract_visible_room_targets(observation)
-        if not room_targets:
-            return False
-
-        referent = self._get_action_referent_signature(action, family=family)
-        if not referent:
-            referent = self._extract_action_primary_object_signature(
-                action, family=family
-            )
-        if not referent:
-            return False
-        return self._signature_matches_frontier(referent, room_targets)
+        return bool(self._get_room_frontier_target(action, observation, family=family))
 
     def _extract_relation_endpoint_signatures(
         self, action: str, *, family: str | None = None
@@ -6610,6 +6642,25 @@ class GWTAutogenAgent(AutogenAgent):
         room_frontier_action = self._action_targets_room_frontier(
             action, current_observation, family=family
         )
+        agent_navigation_action = self._is_agent_navigation_action(
+            action, family=family
+        )
+        frontier_room_target = (
+            self._get_room_frontier_target(action, current_observation, family=family)
+            if room_frontier_action
+            else ""
+        )
+        frontier_room_exhausted = bool(
+            frontier_room_target
+            and frontier_room_target != current_room
+            and (self._search_location_states.get(frontier_room_target, {})).get(
+                "local_exploration", 0
+            )
+            >= 1
+            and not (self._search_location_states.get(frontier_room_target, {})).get(
+                "target_grounded"
+            )
+        )
         state_change_room_search_stalled = self._state_change_room_search_stalled(
             current_room=current_room,
             visible_doors=visible_doors,
@@ -6771,13 +6822,22 @@ class GWTAutogenAgent(AutogenAgent):
                     else:
                         score -= 10
                 elif family == "relocation":
-                    score += 12 if room_frontier_action else 2
+                    if agent_navigation_action:
+                        score += 12 if room_frontier_action else 2
+                    else:
+                        score -= 40
                 elif family in {
                     "relation",
                     "transfer_or_transform",
                     "tool_application",
                 }:
                     score -= 20
+
+                if frontier_room_exhausted:
+                    if family == "relocation":
+                        score -= 24
+                    elif family in {"inspect", "device_control"}:
+                        score -= 16
 
                 if (
                     visible_doors <= 1
@@ -7046,6 +7106,7 @@ class GWTAutogenAgent(AutogenAgent):
         current_phase = self._get_current_phase()
         task_keywords = self._extract_task_keywords()
         grounded_tokens = self._get_observation_grounded_tokens()
+        task_contract = self._get_task_contract()
         scored_actions = []
 
         for action in actions:
@@ -7087,7 +7148,6 @@ class GWTAutogenAgent(AutogenAgent):
             quotas["focus"] = max(2, quotas.get("focus", 0))
             if quotas.get("inspect", 0) > 0:
                 quotas["inspect"] -= 1
-        task_contract = self._get_task_contract()
         role_token_sets = self._get_task_role_token_sets(task_contract)
         if "relation" in task_contract.get(
             "required_families", []
@@ -7102,11 +7162,46 @@ class GWTAutogenAgent(AutogenAgent):
             if self._rejected_candidates:
                 quotas["focus"] = max(2, quotas.get("focus", 0))
                 quotas["relocation"] = max(2, quotas.get("relocation", 0))
+        lifecycle_search_mode = False
+        if self._is_lifecycle_task(task_contract):
+            current_observation = (self.percept or {}).get("resulting_observation", "")
+            grounded_token_set = set(grounded_tokens)
+            current_location_tokens = set(
+                self._extract_current_location_tokens(current_observation)
+            )
+            target_entity_set = set(task_contract.get("target_entities", []))
+            lifecycle_targets_visible = bool(
+                (grounded_token_set & target_entity_set) - current_location_tokens
+            ) or bool(self._get_visible_lifecycle_stage_labels(current_observation))
+            if not lifecycle_targets_visible:
+                lifecycle_search_mode = True
+                quotas = dict(quotas)
+                quotas["relocation"] = (
+                    1
+                    if any(
+                        self._is_agent_navigation_action(
+                            action, family=self._classify_action_family(action)
+                        )
+                        for action in actions
+                    )
+                    else 0
+                )
+        blocked_actions = {
+            item["action"]
+            for item in scored_actions
+            if lifecycle_search_mode
+            and item["family"] == "relocation"
+            and not self._is_agent_navigation_action(
+                item["action"], family=item["family"]
+            )
+        }
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}
 
         for item in scored_actions:
+            if item["action"] in blocked_actions:
+                continue
             family = item["family"]
             quota = quotas.get(family, 0)
             if quota <= 0 or selected_by_family.get(family, 0) >= quota:
@@ -7121,6 +7216,8 @@ class GWTAutogenAgent(AutogenAgent):
             if len(shortlist) >= shortlist_limit:
                 break
             if item["action"] in selected_actions:
+                continue
+            if item["action"] in blocked_actions:
                 continue
             shortlist.append(item["action"])
             selected_actions.add(item["action"])
