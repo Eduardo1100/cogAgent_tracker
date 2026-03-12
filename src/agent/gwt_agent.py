@@ -2846,6 +2846,58 @@ class GWTAutogenAgent(AutogenAgent):
             return direction == "max"
         return None
 
+    def _update_comparison_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        task_contract = self._get_task_contract()
+        if not self._is_comparison_task(task_contract):
+            return
+
+        grounded_tokens = set(self._extract_runtime_tokens(observation, limit=48))
+        target_grounded = self._primary_target_is_grounded(
+            task_contract, grounded_tokens
+        ) or self._comparison_target_is_grounded(task_contract, observation=observation)
+
+        previous_observation = ""
+        if self.curr_episodic_memory:
+            try:
+                previous_observation = json.loads(self.curr_episodic_memory[-1]).get(
+                    "resulting_observation", ""
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_observation = ""
+
+        room_signature = self._get_current_location_signature(
+            observation
+        ) or self._get_current_location_signature(previous_observation)
+        if room_signature:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if target_grounded:
+                room_state["target_grounded"] = True
+
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+        if not room_signature or target_grounded:
+            return
+
+        family = self._classify_action_family(action)
+        if family == "inspect":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            room_state["local_exploration"] += 1
+        elif family == "device_control":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            if self._action_mentions_door(action, family=family):
+                return
+            room_state["local_exploration"] += 1
+
     def _update_comparison_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -3087,6 +3139,34 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         if visible_doors < 2 or not current_room:
             return False
+        room_state = self._search_location_states.get(current_room, {})
+        return bool(
+            not room_state.get("target_grounded")
+            and room_state.get("local_exploration", 0) >= 2
+        )
+
+    def _comparison_room_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_comparison_task(contract):
+            return False
+
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        if self._primary_target_is_grounded(contract, grounded_token_set) or (
+            self._comparison_target_is_grounded(contract)
+        ):
+            return False
+        if visible_doors < 1 or not current_room:
+            return False
+
         room_state = self._search_location_states.get(current_room, {})
         return bool(
             not room_state.get("target_grounded")
@@ -3731,6 +3811,30 @@ class GWTAutogenAgent(AutogenAgent):
         role_token_sets = self._get_task_role_token_sets(contract)
         return self._role_is_grounded(
             grounded_token_set, role_token_sets["primary_targets"]
+        )
+
+    def _comparison_target_is_grounded(
+        self,
+        task_contract: dict | None = None,
+        observation: str | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_comparison_task(contract):
+            return False
+
+        observed_text = observation
+        if observed_text is None:
+            observed_text = ((self.percept or {}) or {}).get(
+                "resulting_observation", ""
+            )
+
+        observation_tokens = set(
+            self._extract_comparison_tokens(observed_text, limit=48)
+        )
+        role_token_sets = self._get_task_role_token_sets(contract)
+        return any(
+            target_tokens and target_tokens.issubset(observation_tokens)
+            for target_tokens in role_token_sets["comparison_targets"]
         )
 
     def _growth_task_has_precursor_signal(
@@ -6501,6 +6605,9 @@ class GWTAutogenAgent(AutogenAgent):
         action: str,
         family: str,
         current_phase: str,
+        current_room: str,
+        room_frontier_action: bool,
+        room_search_stalled: bool,
         content_token_set: set[str],
         task_contract: dict,
         role_token_sets: dict[str, list[set[str]]],
@@ -6512,6 +6619,7 @@ class GWTAutogenAgent(AutogenAgent):
 
         normalized = self._normalize_runtime_text(action)
         comparison_action_token_set = set(self._extract_comparison_tokens(action))
+        referent_signature = self._get_action_referent_signature(action, family=family)
         primary_signature = self._extract_comparison_primary_signature(action)
         destination_signature = self._extract_comparison_destination_signature(action)
         primary_token_set = set(self._extract_comparison_tokens(primary_signature))
@@ -6542,22 +6650,60 @@ class GWTAutogenAgent(AutogenAgent):
                 self._extract_comparison_tokens(self._selected_comparison_target)
             ).issubset(primary_token_set)
         )
+        room_referent_match = bool(current_room and referent_signature == current_room)
         score = 0
 
         if current_phase == "locate_primary_target":
             if family == "inspect":
                 if target_role_hits or primary_role_hits or support_role_hits:
                     score += 12
+                elif room_referent_match:
+                    score += 18
+                    if normalized.startswith(("look at ", "look in ")):
+                        score += 4
                 elif normalized.startswith("look around"):
+                    score += 10
+                elif room_frontier_action:
                     score += 8
+                elif self._is_container_like_action(action, family=family):
+                    score -= 14
+                else:
+                    score -= 8
             elif family == "device_control":
-                score += 16 if self._action_mentions_door(action, family=family) else -6
+                if room_frontier_action:
+                    score += 16
+                elif self._is_container_like_action(action, family=family):
+                    score -= 18
+                else:
+                    score -= 12
             elif family == "relocation":
-                score += (
-                    8 if self._is_agent_navigation_action(action, family=family) else -6
-                )
+                if self._is_agent_navigation_action(action, family=family):
+                    score += 18 if room_frontier_action else 4
+                else:
+                    score -= 24
             elif family == "focus":
-                score -= 16 if target_role_hits else 0
+                score -= 18
+            elif family in {"relation", "transfer_or_transform", "tool_application"}:
+                score -= 20
+
+            if room_search_stalled:
+                if room_frontier_action:
+                    if family == "inspect":
+                        score += 8
+                    elif family == "device_control":
+                        score += 10
+                    elif family == "relocation" and self._is_agent_navigation_action(
+                        action, family=family
+                    ):
+                        score += 8
+                elif family == "inspect" and self._is_container_like_action(
+                    action, family=family
+                ):
+                    score -= 12
+                elif family == "device_control" and self._is_container_like_action(
+                    action, family=family
+                ):
+                    score -= 12
 
         elif current_phase == "gather_branch_evidence":
             if family == "inspect":
@@ -7125,20 +7271,9 @@ class GWTAutogenAgent(AutogenAgent):
             return "gather_evidence"
         if self._is_comparison_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
-            role_token_sets = self._get_task_role_token_sets(task_contract)
-            comparison_observation_tokens = set(
-                self._extract_comparison_tokens(
-                    (self.percept or {}).get("resulting_observation", ""),
-                    limit=48,
-                )
-            )
-            comparison_target_grounded = any(
-                target_tokens and target_tokens.issubset(comparison_observation_tokens)
-                for target_tokens in role_token_sets["comparison_targets"]
-            )
             if not (
                 self._primary_target_is_grounded(task_contract, grounded_tokens)
-                or comparison_target_grounded
+                or self._comparison_target_is_grounded(task_contract)
             ):
                 return "locate_primary_target"
             if self._selected_comparison_target:
@@ -7488,6 +7623,12 @@ class GWTAutogenAgent(AutogenAgent):
             visible_doors=visible_doors,
             task_contract=task_contract,
         )
+        comparison_room_search_stalled = self._comparison_room_search_stalled(
+            current_room=current_room,
+            visible_doors=visible_doors,
+            task_contract=task_contract,
+            grounded_tokens=grounded_token_set,
+        )
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -7817,6 +7958,9 @@ class GWTAutogenAgent(AutogenAgent):
                 action=action,
                 family=family,
                 current_phase=current_phase,
+                current_room=current_room,
+                room_frontier_action=room_frontier_action,
+                room_search_stalled=comparison_room_search_stalled,
                 content_token_set=content_token_set,
                 task_contract=task_contract,
                 role_token_sets=role_token_sets,
@@ -8503,6 +8647,10 @@ class GWTAutogenAgent(AutogenAgent):
             observation=self.adapter.observation,
         )
         self._update_measurement_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
+        self._update_comparison_search_tracking(
             action=action,
             observation=self.adapter.observation,
         )

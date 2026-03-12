@@ -2668,6 +2668,80 @@ def test_comparison_task_contract_tracks_compared_targets_and_property(tmp_path)
     assert contract["primary_targets"] == ["inclined planes"]
 
 
+def test_comparison_search_prefers_current_room_scan_over_local_noise(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine which of the two inclined planes "
+        "(unknown material C, unknown material H) has the most friction. "
+        "After completing your experiment, focus on the inclined plane with the "
+        "most friction."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {"resulting_observation": "You move to the art studio."}
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open drawer",
+            "disconnect art studio",
+            "look in art studio",
+            "look at art studio",
+            "open cupboard",
+            "focus on art studio",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_primary_target"
+    assert "look in art studio" in shortlist
+    assert "look at art studio" in shortlist
+    assert "open drawer" not in shortlist
+    assert "disconnect art studio" not in shortlist
+    assert "open cupboard" not in shortlist
+
+
+def test_comparison_search_reopens_room_frontier_after_local_search_stall(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine which of the two inclined planes "
+        "(unknown material C, unknown material H) has the most friction. "
+        "After completing your experiment, focus on the inclined plane with the "
+        "most friction."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._search_location_states["art studio"] = {
+        "local_exploration": 2,
+        "target_grounded": False,
+    }
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the art studio. In it, you see the agent, "
+            "a large cupboard, and a table with a jug. You also see: "
+            "A door to the hallway (that is open)."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open cupboard",
+            "look at jug",
+            "look in hallway",
+            "go to hallway",
+            "move cup to hallway",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_primary_target"
+    assert "go to hallway" in shortlist
+    assert "look in hallway" in shortlist
+    assert "open cupboard" not in shortlist
+    assert "move cup to hallway" not in shortlist
+
+
 def test_comparison_shortlist_gathers_evidence_before_focus_or_target_relocation(
     tmp_path,
 ):
