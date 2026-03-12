@@ -1512,6 +1512,45 @@ def test_state_change_shortlist_avoids_wrong_visible_substance(tmp_path):
     assert "focus on cup containing orange juice" not in shortlist
 
 
+def test_state_change_locate_substance_filters_explicit_non_target_substances(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to boil water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "This room is called the kitchen. In it, you see a substance called air, "
+        "a fridge, a freezer, a sink, and a glass jar (containing a substance "
+        "called sodium chloride)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at sodium chloride",
+            "focus on sodium chloride",
+            "mix sodium chloride",
+            "move sodium chloride to sink",
+            "open fridge",
+            "open freezer",
+            "look at sink",
+            "activate sink",
+        ],
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["substance_search"]["grounded_substances"] == []
+    assert "open fridge" in shortlist
+    assert "open freezer" in shortlist
+    assert "activate sink" in shortlist
+    assert "focus on sodium chloride" not in shortlist
+    assert "mix sodium chloride" not in shortlist
+
+
 def test_state_change_shortlist_prefers_grounded_transformation_after_focus(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
@@ -1668,6 +1707,48 @@ def test_state_change_shortlist_prefers_source_candidates_after_container_exhaus
     assert "activate sink" in shortlist
     assert "move bowl to kitchen" not in shortlist
     assert "focus on kitchen" not in shortlist
+
+
+def test_state_change_probe_shortlist_ignores_non_target_grounded_substances(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to boil water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent._exhausted_container_targets = ["fridge", "cupboard"]
+    observation = (
+        "This room is called the kitchen. In it, you see a substance called air, "
+        "a sink, a stove, and a glass jar (containing a substance called sodium chloride)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_state_change_search_tracking(action=None, observation=observation)
+    agent.admissible_actions = [
+        "look at sodium chloride",
+        "focus on sodium chloride",
+        "move sodium chloride to sink",
+        "mix sodium chloride",
+        "look at sink",
+        "look in sink",
+        "activate sink",
+        "look at stove",
+        "activate stove",
+    ]
+
+    summary = agent._summarize_admissible_actions(
+        agent.admissible_actions,
+        shortlist_limit=5,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "probe_sources"
+    assert summary["substance_search"]["grounded_substances"] == []
+    assert "look at sink" in shortlist
+    assert "activate sink" in shortlist
+    assert "activate stove" in shortlist
+    assert "focus on sodium chloride" not in shortlist
+    assert "move sodium chloride to sink" not in shortlist
 
 
 def test_state_change_shortlist_avoids_invalid_same_referent_probe_retries(tmp_path):
