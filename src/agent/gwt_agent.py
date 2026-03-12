@@ -4657,7 +4657,10 @@ class GWTAutogenAgent(AutogenAgent):
             "focused": False,
             "relocated": False,
             "support_confirmed": False,
+            "container_confirmed": False,
+            "room_confirmed": False,
             "stalled_confirmations": 0,
+            "post_goal_confirmations": 0,
             "status": "active",
             "aliases": [],
             "last_seen_room": "",
@@ -4833,6 +4836,17 @@ class GWTAutogenAgent(AutogenAgent):
     ) -> bool:
         if not candidate:
             return False
+        return self._observation_confirms_candidate_container(
+            candidate, observation, task_contract
+        ) or self._observation_confirms_candidate_room(
+            candidate, observation, task_contract
+        )
+
+    def _observation_confirms_candidate_container(
+        self, candidate: str, observation: str, task_contract: dict | None = None
+    ) -> bool:
+        if not candidate:
+            return False
         contract = task_contract or self._get_task_contract()
         observation_tokens = set(self._extract_runtime_tokens(observation, limit=32))
         candidate_visible = any(
@@ -4846,15 +4860,63 @@ class GWTAutogenAgent(AutogenAgent):
             return False
 
         role_token_sets = self._get_task_role_token_sets(contract)
-        if self._matches_any_role(
+        return self._matches_any_role(
             observation_tokens, role_token_sets["destination_container"]
-        ):
-            return True
+        )
+
+    def _observation_confirms_candidate_room(
+        self, candidate: str, observation: str, task_contract: dict | None = None
+    ) -> bool:
+        if not candidate:
+            return False
+        contract = task_contract or self._get_task_contract()
+        observation_tokens = set(self._extract_runtime_tokens(observation, limit=32))
+        candidate_visible = any(
+            label_tokens and label_tokens.issubset(observation_tokens)
+            for label_tokens in (
+                self._referent_tokens(label)
+                for label in self._get_candidate_labels(candidate)
+            )
+        )
+        if not candidate_visible:
+            return False
+
+        role_token_sets = self._get_task_role_token_sets(contract)
         current_location_tokens = set(
             self._extract_current_location_tokens(observation)
         )
         return self._matches_any_role(
             current_location_tokens, role_token_sets["destination_room"]
+        )
+
+    def _candidate_goal_visibly_satisfied(
+        self, candidate_state: dict, task_contract: dict | None = None
+    ) -> bool:
+        if not candidate_state:
+            return False
+
+        contract = task_contract or self._get_task_contract()
+        required_families = set(contract.get("required_families", []))
+        if "focus" in required_families and not candidate_state.get("focused"):
+            return False
+        if contract.get("destination_container") and not candidate_state.get(
+            "container_confirmed"
+        ):
+            return False
+        if (
+            not contract.get("destination_container")
+            and contract.get("destination_room")
+            and not candidate_state.get("room_confirmed")
+        ):
+            return False
+        if "relocation" in required_families and not (
+            candidate_state.get("relocated") or candidate_state.get("support_confirmed")
+        ):
+            return False
+        return bool(
+            candidate_state.get("focused")
+            or candidate_state.get("support_confirmed")
+            or candidate_state.get("relocated")
         )
 
     def _update_candidate_tracking(
@@ -4882,6 +4944,12 @@ class GWTAutogenAgent(AutogenAgent):
         normalized_observation = self._normalize_observation_signature(observation)
         previous_signature = self._normalize_observation_signature(previous_observation)
         observation_stalled = normalized_observation == previous_signature
+        pre_update_candidate = self._active_candidate or candidate
+        pre_update_state = (
+            dict(self._candidate_states.get(pre_update_candidate, {}))
+            if pre_update_candidate
+            else {}
+        )
 
         if family == "focus" and candidate:
             state = self._get_candidate_state(candidate)
@@ -4897,6 +4965,11 @@ class GWTAutogenAgent(AutogenAgent):
             return
 
         active_state = self._get_candidate_state(active_candidate)
+        goal_was_satisfied = (
+            self._candidate_goal_visibly_satisfied(pre_update_state)
+            if active_candidate == pre_update_candidate
+            else False
+        )
         candidate_matches_active = bool(
             candidate and self._candidate_signature_matches(active_candidate, candidate)
         )
@@ -4932,11 +5005,20 @@ class GWTAutogenAgent(AutogenAgent):
             ):
                 active_state["relocated"] = True
 
-        if self._observation_confirms_candidate_destination(
+        container_confirmed = self._observation_confirms_candidate_container(
             active_candidate, observation
-        ):
+        )
+        room_confirmed = self._observation_confirms_candidate_room(
+            active_candidate, observation
+        )
+        if container_confirmed:
+            active_state["container_confirmed"] = True
+        if room_confirmed:
+            active_state["room_confirmed"] = True
+        if container_confirmed or room_confirmed:
             active_state["support_confirmed"] = True
 
+        goal_is_satisfied = self._candidate_goal_visibly_satisfied(active_state)
         repeated_confirmation = self._is_repeated_action_observation(
             executed_action, observation, family=family
         )
@@ -4944,16 +5026,18 @@ class GWTAutogenAgent(AutogenAgent):
         if family in {"focus", "inspect"} and (
             candidate_matches_active or support_referent
         ):
-            if active_state["support_confirmed"] and (
-                repeated_confirmation or observation_stalled
-            ):
+            if goal_was_satisfied and self.task_status != "COMPLETED":
+                active_state["post_goal_confirmations"] += 1
+            if goal_is_satisfied and (repeated_confirmation or observation_stalled):
                 active_state["stalled_confirmations"] += 1
 
         if (
-            active_state["focused"]
-            and active_state["support_confirmed"]
+            goal_is_satisfied
             and self.task_status != "COMPLETED"
-            and active_state["stalled_confirmations"] >= 2
+            and (
+                active_state["post_goal_confirmations"] >= 1
+                or active_state["stalled_confirmations"] >= 2
+            )
         ):
             active_state["status"] = "rejected"
             if active_candidate not in self._rejected_candidates:
@@ -8192,6 +8276,15 @@ class GWTAutogenAgent(AutogenAgent):
                 active_candidate_room_tokens
                 and active_candidate_room_tokens.issubset(content_token_set)
             )
+            destination_container_referent = self._signature_matches_role(
+                referent_signature, role_token_sets["destination_container"]
+            )
+            destination_room_referent = self._signature_matches_role(
+                referent_signature, role_token_sets["destination_room"]
+            )
+            candidate_reset_required = bool(
+                self._rejected_candidates and not self._active_candidate
+            )
             if self._remote_room_signal_has_signal(remote_room_signal):
                 if family == "relocation":
                     if remote_room_navigation_action:
@@ -8246,6 +8339,41 @@ class GWTAutogenAgent(AutogenAgent):
                     score += 8
                 elif support_role_hits and family in {"relocation", "device_control"}:
                     score -= 8
+
+            if candidate_reset_required:
+                if candidate_target:
+                    if candidate_target in self._rejected_candidates:
+                        if family in {
+                            "focus",
+                            "inspect",
+                            "relocation",
+                            "transfer_or_transform",
+                        }:
+                            score -= 50
+                    elif family == "focus":
+                        score += 18
+                    elif family == "inspect":
+                        score += 12
+                    elif family == "relocation":
+                        if "focus" in required_families:
+                            score -= 60
+                        else:
+                            score += 4
+                elif destination_container_referent:
+                    if family in {"focus", "inspect"}:
+                        score -= 44
+                    elif family in {
+                        "relocation",
+                        "transfer_or_transform",
+                        "tool_application",
+                        "relation",
+                    }:
+                        score -= 20
+                elif destination_room_referent:
+                    if family == "inspect":
+                        score += 10
+                    elif family == "focus":
+                        score -= 12
 
             if candidate_target:
                 if candidate_target in self._rejected_candidates:
