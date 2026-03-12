@@ -1982,6 +1982,69 @@ def test_state_change_phase_switches_to_probe_sources_after_container_search(tmp
     assert "sink" in snapshot["source_candidates"]
 
 
+def test_state_change_tracking_requires_confirmed_container_probe_before_exhaustion(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    kitchen_observation = (
+        "This room is called the kitchen. In it, you see a fridge, a freezer, "
+        "a cupboard, and a sink."
+    )
+    agent.percept = {"resulting_observation": kitchen_observation}
+    agent._update_state_change_search_tracking(
+        action=None,
+        observation=kitchen_observation,
+    )
+
+    agent._update_state_change_search_tracking(
+        action="open cupboard",
+        observation="The cupboard is now open.",
+    )
+    agent._update_state_change_search_tracking(
+        action="look at freezer",
+        observation="a freezer. The freezer door is closed.",
+    )
+
+    agent.percept = {"resulting_observation": "a freezer. The freezer door is closed."}
+    summary = agent._summarize_admissible_actions(
+        [
+            "open freezer",
+            "open fridge",
+            "look at sink",
+            "activate sink",
+        ],
+        shortlist_limit=4,
+    )
+
+    assert summary["current_phase"] == "locate_substance"
+    assert summary["substance_search"]["exhausted_containers"] == []
+    assert "open freezer" in summary["task_relevant_action_shortlist"]
+    assert "open fridge" in summary["task_relevant_action_shortlist"]
+
+
+def test_state_change_tracking_exhausts_container_after_interior_is_revealed(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent._reset_episode_reasoning_state()
+
+    agent._update_state_change_search_tracking(
+        action="look at freezer",
+        observation="a freezer. The freezer door is open. In the freezer is: nothing.",
+    )
+
+    snapshot = agent._get_substance_search_snapshot()
+    assert snapshot["exhausted_containers"] == ["freezer"]
+
+
 def test_state_change_tracking_records_local_room_search_before_target_grounding(
     tmp_path,
 ):
