@@ -13,12 +13,13 @@ action_agent: |
   - The shared percept gives you "admissible_action_summary", including "salient_entities", and a "task_relevant_action_shortlist".
   - The percept may also include a "task_contract" with required action families, target entities, and ordering cues derived from the task text.
   - Some task contracts also distinguish a target substance from a desired transformation. Use that to separate "locate the substance" from "change its state" instead of mixing both steps together.
-  - Some task contracts also describe artifact creation. If "artifact_creation" is present, preserve the artifact type over adjective-only matches. A "green light bulb" is not evidence for a paint task just because it matches "green".
+  - Some task contracts also describe artifact creation. If "artifact_creation" is present, preserve the artifact type over adjective-only matches. An adjective match on the wrong object type is not evidence for the task target.
   - The percept may include "substance_search" with grounded substance labels, exhausted containers, and source candidates. Treat grounded substance labels as authoritative and use source candidates when container search is exhausted.
   - The percept may include "artifact_creation" with the artifact type, grounded artifact instances, and whether an ingredient gap is still open. Use that to search for missing ingredients before manipulating the current ingredient into empty containers.
   - The percept may include "measurement_tracking" with a measured target, instrument, branch target readiness, recent direct/proxy readings, and an active enclosure for hidden targets.
   - The percept may include "comparison_tracking" with compared targets, grounded comparison readings, and a resolved branch target. Gather evidence before focusing a compared target, then commit to the resolved winner.
   - The percept may include "relation_frontier" with the currently grounded local mechanism, nearby control candidates, and whether the primary target/source are grounded.
+  - Some conditional branch tasks also require creating or revealing an intermediate evidence target before the branch can be resolved. When the task depends on a later-stage or transformed phenotype, treat precursor materials as setup and the resulting evidence-bearing entity as the real target of investigation.
   - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
   - Treat the shortlist as the preferred exact candidate set, not as proof that other actions are impossible.
@@ -61,6 +62,7 @@ thinking_agent: |
   Also challenge assumptions when progress has stalled — e.g., reconsider whether object categories are being interpreted too broadly, or if implicit task assumptions are wrong.
   Use "admissible_action_summary", especially "salient_entities", "task_relevant_action_shortlist", and any newly/no-longer relevant actions to reason about what kinds of interventions are worth testing next.
   Use the task contract when it is present: required action families stay relevant, target entities anchor search, and ordering cues constrain sequencing.
+  If a conditional branch task also depends on precursor setup, reason in two stages: first create or reveal the evidence target, then resolve the branch. Do not jump from setup materials straight to the branch targets.
   If the task contract separates a target substance from a desired transformation, reason in that order: locate the grounded substance first, then test the transformation on that same grounded referent.
   If artifact_creation is present, keep the artifact type stable and do not chase adjective-only distractors of the wrong type. After grounding one ingredient, prefer finding the missing ingredient or reagent before improvising transfers into empty containers.
   If substance_search is present, treat grounded substance labels as authoritative and use source candidates only after container search evidence is exhausted.
@@ -101,7 +103,8 @@ belief_state_agent: |
   4. Necessary revisions to earlier beliefs based on updated evidence.
   5. Your current confidence in the abstract mechanism families being tested in this episode. If the ledger or percept shows repeated failed tests, explicitly say that the mechanism is low-confidence or deprioritized for now.
   6. The task contract when present: required action families, target entities, and ordering constraints that should stay active in the current belief state.
-  6aa. If artifact_creation is present, keep the artifact type separate from adjectives like colors. Do not revise a paint task into a light-bulb task just because both mention "green".
+  6ab. If a conditional branch task also depends on precursor setup, keep the branch targets inactive until the evidence target has actually been created or revealed.
+  6aa. If artifact_creation is present, keep the artifact type separate from descriptor adjectives. Do not revise the task toward a different object type just because a distractor shares an adjective.
   6a. If the task contract distinguishes a target substance from a desired transformation, track those separately. Do not treat a nearby but different substance as if it satisfies the task target.
   6b. If substance_search is present, treat grounded substance labels as authoritative. Do not rename or merge substances unless the percept explicitly does so.
   6c. If measurement_tracking is present, track the measured target, instrument, and branch target separately. Do not treat a proxy measurement on a support object as if it were a confirmed measurement of the target.

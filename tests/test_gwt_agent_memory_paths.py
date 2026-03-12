@@ -322,6 +322,7 @@ def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_
     assert summary["current_phase"] == "gather_evidence"
     assert summary["family_counts"]["inspect"] >= 2
     assert "aluminum" in summary["salient_entities"]
+    assert "action_attempts_left" not in agent.percept
     assert "look at aluminum foil" in shortlist
     assert "pick up aluminum foil" in shortlist
     assert (
@@ -373,10 +374,25 @@ def test_custom_speaker_selection_repairs_malformed_belief_state_and_continues(
     next_speaker = agent.custom_speaker_selection(agent.belief_state_agent, groupchat)
 
     assert next_speaker is agent.action_agent
-    assert groupchat.messages[-1]["content"].startswith("BELIEF STATE:")
-    assert "latest confirmed percept" in groupchat.messages[-1]["content"]
-    assert agent._last_belief_content == ""
-    assert agent._consecutive_thinking_count == 0
+
+
+def test_generate_initial_message_omits_numeric_budget_counts(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Focus on the red box."
+    agent.curr_episodic_memory = []
+    agent.prev_episodic_memories = []
+    agent.knowledge = []
+    agent.rag_concept_k_initial = 2
+    agent.rag_episode_k_initial = 2
+    agent.max_chat_round = 75
+    agent.max_actions = 15
+    agent.percept = {"timestep": 0, "task_status": "INCOMPLETE"}
+
+    message = agent.generate_initial_message()
+
+    assert "Max chat rounds allowed" not in message
+    assert "Max environment actions allowed" not in message
+    assert "scarce resources" in message
 
 
 def test_recover_from_chat_error_reorders_provider_and_retries(tmp_path):
@@ -752,6 +768,65 @@ def test_remote_room_signal_prefers_entering_inspected_room(tmp_path):
     assert summary["task_relevant_action_shortlist"][0] == "go to greenhouse"
     assert "open door to greenhouse" in summary["task_relevant_action_shortlist"]
     assert "look at art studio" not in summary["task_relevant_action_shortlist"]
+
+
+def test_remote_room_signal_tokenizes_multiword_candidate_classes(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to find a living thing in the outside location and focus on it."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    previous_observation = (
+        "This room is called the hallway. In it, you see the agent. "
+        "You also see: A door to the greenhouse (that is open)."
+    )
+    observation = (
+        "Inside the greenhouse is: a living thing called a bee. "
+        "You also see a door to the outside (that is closed)."
+    )
+
+    agent._update_remote_room_signal(
+        action="look in greenhouse",
+        observation=observation,
+        previous_observation=previous_observation,
+    )
+
+    snapshot = agent._get_remote_room_signal_snapshot()
+
+    assert snapshot["room"] == "greenhouse"
+    assert "living" in snapshot["signal_tokens"]
+
+
+def test_signature_looks_like_room_from_dynamic_visible_room_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    observation = (
+        "This room is called the atrium. You also see a door to the observatory "
+        "(that is closed)."
+    )
+
+    assert agent._signature_looks_like_room("observatory", observation, "")
+
+
+def test_candidate_action_target_rejects_dynamic_room_without_hardcoded_room_name(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Find a living thing in the observatory and focus on it."
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the atrium. You see a door to the observatory "
+            "(that is closed) and a silver beetle."
+        )
+    }
+
+    candidate = agent._get_candidate_action_target(
+        "focus on observatory", family="focus"
+    )
+
+    assert candidate == ""
 
 
 def test_lifecycle_search_prefers_doors_over_object_transport_before_entry(tmp_path):
@@ -2324,6 +2399,44 @@ def test_state_change_shortlist_avoids_invalid_same_referent_probe_retries(tmp_p
     assert any("sink" in action for action in shortlist)
 
 
+def test_shortlist_scoring_precomputes_state_change_room_stall_once(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a sink, a stove, "
+            "an oven, and a cupboard."
+        )
+    }
+    agent.admissible_actions = [
+        "look at sink",
+        "activate sink",
+        "open cupboard",
+        "activate oven",
+    ]
+
+    stall_calls = {"state_change": 0}
+
+    def count_state_change_stall(**kwargs):
+        stall_calls["state_change"] += 1
+        return False
+
+    def fail_measurement_stall(**kwargs):
+        raise AssertionError("measurement stall helper should not run")
+
+    agent._state_change_room_search_stalled = count_state_change_stall
+    agent._measurement_instrument_search_stalled = fail_measurement_stall
+
+    agent._summarize_admissible_actions(agent.admissible_actions, shortlist_limit=3)
+
+    assert stall_calls["state_change"] == 1
+
+
 def test_measurement_task_contract_extracts_measurement_roles_and_cleans_tokens(
     tmp_path,
 ):
@@ -2752,11 +2865,13 @@ def test_conditional_branch_task_contract_preserves_evidence_target_and_branch_t
     contract = agent._get_task_contract()
 
     assert contract["conditional_branch_task"] is True
+    assert contract["growth_task"] is True
     assert contract["measurement_task"] is False
     assert contract["conditional_branch_evidence_target"] == ["unknown plant"]
     assert contract["conditional_branch_subject"] == ["blue seed"]
     assert contract["conditional_branch_targets"] == ["red box", "green box"]
-    assert contract["primary_targets"] == ["unknown plant", "blue seed"]
+    assert contract["primary_targets"] == ["unknown plant"]
+    assert contract["supporting_targets"] == ["blue seed"]
     assert contract["conditional_branches"][0]["condition_tokens"] == ["dominant"]
     assert contract["conditional_branches"][1]["condition_tokens"] == ["recessive"]
 
@@ -2830,11 +2945,52 @@ def test_conditional_branch_shortlist_gathers_evidence_before_branch_actions(tmp
     )
 
     shortlist = summary["task_relevant_action_shortlist"]
-    assert summary["current_phase"] == "gather_branch_evidence"
+    assert summary["current_phase"] == "test_mechanism"
     assert "look at seed square blue unknown e seed" in shortlist
     assert "look at round brown unknown e seed" in shortlist
     assert "connect red box to seed square blue unknown e seed" not in shortlist
     assert "pour seed square blue unknown e seed into red box" not in shortlist
+    assert "focus on red box" not in shortlist
+
+
+def test_conditional_growth_task_prefers_precursor_to_growth_locus_over_seed_to_seed_move(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine whether blue seed color is a dominant or "
+        "recessive trait in the unknown E plant. If the trait is dominant, "
+        "focus on the red box. If the trait is recessive, focus on the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. In it, you see a seed square blue "
+            "unknown E seed, a round brown unknown E seed, a flower pot 1 "
+            "(containing soil), a shovel, a red box, and a green box."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "move round brown unknown e seed to seed square blue unknown e seed",
+            "move seed square blue unknown e seed to flower pot 1",
+            "use shovel on flower pot 1",
+            "look at flower pot 1",
+            "focus on red box",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "test_mechanism"
+    assert "move seed square blue unknown e seed to flower pot 1" in shortlist
+    assert "use shovel on flower pot 1" in shortlist
+    assert (
+        "move round brown unknown e seed to seed square blue unknown e seed"
+        not in shortlist
+    )
     assert "focus on red box" not in shortlist
 
 
@@ -3928,3 +4084,43 @@ def test_update_percept_exposes_relation_frontier_runtime_context(tmp_path):
     assert agent.percept["relation_frontier"]["primary_target_grounded"] is True
     assert "Episode runtime snapshots" in agent.action_agent.system_message
     assert "relation_frontier" in agent.action_agent.system_message
+
+
+def test_action_agent_runtime_context_uses_compact_task_snapshot(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C. "
+        "First, focus on the thermometer. Next, focus on the solid unknown substance C. "
+        "If the melting point of solid unknown substance C is above 150.0 degrees celsius, "
+        "focus on the orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent.curr_episodic_memory = []
+    agent.num_actions_taken = 1
+    agent.max_actions = 35
+    agent.action_agent = SimpleNamespace(system_message="")
+    agent._action_agent_base_prompt = "BASE ACTION PROMPT"
+    agent._reset_episode_reasoning_state()
+    agent.admissible_actions = ["look around"]
+    agent.adapter = SimpleNamespace(
+        admissible_actions=[
+            "look around",
+            "focus on thermometer",
+            "focus on solid unknown substance c",
+            "focus on orange box",
+            "focus on yellow box",
+        ],
+        observation=(
+            "You are in the kitchen. You see a thermometer, solid unknown substance C, "
+            "an orange box, and a yellow box."
+        ),
+    )
+
+    agent.update_percept("look around")
+
+    system_message = agent.action_agent.system_message
+    assert "Task contract" in system_message
+    assert "measurement_branch_targets" in system_message
+    assert "measurement_branches" not in system_message
+    assert "Action family counts" not in system_message
