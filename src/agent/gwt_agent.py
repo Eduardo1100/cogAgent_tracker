@@ -271,6 +271,34 @@ class GWTAutogenAgent(AutogenAgent):
         "fruit",
         "grown",
     )
+    _GENETIC_TRAIT_HINTS = (
+        "dominant",
+        "recessive",
+        "trait",
+        "inherit",
+        "inherited",
+        "inheritance",
+        "phenotype",
+        "genotype",
+    )
+    _GROWTH_EVIDENCE_TARGET_TOKENS = {
+        "plant",
+        "flower",
+        "fruit",
+        "tree",
+        "sapling",
+        "seedling",
+        "vine",
+        "crop",
+    }
+    _GROWTH_PRECURSOR_TOKENS = {
+        "seed",
+        "pollen",
+        "spore",
+        "fruit",
+        "flower",
+        "blossom",
+    }
     _TASK_ROLE_PATTERNS = {
         "primary_targets": (
             r"\bfocus on\s+(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
@@ -884,21 +912,31 @@ class GWTAutogenAgent(AutogenAgent):
             and not measurement_task
             and not comparison_task
         )
+        growth_from_conditional_branch = (
+            self._conditional_branch_requires_growth_precursor(
+                task_lower=task_lower,
+                conditional_branch_task=conditional_branch_task,
+                conditional_branch_subject=conditional_branch_subject,
+                conditional_branch_evidence_target=conditional_branch_evidence_target,
+            )
+        )
         if not conditional_branch_task:
             conditional_branch_subject = ""
             conditional_branch_evidence_target = ""
             conditional_branch_targets = []
             conditional_branches = []
         growth_task = bool(
-            any(
-                self._task_contains_hint(task_lower, hint)
-                for hint in self._GROWTH_TASK_HINTS
+            (
+                any(
+                    self._task_contains_hint(task_lower, hint)
+                    for hint in self._GROWTH_TASK_HINTS
+                )
+                or growth_from_conditional_branch
             )
             and not lifecycle_sequence
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
-            and not conditional_branch_task
         )
         inferred_search_mode = bool(
             role_phrases["primary_targets"]
@@ -1008,7 +1046,16 @@ class GWTAutogenAgent(AutogenAgent):
                 role_phrases["primary_targets"].append(
                     conditional_branch_evidence_target
                 )
-            if (
+            if growth_task:
+                if (
+                    conditional_branch_subject
+                    and conditional_branch_subject
+                    not in role_phrases["supporting_targets"]
+                ):
+                    role_phrases["supporting_targets"].append(
+                        conditional_branch_subject
+                    )
+            elif (
                 conditional_branch_subject
                 and conditional_branch_subject not in role_phrases["primary_targets"]
             ):
@@ -1359,6 +1406,14 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_growth_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("growth_task"))
+
+    def _is_growth_conditional_branch_task(
+        self, task_contract: dict | None = None
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(
+            contract.get("growth_task") and contract.get("conditional_branch_task")
+        )
 
     def _is_comparison_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
@@ -1952,6 +2007,48 @@ class GWTAutogenAgent(AutogenAgent):
             evidence_target,
             conditional_branch_targets[:2],
             conditional_branches[:2],
+        )
+
+    def _conditional_branch_requires_growth_precursor(
+        self,
+        *,
+        task_lower: str,
+        conditional_branch_task: bool,
+        conditional_branch_subject: str,
+        conditional_branch_evidence_target: str,
+    ) -> bool:
+        if not conditional_branch_task:
+            return False
+
+        evidence_tokens = set(
+            self._extract_runtime_tokens(
+                conditional_branch_evidence_target,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=6,
+            )
+        )
+        subject_tokens = set(
+            self._extract_runtime_tokens(
+                conditional_branch_subject,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=6,
+            )
+        )
+        if not evidence_tokens:
+            return False
+
+        evidence_is_growth_target = bool(
+            evidence_tokens & self._GROWTH_EVIDENCE_TARGET_TOKENS
+        )
+        subject_is_growth_precursor = bool(
+            subject_tokens & self._GROWTH_PRECURSOR_TOKENS
+        )
+        genetics_signal = any(
+            self._task_contains_hint(task_lower, hint)
+            for hint in self._GENETIC_TRAIT_HINTS
+        )
+        return evidence_is_growth_target and (
+            subject_is_growth_precursor or genetics_signal
         )
 
     def _is_state_change_task(self, task_contract: dict | None = None) -> bool:
@@ -3342,6 +3439,43 @@ class GWTAutogenAgent(AutogenAgent):
             )
         return snapshot
 
+    def _action_targets_conditional_branch(
+        self,
+        action: str,
+        *,
+        family: str,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_conditional_branch_task(contract):
+            return False
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        branch_roles = role_sets["conditional_branch_targets"]
+        if not branch_roles:
+            return False
+        content_token_set = set(
+            self._extract_action_content_tokens(action, family=family)
+        )
+        if self._has_full_role_match(content_token_set, branch_roles):
+            return True
+        referent_signature = self._get_action_referent_signature(action, family=family)
+        primary_signature = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        destination_signature = self._extract_action_destination_signature(
+            action, family=family
+        )
+        return any(
+            self._signature_matches_role(signature, branch_roles)
+            for signature in (
+                referent_signature,
+                primary_signature,
+                destination_signature,
+            )
+            if signature
+        )
+
     @staticmethod
     def _conditional_branch_tracking_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
@@ -4139,6 +4273,15 @@ class GWTAutogenAgent(AutogenAgent):
         if self._primary_target_is_grounded(contract, grounded_token_set):
             return True
 
+        role_token_sets = self._get_task_role_token_sets(contract)
+        precursor_support_roles = [
+            token_set
+            for token_set in role_token_sets["supporting_targets"]
+            if token_set & self._GROWTH_PRECURSOR_TOKENS
+        ]
+        if self._role_is_grounded(grounded_token_set, precursor_support_roles):
+            return True
+
         if self._get_visible_lifecycle_stage_labels(observation):
             return True
 
@@ -4713,10 +4856,7 @@ class GWTAutogenAgent(AutogenAgent):
         signal_tokens = sorted(
             (
                 observation_tokens
-                & (
-                    set(task_contract.get("target_entities", []))
-                    | set(task_contract.get("candidate_classes", []))
-                )
+                & self._get_remote_room_signal_match_tokens(task_contract)
             )
             - self._referent_tokens(inspected_room)
         )
@@ -4745,6 +4885,16 @@ class GWTAutogenAgent(AutogenAgent):
         if signal_tokens:
             snapshot["signal_tokens"] = signal_tokens[:4]
         return snapshot
+
+    def _get_remote_room_signal_match_tokens(
+        self, task_contract: dict | None = None
+    ) -> set[str]:
+        contract = task_contract or self._get_task_contract()
+        match_tokens = set(contract.get("target_entities", []))
+        role_token_sets = self._get_task_role_token_sets(contract)
+        for tokens in role_token_sets.get("candidate_classes", []):
+            match_tokens.update(tokens)
+        return match_tokens
 
     @staticmethod
     def _remote_room_signal_has_signal(snapshot: dict) -> bool:
@@ -7469,6 +7619,7 @@ class GWTAutogenAgent(AutogenAgent):
             or branch_destination_match
             or branch_role_hits
         )
+        growth_branch_task = self._is_growth_conditional_branch_task(task_contract)
         score = 0
 
         if current_phase == "locate_primary_target":
@@ -7493,6 +7644,111 @@ class GWTAutogenAgent(AutogenAgent):
                 score -= 16
             if branch_action:
                 score -= 120
+
+        elif growth_branch_task and current_phase in {
+            "test_mechanism",
+            "commit_to_goal",
+            "confirm_primary_target",
+            "verify_outcome",
+            "gather_branch_evidence",
+        }:
+            precursor_referent_match = self._signature_matches_role(
+                referent_signature, role_token_sets["supporting_targets"]
+            )
+            precursor_primary_match = self._signature_matches_role(
+                primary_signature, role_token_sets["supporting_targets"]
+            )
+            precursor_destination_match = self._signature_matches_role(
+                destination_signature, role_token_sets["supporting_targets"]
+            )
+            precursor_action = bool(
+                support_role_hits
+                or precursor_referent_match
+                or precursor_primary_match
+                or precursor_destination_match
+            )
+            container_like_action = self._is_container_like_action(
+                action, family=family
+            )
+            if current_phase == "gather_branch_evidence":
+                if family == "inspect":
+                    if primary_role_hits:
+                        score += 18
+                    elif support_role_hits:
+                        score += 8
+                    elif normalized.startswith("look around"):
+                        score += 6
+                elif family == "focus":
+                    if primary_role_hits:
+                        score += 14
+                    elif support_role_hits:
+                        score += 2
+                    else:
+                        score -= 6
+                elif family == "device_control":
+                    if self._action_mentions_door(action, family=family):
+                        score += 4
+                    elif primary_role_hits or support_role_hits:
+                        score += 4
+                    else:
+                        score -= 6
+                elif family == "relocation":
+                    score += 8 if primary_role_hits else 2 if support_role_hits else -6
+                elif family == "tool_application":
+                    score += 8 if (primary_role_hits or support_role_hits) else -10
+                elif family == "transfer_or_transform":
+                    score -= 14 if branch_action else 4 if primary_role_hits else -18
+            else:
+                if family == "inspect":
+                    if primary_role_hits:
+                        score += 14
+                    elif support_role_hits or normalized.startswith("look around"):
+                        score += 8
+                elif family == "focus":
+                    if current_phase == "confirm_primary_target" and primary_role_hits:
+                        score += 24
+                    elif primary_role_hits:
+                        score += 8
+                    elif support_role_hits:
+                        score -= 6
+                    else:
+                        score -= 10
+                elif family == "device_control":
+                    if support_role_hits or primary_role_hits or container_like_action:
+                        score += 8
+                    elif self._action_mentions_door(action, family=family):
+                        score += 4
+                    else:
+                        score -= 10
+                elif family == "tool_application":
+                    score += 10 if (primary_role_hits or precursor_action) else -12
+                elif family == "relation":
+                    score += 8 if (primary_role_hits or precursor_action) else -12
+                elif family == "relocation":
+                    if primary_role_hits:
+                        score += 12
+                    elif precursor_action and container_like_action:
+                        score += 10
+                    elif precursor_action:
+                        score -= 20
+                    else:
+                        score -= 10
+                elif family == "transfer_or_transform":
+                    if primary_role_hits:
+                        score += 14
+                    elif precursor_action and container_like_action:
+                        score += 12
+                    elif precursor_action:
+                        score -= 24
+                    else:
+                        score -= 12
+
+            if branch_action:
+                score -= 180
+                if family == "focus":
+                    score -= 120
+                elif family in {"relocation", "transfer_or_transform"}:
+                    score -= 80
 
         elif current_phase == "gather_branch_evidence":
             if family == "inspect":
@@ -8049,6 +8305,41 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
+        if self._is_growth_conditional_branch_task(task_contract):
+            current_observation = (self.percept or {}).get("resulting_observation", "")
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            role_token_sets = self._get_task_role_token_sets(task_contract)
+            if self._selected_conditional_branch_target:
+                return "execute_branch"
+            if self._primary_target_is_grounded(task_contract, grounded_tokens):
+                if "focus" in task_contract.get(
+                    "required_families", []
+                ) and not self._role_focus_completed(
+                    role_token_sets["primary_targets"]
+                ):
+                    return "confirm_primary_target"
+                return "gather_branch_evidence"
+            if not self._growth_task_has_precursor_signal(
+                current_observation,
+                task_contract=task_contract,
+                grounded_tokens=grounded_tokens,
+            ):
+                return "locate_primary_target"
+            mechanism_progress = any(
+                entry["observable_change_attempts"] > 0
+                for entry in self.episode_hypothesis_ledger.values()
+                if entry["family"]
+                in {
+                    "relation",
+                    "tool_application",
+                    "transfer_or_transform",
+                    "device_control",
+                    "relocation",
+                }
+            )
+            if mechanism_progress:
+                return "commit_to_goal"
+            return "test_mechanism"
         if self._is_comparison_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             if not (
@@ -8279,38 +8570,41 @@ class GWTAutogenAgent(AutogenAgent):
         current_phase: str,
         task_keywords: list[str],
         grounded_tokens: list[str],
+        scoring_context: dict | None = None,
     ) -> tuple[int, int, int]:
+        scoring_context = (
+            scoring_context
+            if scoring_context is not None
+            else self._build_shortlist_scoring_context(
+                current_phase=current_phase,
+                task_keywords=task_keywords,
+                grounded_tokens=grounded_tokens,
+            )
+        )
         normalized = self._normalize_runtime_text(action)
         family = self._classify_action_family(action)
         action_tokens = self._extract_runtime_tokens(action)
         content_tokens = self._extract_action_content_tokens(action, family=family)
         action_token_set = set(action_tokens)
         content_token_set = set(content_tokens)
-        grounded_token_set = set(grounded_tokens)
-        task_keyword_set = set(task_keywords)
-        task_contract = self._get_task_contract()
-        role_token_sets = self._get_task_role_token_sets(task_contract)
-        required_families = set(task_contract.get("required_families", []))
-        support_families = set(task_contract.get("support_families", []))
-        target_entity_set = set(task_contract.get("target_entities", []))
-        current_observation = (self.percept or {}).get("resulting_observation", "")
-        current_location_tokens = set(
-            self._extract_current_location_tokens(current_observation)
-        )
-        current_room = self._get_current_location_signature(current_observation)
-        remote_room_signal = self._get_remote_room_signal_snapshot()
-        remote_room = remote_room_signal.get("room", "")
-        remote_room_tokens = (
-            self._referent_tokens(remote_room) if remote_room else set()
-        )
-        room_state = self._search_location_states.get(current_room, {})
-        visible_doors = self._count_visible_doors(current_observation)
-        visible_nonlocation_targets = (
-            grounded_token_set & target_entity_set
-        ) - current_location_tokens
-        ordered_sequence = "ordered_sequence" in task_contract.get("ordering_cues", [])
+        grounded_token_set = scoring_context["grounded_token_set"]
+        task_keyword_set = scoring_context["task_keyword_set"]
+        task_contract = scoring_context["task_contract"]
+        role_token_sets = scoring_context["role_token_sets"]
+        required_families = scoring_context["required_families"]
+        support_families = scoring_context["support_families"]
+        target_entity_set = scoring_context["target_entity_set"]
+        current_observation = scoring_context["current_observation"]
+        current_location_tokens = scoring_context["current_location_tokens"]
+        current_room = scoring_context["current_room"]
+        remote_room_signal = scoring_context["remote_room_signal"]
+        remote_room_tokens = scoring_context["remote_room_tokens"]
+        room_state = scoring_context["room_state"]
+        visible_doors = scoring_context["visible_doors"]
+        visible_nonlocation_targets = scoring_context["visible_nonlocation_targets"]
+        ordered_sequence = scoring_context["ordered_sequence"]
         referent_signature = self._get_action_referent_signature(action, family=family)
-        candidate_search_task = self._is_candidate_search_task(task_contract)
+        candidate_search_task = scoring_context["candidate_search_task"]
         candidate_target = self._get_candidate_action_target(
             action, family=family, task_contract=task_contract
         )
@@ -8333,25 +8627,17 @@ class GWTAutogenAgent(AutogenAgent):
         relation_full_match = self._has_full_role_match(
             content_token_set, role_token_sets["required_relations"]
         )
-        primary_target_grounded = self._role_is_grounded(
-            grounded_token_set, role_token_sets["primary_targets"]
-        )
-        primary_target_focused = self._role_focus_completed(
-            role_token_sets["primary_targets"]
-        )
-        state_change_task = self._is_state_change_task(task_contract)
-        artifact_creation_task = self._is_artifact_creation_task(task_contract)
-        relation_mechanism_task = self._is_relation_mechanism_task(task_contract)
-        inferred_target_search_task = self._is_inferred_target_search_task(
-            task_contract
-        )
-        measurement_task = self._is_measurement_task(task_contract)
-        comparison_task = self._is_comparison_task(task_contract)
-        conditional_branch_task = self._is_conditional_branch_task(task_contract)
-        lifecycle_task = self._is_lifecycle_task(task_contract)
-        lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
-            self._get_visible_lifecycle_stage_labels(current_observation)
-        )
+        primary_target_grounded = scoring_context["primary_target_grounded"]
+        primary_target_focused = scoring_context["primary_target_focused"]
+        state_change_task = scoring_context["state_change_task"]
+        artifact_creation_task = scoring_context["artifact_creation_task"]
+        relation_mechanism_task = scoring_context["relation_mechanism_task"]
+        inferred_target_search_task = scoring_context["inferred_target_search_task"]
+        measurement_task = scoring_context["measurement_task"]
+        comparison_task = scoring_context["comparison_task"]
+        conditional_branch_task = scoring_context["conditional_branch_task"]
+        lifecycle_task = scoring_context["lifecycle_task"]
+        lifecycle_targets_visible = scoring_context["lifecycle_targets_visible"]
         room_frontier_action = self._action_targets_room_frontier(
             action, current_observation, family=family
         )
@@ -8385,31 +8671,16 @@ class GWTAutogenAgent(AutogenAgent):
                 "target_grounded"
             )
         )
-        state_change_room_search_stalled = self._state_change_room_search_stalled(
-            current_room=current_room,
-            visible_doors=visible_doors,
-            task_contract=task_contract,
-            grounded_tokens=grounded_token_set,
-        )
-        measurement_instrument_search_stalled = (
-            self._measurement_instrument_search_stalled(
-                current_room=current_room,
-                visible_doors=visible_doors,
-                task_contract=task_contract,
-                grounded_tokens=grounded_token_set,
-            )
-        )
-        artifact_room_search_stalled = self._artifact_creation_room_search_stalled(
-            current_room=current_room,
-            visible_doors=visible_doors,
-            task_contract=task_contract,
-        )
-        comparison_room_search_stalled = self._comparison_room_search_stalled(
-            current_room=current_room,
-            visible_doors=visible_doors,
-            task_contract=task_contract,
-            grounded_tokens=grounded_token_set,
-        )
+        state_change_room_search_stalled = scoring_context[
+            "state_change_room_search_stalled"
+        ]
+        measurement_instrument_search_stalled = scoring_context[
+            "measurement_instrument_search_stalled"
+        ]
+        artifact_room_search_stalled = scoring_context["artifact_room_search_stalled"]
+        comparison_room_search_stalled = scoring_context[
+            "comparison_room_search_stalled"
+        ]
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -8417,9 +8688,7 @@ class GWTAutogenAgent(AutogenAgent):
             if lifecycle_task
             else []
         )
-        next_expected_stage = (
-            self._get_next_expected_stage_label() if lifecycle_task else None
-        )
+        next_expected_stage = scoring_context["next_expected_stage"]
         seen_stage_labels = [
             label for label in stage_labels if label in self._focused_stage_labels
         ]
@@ -8941,6 +9210,115 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score, grounded_hits, family_priority
 
+    def _build_shortlist_scoring_context(
+        self,
+        *,
+        current_phase: str,
+        task_keywords: list[str],
+        grounded_tokens: list[str],
+    ) -> dict:
+        task_contract = self._get_task_contract()
+        role_token_sets = self._get_task_role_token_sets(task_contract)
+        grounded_token_set = set(grounded_tokens)
+        task_keyword_set = set(task_keywords)
+        target_entity_set = set(task_contract.get("target_entities", []))
+        current_observation = (self.percept or {}).get("resulting_observation", "")
+        current_location_tokens = set(
+            self._extract_current_location_tokens(current_observation)
+        )
+        current_room = self._get_current_location_signature(current_observation)
+        remote_room_signal = self._get_remote_room_signal_snapshot()
+        remote_room = remote_room_signal.get("room", "")
+        remote_room_tokens = (
+            self._referent_tokens(remote_room) if remote_room else set()
+        )
+        visible_doors = self._count_visible_doors(current_observation)
+        visible_nonlocation_targets = (
+            grounded_token_set & target_entity_set
+        ) - current_location_tokens
+        candidate_search_task = self._is_candidate_search_task(task_contract)
+        state_change_task = self._is_state_change_task(task_contract)
+        artifact_creation_task = self._is_artifact_creation_task(task_contract)
+        relation_mechanism_task = self._is_relation_mechanism_task(task_contract)
+        inferred_target_search_task = self._is_inferred_target_search_task(
+            task_contract
+        )
+        measurement_task = self._is_measurement_task(task_contract)
+        comparison_task = self._is_comparison_task(task_contract)
+        conditional_branch_task = self._is_conditional_branch_task(task_contract)
+        lifecycle_task = self._is_lifecycle_task(task_contract)
+        return {
+            "current_phase": current_phase,
+            "task_keyword_set": task_keyword_set,
+            "grounded_token_set": grounded_token_set,
+            "task_contract": task_contract,
+            "role_token_sets": role_token_sets,
+            "required_families": set(task_contract.get("required_families", [])),
+            "support_families": set(task_contract.get("support_families", [])),
+            "target_entity_set": target_entity_set,
+            "current_observation": current_observation,
+            "current_location_tokens": current_location_tokens,
+            "current_room": current_room,
+            "remote_room_signal": remote_room_signal,
+            "remote_room_tokens": remote_room_tokens,
+            "room_state": self._search_location_states.get(current_room, {}),
+            "visible_doors": visible_doors,
+            "visible_nonlocation_targets": visible_nonlocation_targets,
+            "ordered_sequence": "ordered_sequence"
+            in task_contract.get("ordering_cues", []),
+            "candidate_search_task": candidate_search_task,
+            "state_change_task": state_change_task,
+            "artifact_creation_task": artifact_creation_task,
+            "relation_mechanism_task": relation_mechanism_task,
+            "inferred_target_search_task": inferred_target_search_task,
+            "measurement_task": measurement_task,
+            "comparison_task": comparison_task,
+            "conditional_branch_task": conditional_branch_task,
+            "lifecycle_task": lifecycle_task,
+            "lifecycle_targets_visible": bool(visible_nonlocation_targets)
+            or bool(self._get_visible_lifecycle_stage_labels(current_observation)),
+            "primary_target_grounded": self._role_is_grounded(
+                grounded_token_set, role_token_sets["primary_targets"]
+            ),
+            "primary_target_focused": self._role_focus_completed(
+                role_token_sets["primary_targets"]
+            ),
+            "state_change_room_search_stalled": self._state_change_room_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+                grounded_tokens=grounded_token_set,
+            )
+            if state_change_task
+            else False,
+            "measurement_instrument_search_stalled": self._measurement_instrument_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+                grounded_tokens=grounded_token_set,
+            )
+            if measurement_task
+            else False,
+            "artifact_room_search_stalled": self._artifact_creation_room_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+            )
+            if artifact_creation_task
+            else False,
+            "comparison_room_search_stalled": self._comparison_room_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+                grounded_tokens=grounded_token_set,
+            )
+            if comparison_task
+            else False,
+            "next_expected_stage": self._get_next_expected_stage_label()
+            if lifecycle_task
+            else None,
+        }
+
     def _summarize_admissible_actions_uncached(
         self,
         actions: list[str],
@@ -8953,6 +9331,11 @@ class GWTAutogenAgent(AutogenAgent):
         grounded_tokens = self._get_observation_grounded_tokens()
         task_contract = self._get_task_contract()
         remote_room_signal = self._get_remote_room_signal_snapshot()
+        scoring_context = self._build_shortlist_scoring_context(
+            current_phase=current_phase,
+            task_keywords=task_keywords,
+            grounded_tokens=grounded_tokens,
+        )
         scored_actions = []
 
         for action in actions:
@@ -8964,6 +9347,7 @@ class GWTAutogenAgent(AutogenAgent):
                 current_phase=current_phase,
                 task_keywords=task_keywords,
                 grounded_tokens=grounded_tokens,
+                scoring_context=scoring_context,
             )
             scored_actions.append(
                 {
@@ -9015,6 +9399,11 @@ class GWTAutogenAgent(AutogenAgent):
             quotas["device_control"] = max(1, quotas.get("device_control", 0))
             if quotas.get("focus", 0) > 0:
                 quotas["focus"] -= 1
+        unresolved_conditional_branch = bool(
+            self._is_conditional_branch_task(task_contract)
+            and not self._selected_conditional_branch_target
+            and current_phase != "execute_branch"
+        )
         lifecycle_search_mode = False
         if self._is_lifecycle_task(task_contract):
             current_observation = (self.percept or {}).get("resulting_observation", "")
@@ -9048,6 +9437,17 @@ class GWTAutogenAgent(AutogenAgent):
                 item["action"], family=item["family"]
             )
         }
+        if unresolved_conditional_branch:
+            blocked_actions.update(
+                item["action"]
+                for item in scored_actions
+                if self._action_targets_conditional_branch(
+                    item["action"],
+                    family=item["family"],
+                    task_contract=task_contract,
+                    role_token_sets=role_token_sets,
+                )
+            )
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}
@@ -9127,6 +9527,43 @@ class GWTAutogenAgent(AutogenAgent):
             key: value for key, value in data.items() if value not in ({}, [], "", None)
         }
 
+    def _limit_runtime_payload(self, value, *, list_limit: int = 4):
+        if isinstance(value, dict):
+            limited = {
+                key: self._limit_runtime_payload(item, list_limit=list_limit)
+                for key, item in value.items()
+            }
+            return self._prune_empty_runtime_fields(limited)
+        if isinstance(value, list):
+            return [
+                self._limit_runtime_payload(item, list_limit=list_limit)
+                for item in value[:list_limit]
+            ]
+        return value
+
+    def _get_action_agent_task_contract_snapshot(self, summary: dict) -> dict:
+        contract = summary.get("task_contract", {})
+        task_contract_snapshot = {
+            "required_families": contract.get("required_families", []),
+            "support_families": contract.get("support_families", []),
+            "primary_targets": contract.get("primary_targets", []),
+            "supporting_targets": contract.get("supporting_targets", []),
+            "candidate_classes": contract.get("candidate_classes", []),
+            "destination_container": contract.get("destination_container", []),
+            "destination_room": contract.get("destination_room", []),
+            "target_substances": contract.get("target_substances", []),
+            "desired_transformation": contract.get("desired_transformation", ""),
+            "artifact_type": contract.get("artifact_type", ""),
+            "measurement_property": contract.get("measurement_property", ""),
+            "measurement_property_type": contract.get("measurement_property_type", ""),
+            "measurement_instrument": contract.get("measurement_instrument", []),
+            "measurement_target": contract.get("measurement_target", []),
+            "measurement_branch_targets": contract.get(
+                "measurement_branch_targets", []
+            ),
+        }
+        return self._limit_runtime_payload(task_contract_snapshot)
+
     def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
         snapshots = {}
         ordered_progress = self._get_ordered_target_snapshot()
@@ -9196,10 +9633,8 @@ class GWTAutogenAgent(AutogenAgent):
             )
         )
         recent_invalid_actions = self._get_recent_invalid_actions()
-        compact_task_contract = self._prune_empty_runtime_fields(
-            summary["task_contract"]
-        )
-        runtime_snapshots = self._prune_empty_runtime_fields(
+        compact_task_contract = self._get_action_agent_task_contract_snapshot(summary)
+        runtime_snapshots = self._limit_runtime_payload(
             self._get_action_agent_runtime_snapshots(summary)
         )
         self._set_agent_system_message(
@@ -9208,7 +9643,6 @@ class GWTAutogenAgent(AutogenAgent):
             + "\n\n--- PRIVATE RUNTIME CONTEXT ---\n"
             + f"Current phase: {summary['current_phase']}\n"
             + f"Current exact task-relevant admissible shortlist: {json.dumps(summary['task_relevant_action_shortlist'])}\n"
-            + f"Action family counts: {json.dumps(summary['family_counts'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
             + f"Task contract: {json.dumps(compact_task_contract)}\n"
             + f"Episode runtime snapshots: {json.dumps(runtime_snapshots)}\n"
@@ -9233,9 +9667,6 @@ class GWTAutogenAgent(AutogenAgent):
         timestep = percept.get("timestep", self.num_actions_taken)
         attempted_action = percept.get("attempted_action", "None")
         observation = percept.get("resulting_observation", "No observation available.")
-        attempts_left = percept.get(
-            "action_attempts_left", self.max_actions - self.num_actions_taken
-        )
         ledger = self._get_episode_hypothesis_snapshot(
             max_families=3, max_recent_tests=2
         )
@@ -9244,7 +9675,7 @@ class GWTAutogenAgent(AutogenAgent):
             f"Timestep {timestep}: My previous belief-state output drifted out of format, so I discard any embedded action suggestion and re-anchor on the latest confirmed percept.",
             f"The last attempted action was {attempted_action!r}.",
             f"The latest confirmed observation is: {observation}",
-            f"The task is still {percept.get('task_status', self.task_status)} with {attempts_left} action attempts left.",
+            f"The task is still {percept.get('task_status', self.task_status)}.",
         ]
 
         if ledger["mechanisms"]:
@@ -9483,7 +9914,6 @@ class GWTAutogenAgent(AutogenAgent):
             "attempted_action": action,
             "resulting_observation": self.adapter.observation,
             "task_status": self.task_status,
-            "action_attempts_left": self.max_actions - self.num_actions_taken,
         }
         self._update_state_change_search_tracking(
             action=action,
@@ -10387,9 +10817,8 @@ class GWTAutogenAgent(AutogenAgent):
         task_section = f"--- TASK DESCRIPTION ---\n{self.task}\n\n"
 
         constraints_section = (
-            f"--- ENVIRONMENTAL CONSTRAINTS ---\n"
-            f"- Max chat rounds allowed: {self.max_chat_round} (represents internal cognitive transitions).\n"
-            f"- Max environment actions allowed: {self.max_actions} (physical interactions only).\n\n"
+            "--- ENVIRONMENTAL CONSTRAINTS ---\n"
+            "- Internal deliberation and physical actions are scarce resources. Stay efficient without letting budget pressure override grounded reasoning.\n\n"
         )
 
         relevant_knowledge = retrieve_relevant_concepts(
