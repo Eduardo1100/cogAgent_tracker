@@ -1720,6 +1720,146 @@ def test_measurement_event_confirmed_direct_reading_resolves_branch_target(tmp_p
     assert agent._get_current_phase() == "execute_branch"
 
 
+def test_conditional_branch_task_contract_preserves_evidence_target_and_branch_targets(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine whether blue seed color is a dominant or "
+        "recessive trait in the unknown E plant. If the trait is dominant, "
+        "focus on the red box. If the trait is recessive, focus on the green box."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["conditional_branch_task"] is True
+    assert contract["measurement_task"] is False
+    assert contract["conditional_branch_evidence_target"] == ["unknown plant"]
+    assert contract["conditional_branch_subject"] == ["blue seed"]
+    assert contract["conditional_branch_targets"] == ["red box", "green box"]
+    assert contract["primary_targets"] == ["unknown plant", "blue seed"]
+    assert contract["conditional_branches"][0]["condition_tokens"] == ["dominant"]
+    assert contract["conditional_branches"][1]["condition_tokens"] == ["recessive"]
+
+
+def test_conditional_branch_search_prefers_evidence_location_over_branch_boxes(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine whether blue seed color is a dominant or "
+        "recessive trait in the unknown E plant. If the trait is dominant, "
+        "focus on the red box. If the trait is recessive, focus on the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. In it, you see a picture. "
+            "You also see a door to the greenhouse and a door to the workshop."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on red box",
+            "focus on green box",
+            "look at picture",
+            "open door to greenhouse",
+            "go to greenhouse",
+        ],
+        shortlist_limit=3,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_primary_target"
+    assert "open door to greenhouse" in shortlist
+    assert "go to greenhouse" in shortlist
+    assert "focus on red box" not in shortlist
+    assert "focus on green box" not in shortlist
+
+
+def test_conditional_branch_shortlist_gathers_evidence_before_branch_actions(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine whether blue seed color is a dominant or "
+        "recessive trait in the unknown E plant. If the trait is dominant, "
+        "focus on the red box. If the trait is recessive, focus on the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. In it, you see a seed square blue "
+            "unknown E seed, a round brown unknown E seed, a red box, a green box, "
+            "a shovel, and a drain."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at seed square blue unknown e seed",
+            "look at round brown unknown e seed",
+            "look in seed square blue unknown e seed",
+            "look around",
+            "look at shovel",
+            "focus on red box",
+            "connect red box to seed square blue unknown e seed",
+            "pour seed square blue unknown e seed into red box",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "gather_branch_evidence"
+    assert "look at seed square blue unknown e seed" in shortlist
+    assert "look at round brown unknown e seed" in shortlist
+    assert "connect red box to seed square blue unknown e seed" not in shortlist
+    assert "pour seed square blue unknown e seed into red box" not in shortlist
+    assert "focus on red box" not in shortlist
+
+
+def test_conditional_branch_resolution_promotes_selected_branch_target(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to determine whether blue seed color is a dominant or "
+        "recessive trait in the unknown E plant. If the trait is dominant, "
+        "focus on the red box. If the trait is recessive, focus on the green box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. In it, you see a seed square blue "
+            "unknown E seed, a red box, and a green box."
+        )
+    }
+
+    agent._update_conditional_branch_tracking(
+        action="look at genetics chart",
+        observation=(
+            "The genetics chart states that blue seed color is dominant in the "
+            "unknown E plant."
+        ),
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on red box",
+            "focus on green box",
+            "look at seed square blue unknown e seed",
+        ],
+        shortlist_limit=1,
+    )
+
+    snapshot = agent._get_conditional_branch_tracking_snapshot()
+
+    assert snapshot["branch_ready"] is True
+    assert snapshot["branch_target"] == ["red box"]
+    assert summary["current_phase"] == "execute_branch"
+    assert summary["task_relevant_action_shortlist"] == ["focus on red box"]
+
+
 def test_measurement_shortlist_prefers_active_enclosure_for_hidden_target(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (

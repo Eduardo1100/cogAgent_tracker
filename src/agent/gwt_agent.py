@@ -304,6 +304,17 @@ class GWTAutogenAgent(AutogenAgent):
         "way",
         "when",
     }
+    _CONDITIONAL_BRANCH_TASK_STOPWORDS = {
+        "answer",
+        "branch",
+        "condition",
+        "conditions",
+        "outcome",
+        "property",
+        "result",
+        "trait",
+        "value",
+    }
     _TASK_ENTITY_STOPWORDS = _TASK_STOPWORDS | {
         "acceptable",
         "action",
@@ -681,6 +692,8 @@ class GWTAutogenAgent(AutogenAgent):
         self._measurement_observations: list[dict] = []
         self._selected_measurement_branch_target: str | None = None
         self._measurement_property_event_observed = False
+        self._selected_conditional_branch_target: str | None = None
+        self._conditional_branch_resolution: dict[str, object] = {}
         self._containment_by_object: dict[str, str] = {}
         self._invalid_exact_actions: dict[str, int] = {}
         self._invalid_referent_attempts: dict[tuple[str, str], int] = {}
@@ -722,6 +735,12 @@ class GWTAutogenAgent(AutogenAgent):
         role_phrases = self._extract_task_role_phrases(task)
         candidate_classes = self._extract_candidate_classes(task)
         (
+            conditional_branch_subject,
+            conditional_branch_evidence_target,
+            conditional_branch_targets,
+            conditional_branches,
+        ) = self._extract_conditional_branch_contract(task)
+        (
             artifact_type,
             artifact_intermediate_targets,
             artifact_final_targets,
@@ -730,6 +749,18 @@ class GWTAutogenAgent(AutogenAgent):
         artifact_creation_task = bool(
             artifact_type and not state_change_task and not measurement_task
         )
+        conditional_branch_task = bool(
+            conditional_branch_targets
+            and conditional_branches
+            and not state_change_task
+            and not artifact_creation_task
+            and not measurement_task
+        )
+        if not conditional_branch_task:
+            conditional_branch_subject = ""
+            conditional_branch_evidence_target = ""
+            conditional_branch_targets = []
+            conditional_branches = []
         inferred_search_mode = bool(
             role_phrases["primary_targets"]
             and not explicit_search_mode
@@ -738,6 +769,7 @@ class GWTAutogenAgent(AutogenAgent):
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
+            and not conditional_branch_task
         )
         measurement_branch_tokens: set[str] = set()
         for branch_target in measurement_branch_targets:
@@ -776,7 +808,10 @@ class GWTAutogenAgent(AutogenAgent):
 
         support_families: list[str] = []
         if (
-            explicit_search_mode or inferred_search_mode or state_change_task
+            explicit_search_mode
+            or inferred_search_mode
+            or state_change_task
+            or conditional_branch_task
         ) and "inspect" not in required_families:
             support_families.append("inspect")
 
@@ -799,6 +834,22 @@ class GWTAutogenAgent(AutogenAgent):
             role_phrases["supporting_targets"] = []
             if measurement_instrument:
                 role_phrases["supporting_targets"].append(measurement_instrument)
+        if conditional_branch_task:
+            role_phrases["primary_targets"] = []
+            if conditional_branch_evidence_target:
+                role_phrases["primary_targets"].append(
+                    conditional_branch_evidence_target
+                )
+            if (
+                conditional_branch_subject
+                and conditional_branch_subject not in role_phrases["primary_targets"]
+            ):
+                role_phrases["primary_targets"].append(conditional_branch_subject)
+            role_phrases["supporting_targets"] = [
+                phrase
+                for phrase in role_phrases["supporting_targets"]
+                if phrase not in conditional_branch_targets
+            ]
         if target_substances and (
             not role_phrases["primary_targets"]
             or all(
@@ -833,6 +884,7 @@ class GWTAutogenAgent(AutogenAgent):
             and not state_change_task
             and not artifact_creation_task
             and not measurement_task
+            and not conditional_branch_task
         )
         target_entities: list[str] = []
         for role in (
@@ -846,6 +898,9 @@ class GWTAutogenAgent(AutogenAgent):
             "artifact_final_targets",
             "measurement_target",
             "measurement_instrument",
+            "conditional_branch_subject",
+            "conditional_branch_evidence_target",
+            "conditional_branch_targets",
             "destination_container",
             "destination_room",
         ):
@@ -864,6 +919,18 @@ class GWTAutogenAgent(AutogenAgent):
                 phrases = [measurement_target] if measurement_target else []
             elif role == "measurement_instrument":
                 phrases = [measurement_instrument] if measurement_instrument else []
+            elif role == "conditional_branch_subject":
+                phrases = (
+                    [conditional_branch_subject] if conditional_branch_subject else []
+                )
+            elif role == "conditional_branch_evidence_target":
+                phrases = (
+                    [conditional_branch_evidence_target]
+                    if conditional_branch_evidence_target
+                    else []
+                )
+            elif role == "conditional_branch_targets":
+                phrases = conditional_branch_targets
             elif role == "destination_container":
                 phrases = [destination_container] if destination_container else []
             elif role == "destination_room":
@@ -918,6 +985,7 @@ class GWTAutogenAgent(AutogenAgent):
             "search_mode": explicit_search_mode,
             "inferred_search_mode": inferred_search_mode,
             "relation_mechanism_task": relation_mechanism_task,
+            "conditional_branch_task": conditional_branch_task,
             "candidate_classes": candidate_classes,
             "primary_targets": role_phrases["primary_targets"],
             "supporting_targets": role_phrases["supporting_targets"],
@@ -934,6 +1002,16 @@ class GWTAutogenAgent(AutogenAgent):
             ),
             "measurement_branch_targets": measurement_branch_targets,
             "measurement_branches": measurement_branches,
+            "conditional_branch_subject": (
+                [conditional_branch_subject] if conditional_branch_subject else []
+            ),
+            "conditional_branch_evidence_target": (
+                [conditional_branch_evidence_target]
+                if conditional_branch_evidence_target
+                else []
+            ),
+            "conditional_branch_targets": conditional_branch_targets,
+            "conditional_branches": conditional_branches,
             "destination_container": (
                 [destination_container] if destination_container else []
             ),
@@ -985,6 +1063,14 @@ class GWTAutogenAgent(AutogenAgent):
         if self._selected_measurement_branch_target:
             for token in self._extract_runtime_tokens(
                 self._selected_measurement_branch_target,
+                stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                limit=4,
+            ):
+                if token not in keywords:
+                    keywords.append(token)
+        if self._selected_conditional_branch_target:
+            for token in self._extract_runtime_tokens(
+                self._selected_conditional_branch_target,
                 stopwords=self._TASK_ENTITY_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
                 limit=4,
             ):
@@ -1301,6 +1387,161 @@ class GWTAutogenAgent(AutogenAgent):
             measurement_branches[:2],
         )
 
+    def _normalize_conditional_branch_subject(self, phrase: str) -> str:
+        normalized = self._normalize_task_phrase(phrase, role="primary_targets")
+        if not normalized:
+            return ""
+        tokens = normalized.split()
+        if tokens and tokens[-1] in {"color", "pattern", "shape", "size", "trait"}:
+            tokens = tokens[:-1]
+        return " ".join(tokens[:4])
+
+    def _normalize_conditional_branch_condition(self, phrase: str) -> str:
+        normalized = self._normalize_runtime_text(phrase)
+        if not normalized:
+            return ""
+        normalized = re.split(
+            r"\b(?:focus on|then|and then|otherwise)\b",
+            normalized,
+            maxsplit=1,
+        )[0]
+        normalized = re.sub(r"^(?:if\s+)?", "", normalized)
+        normalized = re.sub(
+            r"^(?:the\s+)?(?:trait|property|value|condition)\s+is\s+", "", normalized
+        )
+        normalized = re.sub(r"^(?:it|this|that)\s+is\s+", "", normalized)
+        normalized = normalized.strip(" .,:;")
+        return normalized
+
+    def _extract_conditional_branch_condition_tokens(
+        self,
+        condition_phrase: str,
+        *,
+        branch_subject: str = "",
+        branch_target: str = "",
+        evidence_target: str = "",
+    ) -> list[str]:
+        raw_tokens = self._extract_runtime_tokens(
+            condition_phrase,
+            stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            limit=5,
+        )
+        ignored_tokens = (
+            set(
+                self._extract_runtime_tokens(
+                    branch_subject,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                    limit=5,
+                )
+            )
+            | set(
+                self._extract_runtime_tokens(
+                    branch_target,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                    limit=4,
+                )
+            )
+            | set(
+                self._extract_runtime_tokens(
+                    evidence_target,
+                    stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+                    limit=4,
+                )
+            )
+            | self._CONDITIONAL_BRANCH_TASK_STOPWORDS
+        )
+        filtered_tokens = [token for token in raw_tokens if token not in ignored_tokens]
+        return (filtered_tokens or raw_tokens)[:3]
+
+    def _extract_conditional_branch_contract(
+        self, task: str
+    ) -> tuple[str, str, list[str], list[dict]]:
+        normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
+        conditional_branch_targets: list[str] = []
+        conditional_branches: list[dict] = []
+
+        branch_pattern = re.compile(
+            r"\bif\s+(.+?),\s*focus on\s+(?:the\s+)?(.+?)(?=$|[.;,\n])"
+        )
+        raw_branches: list[tuple[str, str]] = []
+        for match in branch_pattern.finditer(normalized_task):
+            branch_target = self._normalize_task_phrase(
+                match.group(2), role="supporting_targets"
+            )
+            if not branch_target:
+                continue
+            raw_branches.append((match.group(1), branch_target))
+            if branch_target not in conditional_branch_targets:
+                conditional_branch_targets.append(branch_target)
+            if len(conditional_branch_targets) >= 2:
+                break
+
+        if len(conditional_branch_targets) < 2:
+            return "", "", [], []
+
+        branch_subject = ""
+        evidence_target = ""
+        inference_patterns = (
+            (
+                r"\b(?:determine|identify)\s+(?:whether|if)\s+(?:the\s+)?(.+?)\s+is\s+.+?\s+or\s+.+?\s+in\s+(?:an?\s+|the\s+)?(.+?)(?=$|[.;,\n]|\bif\b)",
+                1,
+                2,
+            ),
+            (
+                r"\b(?:determine|identify)\s+(?:whether|if)\s+(?:the\s+)?(.+?)\s+of\s+(?:an?\s+|the\s+)?(.+?)\s+is\s+.+?\s+or\s+.+?(?=$|[.;,\n]|\bif\b)",
+                1,
+                2,
+            ),
+            (
+                r"\b(?:determine|identify)\s+(?:whether|if)\s+(?:an?\s+|the\s+)?(.+?)\s+is\s+.+?\s+or\s+.+?(?=$|[.;,\n]|\bif\b)",
+                1,
+                0,
+            ),
+        )
+        for pattern, subject_index, target_index in inference_patterns:
+            match = re.search(pattern, normalized_task)
+            if not match:
+                continue
+            branch_subject = self._normalize_conditional_branch_subject(
+                match.group(subject_index)
+            )
+            if target_index:
+                evidence_target = self._normalize_task_phrase(
+                    match.group(target_index), role="primary_targets"
+                )
+            break
+
+        if not evidence_target:
+            evidence_target = branch_subject
+
+        for raw_condition, branch_target in raw_branches[:2]:
+            condition = self._normalize_conditional_branch_condition(raw_condition)
+            condition_tokens = self._extract_conditional_branch_condition_tokens(
+                condition,
+                branch_subject=branch_subject,
+                branch_target=branch_target,
+                evidence_target=evidence_target,
+            )
+            if not condition_tokens:
+                continue
+            conditional_branches.append(
+                {
+                    "condition": condition,
+                    "condition_tokens": condition_tokens,
+                    "target": branch_target,
+                }
+            )
+
+        if len(conditional_branches) < 2:
+            return "", "", [], []
+
+        return (
+            branch_subject,
+            evidence_target,
+            conditional_branch_targets[:2],
+            conditional_branches[:2],
+        )
+
     def _is_state_change_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("state_change_task"))
@@ -1312,6 +1553,10 @@ class GWTAutogenAgent(AutogenAgent):
     def _is_measurement_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
         return bool(contract.get("measurement_task"))
+
+    def _is_conditional_branch_task(self, task_contract: dict | None = None) -> bool:
+        contract = task_contract or self._get_task_contract()
+        return bool(contract.get("conditional_branch_task"))
 
     def _state_change_target_is_grounded(
         self,
@@ -2058,6 +2303,68 @@ class GWTAutogenAgent(AutogenAgent):
     def _measurement_tracking_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
 
+    def _update_conditional_branch_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        if not self._is_conditional_branch_task():
+            return
+        if self._selected_conditional_branch_target:
+            return
+        observation_tokens = set(
+            self._extract_runtime_tokens(
+                observation,
+                stopwords=self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS,
+            )
+        )
+        if not observation_tokens:
+            return
+
+        matches: list[dict] = []
+        for branch in self._get_task_contract().get("conditional_branches", []):
+            condition_tokens = set(branch.get("condition_tokens", []))
+            if condition_tokens and condition_tokens.issubset(observation_tokens):
+                matches.append(branch)
+
+        if len(matches) != 1:
+            return
+
+        resolved_branch = matches[0]
+        self._selected_conditional_branch_target = resolved_branch["target"]
+        self._conditional_branch_resolution = {
+            "condition": resolved_branch["condition"],
+            "branch_target": resolved_branch["target"],
+            "evidence_action": action or "None",
+            "evidence_tokens": resolved_branch.get("condition_tokens", []),
+            "timestep": self.num_actions_taken,
+        }
+
+    def _get_conditional_branch_tracking_snapshot(self) -> dict:
+        if not self._is_conditional_branch_task():
+            return {}
+        task_contract = self._get_task_contract()
+        snapshot = {
+            "evidence_target": task_contract.get(
+                "conditional_branch_evidence_target", []
+            )[:1],
+            "evidence_subject": task_contract.get("conditional_branch_subject", [])[:1],
+            "branch_targets": task_contract.get("conditional_branch_targets", [])[:2],
+            "branch_target": (
+                [self._selected_conditional_branch_target]
+                if self._selected_conditional_branch_target
+                else []
+            ),
+            "branch_ready": bool(self._selected_conditional_branch_target),
+        }
+        if self._conditional_branch_resolution:
+            snapshot["resolved_condition"] = self._conditional_branch_resolution.get(
+                "condition", ""
+            )
+        return snapshot
+
+    @staticmethod
+    def _conditional_branch_tracking_has_signal(snapshot: dict) -> bool:
+        return any(bool(value) for value in snapshot.values())
+
     @staticmethod
     def _substance_search_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
@@ -2469,6 +2776,9 @@ class GWTAutogenAgent(AutogenAgent):
             "measurement_target",
             "measurement_instrument",
             "measurement_branch_targets",
+            "conditional_branch_subject",
+            "conditional_branch_evidence_target",
+            "conditional_branch_targets",
             "destination_container",
             "destination_room",
         ):
@@ -2622,7 +2932,10 @@ class GWTAutogenAgent(AutogenAgent):
 
     def _is_candidate_search_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
-        return bool(contract.get("search_mode") or contract.get("candidate_classes"))
+        return bool(
+            (contract.get("search_mode") or contract.get("candidate_classes"))
+            and not contract.get("conditional_branch_task")
+        )
 
     def _is_inferred_target_search_task(
         self, task_contract: dict | None = None
@@ -3518,6 +3831,14 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 1,
                 "relocation": 1,
             },
+            "gather_branch_evidence": {
+                "inspect": 4,
+                "focus": 2,
+                "device_control": 2,
+                "relocation": 2,
+                "transfer_or_transform": 1,
+                "tool_application": 1,
+            },
             "gather_evidence": {
                 "inspect": 3,
                 "device_control": 2,
@@ -3797,6 +4118,17 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -2,
                 "other": -2,
+                "idle": -5,
+            },
+            "gather_branch_evidence": {
+                "inspect": 8,
+                "focus": 5,
+                "device_control": 5,
+                "relocation": 5,
+                "transfer_or_transform": -2,
+                "tool_application": -2,
+                "relation": -6,
+                "other": -1,
                 "idle": -5,
             },
             "gather_evidence": {
@@ -4928,6 +5260,158 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score
 
+    def _score_conditional_branch_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        content_token_set: set[str],
+        task_contract: dict,
+        role_token_sets: dict[str, list[set[str]]],
+        primary_role_hits: int,
+        support_role_hits: int,
+    ) -> int:
+        if not self._is_conditional_branch_task(task_contract):
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        referent_signature = self._get_action_referent_signature(action, family=family)
+        primary_signature = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        destination_signature = self._extract_action_destination_signature(
+            action, family=family
+        )
+        branch_role_hits, _ = self._best_role_overlap(
+            content_token_set, role_token_sets["conditional_branch_targets"]
+        )
+        branch_full_match = self._has_full_role_match(
+            content_token_set, role_token_sets["conditional_branch_targets"]
+        )
+        branch_referent_match = self._signature_matches_role(
+            referent_signature, role_token_sets["conditional_branch_targets"]
+        )
+        branch_primary_match = self._signature_matches_role(
+            primary_signature, role_token_sets["conditional_branch_targets"]
+        )
+        branch_destination_match = self._signature_matches_role(
+            destination_signature, role_token_sets["conditional_branch_targets"]
+        )
+        selected_branch_match = bool(
+            self._selected_conditional_branch_target
+            and referent_signature == self._selected_conditional_branch_target
+        )
+        selected_branch_primary_match = bool(
+            self._selected_conditional_branch_target
+            and primary_signature == self._selected_conditional_branch_target
+        )
+        selected_branch_destination_match = bool(
+            self._selected_conditional_branch_target
+            and destination_signature == self._selected_conditional_branch_target
+        )
+        branch_action = bool(
+            branch_full_match
+            or branch_referent_match
+            or branch_primary_match
+            or branch_destination_match
+            or branch_role_hits
+        )
+        score = 0
+
+        if current_phase == "locate_primary_target":
+            if family == "inspect":
+                if normalized.startswith("look around"):
+                    score += 10
+                elif self._action_mentions_door(action, family=family):
+                    score += 8
+                elif primary_role_hits or support_role_hits:
+                    score += 12
+            elif family == "device_control":
+                score += 16 if self._action_mentions_door(action, family=family) else -8
+            elif family == "relocation":
+                score += 10 if (primary_role_hits or support_role_hits) else 6
+            elif family == "focus":
+                score += 8 if (primary_role_hits or support_role_hits) else -8
+            elif family in {
+                "relation",
+                "transfer_or_transform",
+                "tool_application",
+            }:
+                score -= 16
+            if branch_action:
+                score -= 120
+
+        elif current_phase == "gather_branch_evidence":
+            if family == "inspect":
+                if primary_role_hits or support_role_hits:
+                    score += 18
+                elif normalized.startswith("look around"):
+                    score += 8
+                elif self._action_mentions_door(action, family=family):
+                    score += 3
+            elif family == "focus":
+                if primary_role_hits or support_role_hits:
+                    score += 10
+                else:
+                    score -= 4
+            elif family == "device_control":
+                if self._action_mentions_door(action, family=family):
+                    score += 8
+                elif primary_role_hits or support_role_hits:
+                    score += 4
+                else:
+                    score -= 4
+            elif family == "relocation":
+                score += 8 if (primary_role_hits or support_role_hits) else 3
+            elif family in {
+                "relation",
+                "transfer_or_transform",
+                "tool_application",
+            }:
+                score -= 90
+
+            if branch_action:
+                score -= 120
+                if family == "focus":
+                    score -= 12
+
+        elif current_phase == "execute_branch":
+            if family == "focus":
+                score += (
+                    140
+                    if selected_branch_match
+                    else 132
+                    if selected_branch_primary_match
+                    else -90
+                    if branch_action
+                    else -20
+                )
+            elif family == "inspect" and not branch_action:
+                score -= 30
+            elif branch_action:
+                if selected_branch_match or selected_branch_primary_match:
+                    score += 20
+                elif selected_branch_destination_match:
+                    score += 14
+                else:
+                    score -= 40
+
+        if branch_action and not self._selected_conditional_branch_target:
+            score -= 40
+        if (
+            branch_action
+            and self._selected_conditional_branch_target
+            and not (
+                selected_branch_match
+                or selected_branch_primary_match
+                or selected_branch_destination_match
+            )
+        ):
+            score -= 42
+
+        return score
+
     def _score_measurement_action(
         self,
         *,
@@ -5205,6 +5689,15 @@ class GWTAutogenAgent(AutogenAgent):
         task_contract = self._get_task_contract()
         if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
+        if self._is_conditional_branch_task(task_contract):
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            if task_contract.get(
+                "primary_targets"
+            ) and not self._primary_target_is_grounded(task_contract, grounded_tokens):
+                return "locate_primary_target"
+            if self._selected_conditional_branch_target:
+                return "execute_branch"
+            return "gather_branch_evidence"
         if self._is_relation_mechanism_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             role_token_sets = self._get_task_role_token_sets(task_contract)
@@ -5419,6 +5912,7 @@ class GWTAutogenAgent(AutogenAgent):
             task_contract
         )
         measurement_task = self._is_measurement_task(task_contract)
+        conditional_branch_task = self._is_conditional_branch_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
             self._observed_stage_labels
@@ -5620,6 +6114,17 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+        elif conditional_branch_task:
+            score += self._score_conditional_branch_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                content_token_set=content_token_set,
+                task_contract=task_contract,
+                role_token_sets=role_token_sets,
+                primary_role_hits=primary_role_hits,
+                support_role_hits=support_role_hits,
+            )
         elif measurement_task:
             score += self._score_measurement_action(
                 action=action,
@@ -5820,6 +6325,7 @@ class GWTAutogenAgent(AutogenAgent):
         artifact_creation = self._get_artifact_creation_snapshot()
         substance_search = self._get_substance_search_snapshot(actions)
         measurement_tracking = self._get_measurement_tracking_snapshot()
+        conditional_branch_tracking = self._get_conditional_branch_tracking_snapshot()
 
         return {
             "total_actions": len(actions),
@@ -5834,6 +6340,7 @@ class GWTAutogenAgent(AutogenAgent):
             "artifact_creation": artifact_creation,
             "substance_search": substance_search,
             "measurement_tracking": measurement_tracking,
+            "conditional_branch_tracking": conditional_branch_tracking,
         }
 
     def _build_shared_action_context(self) -> dict:
@@ -5900,6 +6407,13 @@ class GWTAutogenAgent(AutogenAgent):
                 + json.dumps(measurement_tracking)
                 + "\n"
             )
+        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
+        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+            extra_context += (
+                "Conditional branch state this episode: "
+                + json.dumps(conditional_branch_tracking)
+                + "\n"
+            )
         if self.percept.get("referent_resolution"):
             extra_context += (
                 "Latest referent resolution warning: "
@@ -5919,6 +6433,7 @@ class GWTAutogenAgent(AutogenAgent):
             + f"Artifact creation snapshot: {json.dumps(summary['artifact_creation'])}\n"
             + f"Substance search snapshot: {json.dumps(summary['substance_search'])}\n"
             + f"Measurement tracking snapshot: {json.dumps(summary['measurement_tracking'])}\n"
+            + f"Conditional branch snapshot: {json.dumps(summary['conditional_branch_tracking'])}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
             + extra_context
@@ -6202,6 +6717,10 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
             observation=self.adapter.observation,
         )
+        self._update_conditional_branch_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
         self._update_relation_task_tracking(
             action=action,
             observation=self.adapter.observation,
@@ -6229,6 +6748,11 @@ class GWTAutogenAgent(AutogenAgent):
         measurement_tracking = shared_action_context.get("measurement_tracking", {})
         if self._measurement_tracking_has_signal(measurement_tracking):
             self.percept["measurement_tracking"] = measurement_tracking
+        conditional_branch_tracking = shared_action_context.get(
+            "conditional_branch_tracking", {}
+        )
+        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+            self.percept["conditional_branch_tracking"] = conditional_branch_tracking
         relation_frontier = shared_action_context.get("relation_frontier", {})
         if self._relation_frontier_has_signal(relation_frontier):
             self.percept["relation_frontier"] = relation_frontier
