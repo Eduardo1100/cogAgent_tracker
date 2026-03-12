@@ -1216,6 +1216,42 @@ def test_growth_task_shortlist_includes_seed_transfer_once_precursor_is_grounded
     assert "move apple seed in ceramic cup to flower pot 1" in shortlist
 
 
+def test_growth_task_reopens_room_frontier_after_stalled_local_seed_loop(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to grow a apple. This will require growing several plants, "
+        "and them being crosspollinated to produce fruit. Seeds can be found in "
+        "the kitchen. To complete the task, focus on the grown apple."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    focus_entry = agent._get_hypothesis_entry("focus")
+    focus_entry["tests"] = 3
+    focus_entry["stalled_attempts"] = 2
+    focus_entry["status"] = "uncertain"
+    focus_entry["confidence"] = 0.2
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see a seed jar "
+            "(containing apple seed), a glass jar, and the agent. You also see: "
+            "A door to the hallway (that is open)"
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "focus on living thing on seed jar containing apple seed",
+            "look at glass jar",
+            "open glass jar",
+            "go to hallway",
+        ],
+        shortlist_limit=2,
+    )
+
+    assert summary["current_phase"] == "test_mechanism"
+    assert summary["task_relevant_action_shortlist"][0] == "go to hallway"
+
+
 def test_container_focus_does_not_advance_lifecycle_progress_without_stage_evidence(
     tmp_path,
 ):

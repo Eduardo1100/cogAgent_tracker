@@ -2928,6 +2928,58 @@ class GWTAutogenAgent(AutogenAgent):
                 return
             room_state["local_exploration"] += 1
 
+    def _update_growth_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        task_contract = self._get_task_contract()
+        if not self._is_growth_task(task_contract):
+            return
+
+        grounded_tokens = set(self._extract_runtime_tokens(observation, limit=48))
+        primary_target_grounded = self._primary_target_is_grounded(
+            task_contract, grounded_tokens
+        )
+
+        previous_observation = ""
+        if self.curr_episodic_memory:
+            try:
+                previous_observation = json.loads(self.curr_episodic_memory[-1]).get(
+                    "resulting_observation", ""
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_observation = ""
+
+        room_signature = self._get_current_location_signature(
+            observation
+        ) or self._get_current_location_signature(previous_observation)
+        if room_signature:
+            room_state = self._search_location_states.setdefault(
+                room_signature,
+                {
+                    "local_exploration": 0,
+                    "target_grounded": False,
+                },
+            )
+            if primary_target_grounded:
+                room_state["target_grounded"] = True
+
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+        if not room_signature or primary_target_grounded:
+            return
+
+        family = self._classify_action_family(action)
+        if family == "inspect":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            room_state["local_exploration"] += 1
+        elif family == "device_control":
+            if self._action_targets_room_frontier(action, observation, family=family):
+                return
+            if self._action_mentions_door(action, family=family):
+                return
+            room_state["local_exploration"] += 1
+
     def _update_measurement_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -3568,6 +3620,68 @@ class GWTAutogenAgent(AutogenAgent):
         return bool(
             not room_state.get("target_grounded")
             and room_state.get("local_exploration", 0) >= 2
+        )
+
+    def _growth_room_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+        grounded_tokens: set[str] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not self._is_growth_task(contract):
+            return False
+
+        grounded_token_set = grounded_tokens or set(
+            self._get_observation_grounded_tokens()
+        )
+        if self._primary_target_is_grounded(contract, grounded_token_set):
+            return False
+        if visible_doors < 1 or not current_room:
+            return False
+
+        current_observation = (self.percept or {}).get("resulting_observation", "")
+        visible_stage_labels = self._get_visible_lifecycle_stage_labels(
+            current_observation
+        )
+        if any(label not in {"seed"} for label in visible_stage_labels):
+            return False
+
+        room_state = self._search_location_states.get(current_room, {})
+        if (
+            not room_state.get("target_grounded")
+            and room_state.get("local_exploration", 0) >= 2
+        ):
+            return True
+
+        nonproductive_growth_tests = 0
+        stalled_growth_tests = 0
+        for family in {
+            "focus",
+            "inspect",
+            "device_control",
+            "transfer_or_transform",
+            "tool_application",
+            "relocation",
+        }:
+            entry = self.episode_hypothesis_ledger.get(family)
+            if not entry or entry["observable_change_attempts"] > 0:
+                continue
+            nonproductive_growth_tests += entry["tests"]
+            stalled_growth_tests += (
+                entry["stalled_attempts"] + entry["invalid_attempts"]
+            )
+
+        return bool(
+            nonproductive_growth_tests >= 3
+            and stalled_growth_tests >= 2
+            and self._growth_task_has_precursor_signal(
+                current_observation,
+                task_contract=contract,
+                grounded_tokens=grounded_token_set,
+            )
         )
 
     def _comparison_room_search_stalled(
@@ -7581,6 +7695,101 @@ class GWTAutogenAgent(AutogenAgent):
 
         return score
 
+    def _score_growth_action(
+        self,
+        *,
+        action: str,
+        family: str,
+        current_phase: str,
+        current_room: str,
+        room_frontier_action: bool,
+        room_search_stalled: bool,
+        grounded_hits: int,
+        target_hits: int,
+        primary_full_match: bool,
+        task_contract: dict,
+    ) -> int:
+        if not self._is_growth_task(task_contract) or self._is_conditional_branch_task(
+            task_contract
+        ):
+            return 0
+
+        if current_phase not in {"test_mechanism", "commit_to_goal"}:
+            return 0
+
+        normalized = self._normalize_runtime_text(action)
+        referent_signature = self._get_action_referent_signature(action, family=family)
+        primary_signature = self._extract_action_primary_object_signature(
+            action, family=family
+        )
+        destination_signature = self._extract_action_destination_signature(
+            action, family=family
+        )
+        precursor_tokens = set(self._GROWTH_PRECURSOR_TOKENS)
+        referent_tokens = self._referent_tokens(referent_signature)
+        primary_tokens = self._referent_tokens(primary_signature)
+        destination_tokens = self._referent_tokens(destination_signature)
+        precursor_referent_match = bool(referent_tokens & precursor_tokens)
+        precursor_primary_match = bool(primary_tokens & precursor_tokens)
+        precursor_destination_match = bool(destination_tokens & precursor_tokens)
+        precursor_to_growth_locus = bool(
+            family in {"relocation", "transfer_or_transform"}
+            and self._is_container_like_action(action, family=family)
+            and (precursor_referent_match or precursor_primary_match)
+            and not precursor_destination_match
+        )
+        room_referent_match = bool(current_room and referent_signature == current_room)
+
+        if not room_search_stalled:
+            if (
+                family == "focus"
+                and precursor_referent_match
+                and not primary_full_match
+            ):
+                return -10
+            return 0
+
+        score = 0
+        if family == "focus":
+            score += (
+                10 if primary_full_match else -50 if precursor_referent_match else -32
+            )
+        elif family == "inspect":
+            if room_frontier_action:
+                score += 12
+                if normalized.startswith("look around"):
+                    score += 4
+            elif room_referent_match:
+                score += 8
+            elif self._is_container_like_action(action, family=family):
+                score -= 18
+            else:
+                score -= 10
+        elif family == "device_control":
+            if room_frontier_action:
+                score += 16
+            elif self._is_container_like_action(action, family=family):
+                score -= 20
+            else:
+                score -= 10
+        elif family == "relocation":
+            if room_frontier_action and self._is_agent_navigation_action(
+                action, family=family
+            ):
+                score += 22
+            elif precursor_to_growth_locus:
+                score += 14
+            else:
+                score -= 18
+        elif family == "transfer_or_transform":
+            score += 12 if precursor_to_growth_locus else -24
+        elif family == "tool_application":
+            score += 4 if (target_hits or grounded_hits) else -12
+        elif family == "relation":
+            score -= 14
+
+        return score
+
     def _score_conditional_branch_action(
         self,
         *,
@@ -8678,6 +8887,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
         primary_target_grounded = scoring_context["primary_target_grounded"]
         primary_target_focused = scoring_context["primary_target_focused"]
+        growth_task = scoring_context["growth_task"]
         state_change_task = scoring_context["state_change_task"]
         artifact_creation_task = scoring_context["artifact_creation_task"]
         relation_mechanism_task = scoring_context["relation_mechanism_task"]
@@ -8732,6 +8942,7 @@ class GWTAutogenAgent(AutogenAgent):
             "measurement_instrument_search_stalled"
         ]
         artifact_room_search_stalled = scoring_context["artifact_room_search_stalled"]
+        growth_room_search_stalled = scoring_context["growth_room_search_stalled"]
         comparison_room_search_stalled = scoring_context[
             "comparison_room_search_stalled"
         ]
@@ -9133,6 +9344,19 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+        elif growth_task and not conditional_branch_task:
+            score += self._score_growth_action(
+                action=action,
+                family=family,
+                current_phase=current_phase,
+                current_room=current_room,
+                room_frontier_action=room_frontier_action,
+                room_search_stalled=growth_room_search_stalled,
+                grounded_hits=grounded_hits,
+                target_hits=target_hits,
+                primary_full_match=primary_full_match,
+                task_contract=task_contract,
+            )
         elif comparison_task:
             score += self._score_comparison_action(
                 action=action,
@@ -9332,6 +9556,7 @@ class GWTAutogenAgent(AutogenAgent):
         comparison_task = self._is_comparison_task(task_contract)
         conditional_branch_task = self._is_conditional_branch_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
+        growth_task = self._is_growth_task(task_contract)
         return {
             "current_phase": current_phase,
             "task_keyword_set": task_keyword_set,
@@ -9352,6 +9577,7 @@ class GWTAutogenAgent(AutogenAgent):
             "ordered_sequence": "ordered_sequence"
             in task_contract.get("ordering_cues", []),
             "candidate_search_task": candidate_search_task,
+            "growth_task": growth_task,
             "state_change_task": state_change_task,
             "artifact_creation_task": artifact_creation_task,
             "relation_mechanism_task": relation_mechanism_task,
@@ -9390,6 +9616,14 @@ class GWTAutogenAgent(AutogenAgent):
                 task_contract=task_contract,
             )
             if artifact_creation_task
+            else False,
+            "growth_room_search_stalled": self._growth_room_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+                grounded_tokens=grounded_token_set,
+            )
+            if growth_task
             else False,
             "comparison_room_search_stalled": self._comparison_room_search_stalled(
                 current_room=current_room,
@@ -10029,6 +10263,10 @@ class GWTAutogenAgent(AutogenAgent):
             action=action,
         )
         self._update_artifact_creation_search_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
+        self._update_growth_search_tracking(
             action=action,
             observation=self.adapter.observation,
         )
