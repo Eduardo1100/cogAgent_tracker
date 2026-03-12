@@ -615,6 +615,72 @@ def test_required_focus_family_survives_shortlist_without_hidden_entity_drift(tm
     assert "go to art studio" in shortlist
 
 
+def test_lifecycle_task_uses_search_phase_until_stage_signal_is_visible(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the hallway. You see a picture. "
+            "You also see: A door to the art studio (that is closed) and "
+            "A door to the greenhouse (that is closed)."
+        )
+    }
+
+    assert agent._get_current_phase() == "locate_primary_target"
+
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the greenhouse. Here you see a turtle egg, "
+            "a juvenile turtle, and an adult turtle."
+        )
+    }
+
+    assert agent._get_current_phase() == "confirm_primary_target"
+
+
+def test_lifecycle_search_frontier_prefers_room_exit_over_local_container_digging(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Focus on the 4 life stages of the turtle, starting from earliest to latest."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "Inside the art studio is: the agent, a large cupboard. "
+        "The large cupboard door is closed. "
+        "a table. On the table is: a jug (containing nothing). "
+        "You also see: A door to the hallway (that is open)."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_lifecycle_search_tracking(
+        action="look in art studio",
+        observation=observation,
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "open cupboard",
+            "look at jug",
+            "look in hallway",
+            "go to hallway",
+            "focus on art studio",
+        ],
+        shortlist_limit=2,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "locate_primary_target"
+    assert "go to hallway" in shortlist
+    assert "look in hallway" in shortlist
+    assert "open cupboard" not in shortlist
+
+
 def test_shortlist_prefers_grounded_stage_targets_over_area_focus_and_distractors(
     tmp_path,
 ):
