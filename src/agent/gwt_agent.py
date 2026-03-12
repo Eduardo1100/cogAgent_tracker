@@ -2578,6 +2578,18 @@ class GWTAutogenAgent(AutogenAgent):
                 inferred.extend(labels)
         return self._merge_stage_labels(inferred)
 
+    def _get_visible_lifecycle_stage_labels(
+        self, observation: str | None = None
+    ) -> list[str]:
+        observation_text = (
+            observation
+            if observation is not None
+            else (self.percept or {}).get("resulting_observation", "")
+        )
+        return self._merge_stage_labels(
+            self._extract_stage_labels(observation_text) + self._observed_stage_labels
+        )
+
     def _update_lifecycle_stage_state(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -2602,6 +2614,46 @@ class GWTAutogenAgent(AutogenAgent):
             action, observation, family=family
         )
         self._record_stage_evidence(referent_keys, merged_labels)
+
+    def _update_lifecycle_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        task_contract = self._get_task_contract()
+        if not self._is_lifecycle_task(task_contract):
+            return
+
+        room_signature = self._get_current_location_signature(observation)
+        if not room_signature:
+            return
+
+        grounded_tokens = set(self._extract_runtime_tokens(observation, limit=40))
+        current_location_tokens = set(
+            self._extract_current_location_tokens(observation)
+        )
+        room_state = self._search_location_states.setdefault(
+            room_signature,
+            {
+                "local_exploration": 0,
+                "target_grounded": False,
+            },
+        )
+        if self._get_visible_lifecycle_stage_labels(observation) or bool(
+            (grounded_tokens & set(task_contract.get("target_entities", [])))
+            - current_location_tokens
+        ):
+            room_state["target_grounded"] = True
+
+        if room_state["target_grounded"]:
+            return
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+
+        family = self._classify_action_family(action)
+        if family not in {"inspect", "device_control"}:
+            return
+        if self._action_targets_room_frontier(action, observation, family=family):
+            return
+        room_state["local_exploration"] += 1
 
     def _get_focus_stage_labels(self, action: str, observation: str) -> list[str]:
         family = self._classify_action_family(action)
@@ -2986,6 +3038,39 @@ class GWTAutogenAgent(AutogenAgent):
     def _action_mentions_door(self, action: str, *, family: str | None = None) -> bool:
         action_tokens = set(self._extract_action_content_tokens(action, family=family))
         return "door" in action_tokens or "doors" in action_tokens
+
+    def _extract_visible_room_targets(self, observation: str) -> list[str]:
+        room_targets: list[str] = []
+        for match in re.finditer(
+            r"\bdoor to\s+(?:the\s+)?([a-z0-9][a-z0-9\s-]{0,40}?)(?=\s*\()",
+            (observation or "").lower(),
+        ):
+            signature = self._phrase_to_referent_signature(match.group(1))
+            if signature and signature not in room_targets:
+                room_targets.append(signature)
+        return room_targets[:6]
+
+    def _action_targets_room_frontier(
+        self, action: str, observation: str, *, family: str | None = None
+    ) -> bool:
+        family = family or self._classify_action_family(action)
+        if family not in {"inspect", "device_control", "relocation"}:
+            return False
+        if self._action_mentions_door(action, family=family):
+            return True
+
+        room_targets = self._extract_visible_room_targets(observation)
+        if not room_targets:
+            return False
+
+        referent = self._get_action_referent_signature(action, family=family)
+        if not referent:
+            referent = self._extract_action_primary_object_signature(
+                action, family=family
+            )
+        if not referent:
+            return False
+        return self._signature_matches_frontier(referent, room_targets)
 
     def _extract_relation_endpoint_signatures(
         self, action: str, *, family: str | None = None
@@ -5807,6 +5892,30 @@ class GWTAutogenAgent(AutogenAgent):
                     return "find_missing_ingredient_or_reagent"
                 return "combine_or_transform"
             return "combine_or_transform"
+        if self._is_lifecycle_task(task_contract):
+            current_observation = (self.percept or {}).get("resulting_observation", "")
+            grounded_tokens = set(self._get_observation_grounded_tokens())
+            current_location_tokens = set(
+                self._extract_current_location_tokens(current_observation)
+            )
+            visible_target_tokens = (
+                grounded_tokens & set(task_contract.get("target_entities", []))
+            ) - current_location_tokens
+            visible_stage_labels = self._get_visible_lifecycle_stage_labels(
+                current_observation
+            )
+            visible_unfocused_labels = [
+                label
+                for label in visible_stage_labels
+                if label not in self._focused_stage_labels
+            ]
+            if visible_unfocused_labels or (
+                visible_target_tokens
+                and not visible_stage_labels
+                and not self._focused_stage_labels
+            ):
+                return "confirm_primary_target"
+            return "locate_primary_target"
         if self._is_inferred_target_search_task(task_contract):
             grounded_tokens = set(self._get_observation_grounded_tokens())
             role_token_sets = self._get_task_role_token_sets(task_contract)
@@ -5866,11 +5975,13 @@ class GWTAutogenAgent(AutogenAgent):
         required_families = set(task_contract.get("required_families", []))
         support_families = set(task_contract.get("support_families", []))
         target_entity_set = set(task_contract.get("target_entities", []))
+        current_observation = (self.percept or {}).get("resulting_observation", "")
         current_location_tokens = set(
-            self._extract_current_location_tokens(
-                (self.percept or {}).get("resulting_observation", "")
-            )
+            self._extract_current_location_tokens(current_observation)
         )
+        current_room = self._get_current_location_signature(current_observation)
+        room_state = self._search_location_states.get(current_room, {})
+        visible_doors = self._count_visible_doors(current_observation)
         visible_nonlocation_targets = (
             grounded_token_set & target_entity_set
         ) - current_location_tokens
@@ -5915,7 +6026,10 @@ class GWTAutogenAgent(AutogenAgent):
         conditional_branch_task = self._is_conditional_branch_task(task_contract)
         lifecycle_task = self._is_lifecycle_task(task_contract)
         lifecycle_targets_visible = bool(visible_nonlocation_targets) or bool(
-            self._observed_stage_labels
+            self._get_visible_lifecycle_stage_labels(current_observation)
+        )
+        room_frontier_action = self._action_targets_room_frontier(
+            action, current_observation, family=family
         )
         stage_labels = (
             self._get_focus_stage_labels(action, "")
@@ -6041,6 +6155,40 @@ class GWTAutogenAgent(AutogenAgent):
             score -= 4
 
         if lifecycle_task:
+            if not lifecycle_targets_visible:
+                if family == "inspect":
+                    if normalized.startswith("look around"):
+                        score += 10
+                    elif room_frontier_action:
+                        score += 8
+                    elif self._is_container_like_action(action, family=family):
+                        score -= 14
+                    else:
+                        score -= 6
+                elif family == "device_control":
+                    if room_frontier_action:
+                        score += 14
+                    elif self._is_container_like_action(action, family=family):
+                        score -= 18
+                    else:
+                        score -= 10
+                elif family == "relocation":
+                    score += 12 if room_frontier_action else 2
+                elif family in {
+                    "relation",
+                    "transfer_or_transform",
+                    "tool_application",
+                }:
+                    score -= 20
+
+                if (
+                    visible_doors <= 1
+                    and room_state.get("local_exploration", 0) >= 1
+                    and family in {"inspect", "device_control"}
+                    and not room_frontier_action
+                ):
+                    score -= 18
+
             if family == "focus":
                 if grounded_hits == 0:
                     score -= 18
@@ -6722,6 +6870,10 @@ class GWTAutogenAgent(AutogenAgent):
             observation=self.adapter.observation,
         )
         self._update_relation_task_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
+        self._update_lifecycle_search_tracking(
             action=action,
             observation=self.adapter.observation,
         )
