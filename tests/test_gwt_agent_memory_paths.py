@@ -296,6 +296,7 @@ def test_analyst_trace_is_written_as_structured_text_and_exposed_via_getter(tmp_
     assert "Action + Observation" in trace_text
     assert "attempted_action" in trace_text
     assert "observation" in trace_text
+    assert "Agent-Facing Percept Snapshot" in trace_text
     assert "Execute Action Percept (Full)" in trace_text
     assert "Belief State" in trace_text
     assert "BELIEF STATE: I have grounded the blue seed" in trace_text
@@ -319,6 +320,33 @@ def test_analyst_trace_is_written_as_structured_text_and_exposed_via_getter(tmp_
     )
     assert analyst_trace_ansi_path.read_text()
     assert agent.get_analyst_trace_text() == trace_text
+
+
+def test_agent_facing_percept_snapshot_prunes_inactive_task_contract_fields(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.percept = {
+        "timestep": 0,
+        "attempted_action": "None",
+        "resulting_observation": "You are in the hallway.",
+        "task_status": "INCOMPLETE",
+        "task_contract": agent._get_task_contract(),
+    }
+
+    snapshot = agent._get_agent_facing_percept_snapshot()
+    contract = snapshot["task_contract"]
+
+    assert contract["required_families"] == ["focus"]
+    assert contract["state_change_task"] is True
+    assert contract["procedural_sequence"] is True
+    assert contract["desired_transformation"] == "melt"
+    assert contract["transformation_direction"] == "warm"
+    assert "measurement_task" not in contract
+    assert "comparison_targets" not in contract
+    assert "conditional_branch_task" not in contract
 
 
 def test_episode_hypothesis_ledger_is_episode_local_and_deprioritizes_repeats(
@@ -485,6 +513,34 @@ def test_generate_initial_message_omits_numeric_budget_counts(tmp_path):
     assert "Max chat rounds allowed" not in message
     assert "Max environment actions allowed" not in message
     assert "scarce resources" in message
+
+
+def test_generate_initial_message_uses_compact_task_contract_snapshot(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to melt water. First, focus on the substance. "
+        "Then, take actions that will cause it to change its state of matter."
+    )
+    agent.curr_episodic_memory = []
+    agent.prev_episodic_memories = []
+    agent.knowledge = []
+    agent.rag_concept_k_initial = 2
+    agent.rag_episode_k_initial = 2
+    agent.percept = {
+        "timestep": 0,
+        "attempted_action": "None",
+        "resulting_observation": "You are in the hallway.",
+        "task_status": "INCOMPLETE",
+        "task_contract": agent._get_task_contract(),
+    }
+
+    message = agent.generate_initial_message()
+
+    assert '"state_change_task": true' in message
+    assert '"desired_transformation": "melt"' in message
+    assert '"measurement_task": false' not in message
+    assert '"comparison_targets": []' not in message
+    assert '"conditional_branch_task": false' not in message
 
 
 def test_recover_from_chat_error_reorders_provider_and_retries(tmp_path):

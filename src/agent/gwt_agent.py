@@ -10398,28 +10398,52 @@ class GWTAutogenAgent(AutogenAgent):
             ]
         return value
 
+    def _limit_task_contract_payload(self, value, *, list_limit: int = 4):
+        if isinstance(value, dict):
+            limited = {
+                key: self._limit_task_contract_payload(item, list_limit=list_limit)
+                for key, item in value.items()
+            }
+            return {
+                key: item
+                for key, item in limited.items()
+                if item not in ({}, [], "", None, False)
+            }
+        if isinstance(value, list):
+            return [
+                self._limit_task_contract_payload(item, list_limit=list_limit)
+                for item in value[:list_limit]
+            ]
+        return value
+
+    def _get_compact_task_contract_snapshot(
+        self, task_contract: dict | None, *, list_limit: int = 4
+    ) -> dict:
+        contract = task_contract if isinstance(task_contract, dict) else {}
+        compact_contract = self._limit_task_contract_payload(
+            contract, list_limit=list_limit
+        )
+        compact_contract.pop("measurement_branches", None)
+        compact_contract.pop("conditional_branches", None)
+        return compact_contract
+
     def _get_action_agent_task_contract_snapshot(self, summary: dict) -> dict:
-        contract = summary.get("task_contract", {})
-        task_contract_snapshot = {
-            "required_families": contract.get("required_families", []),
-            "support_families": contract.get("support_families", []),
-            "primary_targets": contract.get("primary_targets", []),
-            "supporting_targets": contract.get("supporting_targets", []),
-            "candidate_classes": contract.get("candidate_classes", []),
-            "destination_container": contract.get("destination_container", []),
-            "destination_room": contract.get("destination_room", []),
-            "target_substances": contract.get("target_substances", []),
-            "desired_transformation": contract.get("desired_transformation", ""),
-            "artifact_type": contract.get("artifact_type", ""),
-            "measurement_property": contract.get("measurement_property", ""),
-            "measurement_property_type": contract.get("measurement_property_type", ""),
-            "measurement_instrument": contract.get("measurement_instrument", []),
-            "measurement_target": contract.get("measurement_target", []),
-            "measurement_branch_targets": contract.get(
-                "measurement_branch_targets", []
-            ),
-        }
-        return self._limit_runtime_payload(task_contract_snapshot)
+        return self._get_compact_task_contract_snapshot(
+            summary.get("task_contract", {})
+        )
+
+    def _get_agent_facing_percept_snapshot(self) -> dict:
+        percept_snapshot = self._snapshot_analyst_payload(self.percept)
+        if not isinstance(percept_snapshot, dict):
+            return {}
+        compact_task_contract = self._get_compact_task_contract_snapshot(
+            percept_snapshot.get("task_contract", {})
+        )
+        if compact_task_contract:
+            percept_snapshot["task_contract"] = compact_task_contract
+        else:
+            percept_snapshot.pop("task_contract", None)
+        return percept_snapshot
 
     def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
         snapshots = {}
@@ -10776,6 +10800,11 @@ class GWTAutogenAgent(AutogenAgent):
         renderables.extend(
             [
                 Panel(
+                    Text(self._render_analyst_value(entry["agent_facing_percept"])),
+                    title="[bold]Agent-Facing Percept Snapshot[/bold]",
+                    border_style="cyan",
+                ),
+                Panel(
                     Text(self._render_analyst_value(entry["percept"])),
                     title="[bold]Execute Action Percept (Full)[/bold]",
                     border_style="bright_blue",
@@ -10850,8 +10879,9 @@ class GWTAutogenAgent(AutogenAgent):
                 Text(
                     "This trace is written for a human analyst. Read top-to-bottom: "
                     "task interpretation, belief updates, supporting agent reasoning, "
-                    "the exact execute_action observation/percept, and the shortlist/runtime "
-                    "state that shaped the next move."
+                    "the compact agent-facing percept, the full execute_action "
+                    "observation/percept, and the shortlist/runtime state that shaped "
+                    "the next move."
                 ),
                 title="[bold bright_white]Analyst Trace[/bold bright_white]",
                 border_style="bright_white",
@@ -10873,9 +10903,14 @@ class GWTAutogenAgent(AutogenAgent):
             "task_status": self.percept.get("task_status", self.task_status),
             "attempted_action": self.percept.get("attempted_action", "None"),
             "observation": self.percept.get("resulting_observation", ""),
+            "agent_facing_percept": self._snapshot_analyst_payload(
+                self._get_agent_facing_percept_snapshot()
+            ),
             "percept": self._snapshot_analyst_payload(self.percept),
             "task_contract": self._snapshot_analyst_payload(
-                self.percept.get("task_contract", {})
+                self._get_compact_task_contract_snapshot(
+                    self.percept.get("task_contract", {})
+                )
             ),
             "agent_messages": recent_messages,
             "salient_entities": list(summary.get("salient_entities", [])[:6]),
@@ -11929,7 +11964,7 @@ class GWTAutogenAgent(AutogenAgent):
                     f"action: '{suggested_action}'. observation: '{self.adapter.observation}'\n"
                 )
 
-            return json.dumps(self.percept) + reflection
+            return json.dumps(self._get_agent_facing_percept_snapshot()) + reflection
 
         # Register the WRAPPER instead of the method
         assert self.action_agent is not None
@@ -11985,11 +12020,16 @@ class GWTAutogenAgent(AutogenAgent):
             shared_action_context = self._summarize_admissible_actions(
                 self.admissible_actions
             )
+            focus_summary = self._snapshot_analyst_payload(shared_action_context)
+            focus_summary["task_contract"] = self._get_compact_task_contract_snapshot(
+                focus_summary.get("task_contract", {})
+            )
             return (
                 f"TASK: {self.task}\n"
-                f"REPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n{json.dumps(self.percept)}\n"
+                "REPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n"
+                f"{json.dumps(self._get_agent_facing_percept_snapshot())}\n"
                 f"EPISODE HYPOTHESIS LEDGER: {json.dumps(self._get_episode_hypothesis_snapshot())}\n"
-                f"ACTION SPACE SUMMARY: {json.dumps(shared_action_context)}"
+                f"ACTION SPACE SUMMARY: {json.dumps(focus_summary)}"
             )
 
         assert self.focus_agent is not None
@@ -12195,7 +12235,11 @@ class GWTAutogenAgent(AutogenAgent):
             + "\n\n"
         )
 
-        state_section = "--- CURRENT STATE ---\n" + json.dumps(self.percept) + "\n"
+        state_section = (
+            "--- CURRENT STATE ---\n"
+            + json.dumps(self._get_agent_facing_percept_snapshot())
+            + "\n"
+        )
 
         final_prompt = (
             "Begin cognitive deliberation. Coordinate through structured, grounded reasoning. "
