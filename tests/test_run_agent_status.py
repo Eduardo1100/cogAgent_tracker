@@ -205,6 +205,7 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
         log_paths={
             "chat_history_path": str(game_dir / "chat_history.txt"),
             "analyst_trace_path": str(game_dir / "analyst_trace.txt"),
+            "analyst_trace_ansi_path": str(game_dir / "analyst_trace.ansi"),
         },
         group_chat=types.SimpleNamespace(
             messages=[
@@ -227,6 +228,7 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
 
     chat_history_path = Path(agent.log_paths["chat_history_path"])
     analyst_trace_path = Path(agent.log_paths["analyst_trace_path"])
+    analyst_trace_ansi_path = Path(agent.log_paths["analyst_trace_ansi_path"])
     transition_path = game_dir / "transition_log.json"
 
     assert artifacts["chat_rounds"] == 2
@@ -236,7 +238,9 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
     )
     assert "Belief_State_Agent" in chat_history_path.read_text()
     assert "focus on mouse" in chat_history_path.read_text()
-    assert "Speaker: Belief_State_Agent" in analyst_trace_path.read_text()
+    assert "Analyst Trace Fallback" in analyst_trace_path.read_text()
+    assert "BELIEF STATE: [I see a mouse.]" in analyst_trace_path.read_text()
+    assert analyst_trace_ansi_path.read_text()
     assert transition_path.exists()
     assert artifacts["transitions"][0]["from"] == "Belief_State_Agent"
     assert artifacts["transitions"][0]["to"] == "Action_Agent"

@@ -126,6 +126,7 @@ class AutogenAgent:
         admissible_commands_path = os.path.join(game_path, "admissible_commands.txt")
         chat_history_path = os.path.join(game_path, "chat_history.txt")
         analyst_trace_path = os.path.join(game_path, "analyst_trace.txt")
+        analyst_trace_ansi_path = os.path.join(game_path, "analyst_trace.ansi")
         message_path = os.path.join(game_path, "last_message.pkl")
         result_path = os.path.join(game_path, "result.txt")
         error_message_path = os.path.join(game_path, "error_message.txt")
@@ -145,6 +146,7 @@ class AutogenAgent:
             "admissible_commands_path": admissible_commands_path,
             "chat_history_path": chat_history_path,
             "analyst_trace_path": analyst_trace_path,
+            "analyst_trace_ansi_path": analyst_trace_ansi_path,
             "message_path": message_path,
             "result_path": result_path,
             "error_message_path": error_message_path,
@@ -158,4 +160,10 @@ class AutogenAgent:
         analyst_trace_path = self.log_paths.get("analyst_trace_path")
         if analyst_trace_path and os.path.exists(analyst_trace_path):
             return Path(analyst_trace_path).read_text()
+        return ""
+
+    def get_analyst_trace_ansi_text(self) -> str:
+        analyst_trace_ansi_path = self.log_paths.get("analyst_trace_ansi_path")
+        if analyst_trace_ansi_path and os.path.exists(analyst_trace_ansi_path):
+            return Path(analyst_trace_ansi_path).read_text()
         return ""

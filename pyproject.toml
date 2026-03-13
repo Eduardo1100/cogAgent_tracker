@@ -17,6 +17,7 @@ dependencies = [
     "psycopg[binary]>=3.3.3",
     "pydantic-settings>=2.13.1",
     "redis>=7.2.1",
+    "rich>=14.2.0",
     "scienceworld>=1.1.4",
     "sentence-transformers>=5.2.3",
     "setuptools<82",
