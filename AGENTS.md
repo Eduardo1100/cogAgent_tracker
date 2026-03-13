@@ -101,6 +101,8 @@
     - `agent-iter-37-growth-frontier-recovery`
     - `agent-iter-38-measurement-proxy-guardrail`
     - `agent-iter-39-relation-commit-guardrail`
+    - `agent-iter-40-consolidate-shared-task-contract`
+    - `agent-iter-41-compact-model-facing-context`
 - Infra connectivity work:
   - Use [tests/test_connections.py](/home/eduardo/Projects/cogAgent_tracker/tests/test_connections.py) as a simple end-to-end dependency check.
   - Health endpoints also exercise DB/Redis/MinIO behavior.
@@ -207,6 +209,7 @@
 - Relation-mechanism shortlist control in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py) now exposes `relation_frontier.commit_ready` plus exact commit candidates after a focused primary mechanism has already yielded component-level evidence. When changing this behavior, keep one grounded diagnostic step available before commitment, then suppress redundant sibling inspection on the same focused mechanism and push relation/device-control actions forward instead of spending extra turns on token-expensive reinspection.
 - [scripts/iterate_scienceworld.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_scienceworld.py) is intentionally local-first. It expects a reachable Postgres instance and a working `codex` CLI; if the worktree is dirty it stops by default unless `--allow-dirty` / `ALLOW_DIRTY=1` is set.
 - Hard action/chat limits are still enforced in runtime, but explicit remaining-count numbers should stay out of model-facing context in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py). If you change budget handling, prefer hidden runtime pressure over prompting the model with raw remaining counts.
+- Full runtime bookkeeping belongs in analyst traces and persisted artifacts, not in model-facing percepts. When changing [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py), keep the agent-facing percept and focus-recovery payload compact and architecture-relevant so prompt size does not grow with every new controller.
 - The README is sparse and the project metadata still uses the placeholder name `production-template`. Prefer the actual repo structure over marketing text.
 - Pytest CI runs via `uv run pytest tests/`. Keep [tests/conftest.py](/home/eduardo/Projects/cogAgent_tracker/tests/conftest.py) in mind for repo-root import resolution, and make test stubs override `sys.modules` directly instead of relying on import order.
 - [.pre-commit-config.yaml](/home/eduardo/Projects/cogAgent_tracker/.pre-commit-config.yaml) is intentionally tracked. Do not re-add it to `.gitignore`.
