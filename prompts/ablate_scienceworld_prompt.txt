@@ -13,8 +13,9 @@ Workflow:
 3. Plan the best simplification or ablation before editing code.
 4. Implement only the best simplification, with token-efficiency, task generalization, and environment agnosticism as top priorities.
 5. Prefer deleting redundant logic, merging overlapping runtime structures, or shrinking model-facing context over adding a new heuristic.
-6. Update AGENTS.md if the new consolidation changes the documented workflow or stack expectations.
-7. Run the relevant tests for the files you touched.
-8. If the simplification is worthwhile and belongs in the stack, create a new stacked branch named `agent-iter-{next_iteration}-consolidate-<topic>` from `{current_branch}`, commit the work, push it, and open a PR against `{current_branch}`.
-9. If the best conclusion is that the recent logic should stay as-is, stop after explaining that clearly and do not open a PR.
-10. Do not touch unrelated local changes already present in the worktree.
+6. If your simplification changes runtime state or transcript structure, update the analyst trace format too so it remains readable, intuitive, and interpretable for human debugging.
+7. Update AGENTS.md if the new consolidation changes the documented workflow or stack expectations.
+8. Run the relevant tests for the files you touched and make sure CI-equivalent checks pass before you finish.
+9. If the simplification is worthwhile and belongs in the stack, create a new stacked branch named `agent-iter-{next_iteration}-consolidate-<topic>` from `{current_branch}`, commit the work, push it, and open a PR against `{current_branch}`.
+10. If the best conclusion is that the recent logic should stay as-is, stop after explaining that clearly and do not open a PR.
+11. Do not touch unrelated local changes already present in the worktree.

@@ -229,10 +229,12 @@ def update_experiment_runtime_state(
     status: str | None = None,
     current_game_number: int | None = None,
     current_game_label: str | None = None,
+    current_analyst_trace: str | None = None,
 ) -> None:
     updates = {
         "current_game_number": current_game_number,
         "current_game_label": current_game_label,
+        "current_analyst_trace": current_analyst_trace,
     }
     if status is not None:
         updates["status"] = status
@@ -478,6 +480,36 @@ def _format_chat_history(messages: list[dict], *, note: str | None = None) -> st
     return "\n".join(lines) + "\n"
 
 
+def _synthesize_analyst_trace_from_messages(messages: list[dict]) -> str:
+    if not messages:
+        return ""
+
+    rendered_entries: list[str] = []
+    for idx, message in enumerate(messages, start=1):
+        if isinstance(message, dict):
+            name = str(message.get("name") or message.get("role") or "unknown")
+            content = str(message.get("content") or "").strip()
+        else:
+            name = "unknown"
+            content = str(message).strip()
+
+        content = re.sub(r"\s+", " ", content)
+        if len(content) > 260:
+            content = content[:257].rstrip() + "..."
+
+        rendered_entries.append(
+            "\n".join(
+                [
+                    f"T{idx} | transcript | unknown",
+                    f"Speaker: {name}",
+                    f"Content: {content or '[empty]'}",
+                ]
+            )
+        )
+
+    return "\n\n".join(rendered_entries) + "\n"
+
+
 def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) -> dict:
     log_paths = getattr(agent, "log_paths", {}) or {}
     chat_history_path = log_paths.get("chat_history_path")
@@ -487,6 +519,7 @@ def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) 
             "chat_rounds": -1,
             "transitions": [],
             "belief_matches": [],
+            "analyst_trace": "",
         }
 
     messages, source = _collect_chat_messages(agent, chat_result=chat_result)
@@ -496,6 +529,13 @@ def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) 
 
     chat_text = _format_chat_history(messages, note=effective_note)
     _write_text_file(chat_history_path, chat_text)
+
+    analyst_trace_path = log_paths.get("analyst_trace_path")
+    analyst_trace = get_agent_analyst_trace_text(agent, prefer_existing=True)
+    if not analyst_trace:
+        analyst_trace = _synthesize_analyst_trace_from_messages(messages)
+    if analyst_trace_path and analyst_trace:
+        _write_text_file(analyst_trace_path, analyst_trace)
 
     transitions, belief_matches = extract_chat_metadata(chat_text)
     transition_path = os.path.join(
@@ -509,6 +549,7 @@ def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) 
         "chat_rounds": len(messages) if messages else -1,
         "transitions": transitions,
         "belief_matches": belief_matches,
+        "analyst_trace": analyst_trace,
     }
 
 
@@ -519,16 +560,20 @@ def load_chat_artifacts_from_disk(chat_history_path: str) -> dict:
             "chat_rounds": -1,
             "transitions": [],
             "belief_matches": [],
+            "analyst_trace": "",
         }
 
     chat_text = Path(chat_history_path).read_text()
     transitions, belief_matches = extract_chat_metadata(chat_text)
     chat_rounds = len(re.findall(r"^name:", chat_text, re.MULTILINE))
+    analyst_trace_path = str(Path(chat_history_path).with_name("analyst_trace.txt"))
+    analyst_trace = load_analyst_trace_from_disk(analyst_trace_path)
     return {
         "chat_text": chat_text,
         "chat_rounds": chat_rounds if chat_rounds > 0 else -1,
         "transitions": transitions,
         "belief_matches": belief_matches,
+        "analyst_trace": analyst_trace,
     }
 
 
@@ -561,6 +606,57 @@ def persist_experiment_usage_snapshot(
     except Exception as exc:
         print(f"⚠️ Database logging failed: {exc}")
         db.rollback()
+
+
+def load_analyst_trace_from_disk(analyst_trace_path: str | None) -> str:
+    if not analyst_trace_path or not os.path.exists(analyst_trace_path):
+        return ""
+    return Path(analyst_trace_path).read_text()
+
+
+def get_agent_analyst_trace_text(agent, *, prefer_existing: bool = False) -> str:
+    log_paths = getattr(agent, "log_paths", {}) or {}
+    analyst_trace_path = log_paths.get("analyst_trace_path")
+    if prefer_existing:
+        existing = load_analyst_trace_from_disk(analyst_trace_path)
+        if existing:
+            return existing
+
+    getter = getattr(agent, "get_analyst_trace_text", None)
+    if callable(getter):
+        try:
+            analyst_trace = getter()
+            if analyst_trace:
+                return analyst_trace
+        except Exception as exc:
+            print(f"⚠️ Analyst-trace collection failed from agent runtime: {exc}")
+
+    return load_analyst_trace_from_disk(analyst_trace_path)
+
+
+def persist_live_analyst_trace(experiment_id: int, analyst_trace: str) -> None:
+    db = SessionLocal()
+    try:
+        experiment = db.get(ExperimentRun, experiment_id)
+        if experiment is None:
+            return
+        experiment.current_analyst_trace = analyst_trace or None
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Failed to persist live analyst trace: {exc}")
+    finally:
+        db.close()
+
+
+def configure_live_analyst_trace(agent, experiment_id: int) -> None:
+    def _callback(analyst_trace: str) -> None:
+        persist_live_analyst_trace(experiment_id, analyst_trace)
+
+    setattr(agent, "analyst_trace_callback", _callback)
+    analyst_trace = get_agent_analyst_trace_text(agent, prefer_existing=True)
+    if analyst_trace:
+        _callback(analyst_trace)
 
 
 def upload_chat_history_artifact(
@@ -634,6 +730,7 @@ def persist_episode_run(
     success_rate: float,
     error_adjusted_success_rate: float,
     chat_history_s3_key: str | None,
+    analyst_trace: str | None,
 ) -> EpisodeRun:
     adapter = getattr(agent, "adapter", None)
     task_type = _safe_infer_episode_task_type(adapter)
@@ -666,6 +763,7 @@ def persist_episode_run(
         success_rate=success_rate,
         error_adjusted_success_rate=error_adjusted_success_rate,
         chat_history_s3_key=chat_history_s3_key,
+        analyst_trace=analyst_trace,
     )
     db.add(episode)
     db.commit()
@@ -686,6 +784,7 @@ def persist_interrupted_episode_run(
     error_message: str,
 ) -> dict[str, float]:
     chat_artifacts = ensure_chat_artifacts(agent, prefer_existing=True)
+    analyst_trace = get_agent_analyst_trace_text(agent, prefer_existing=True)
     current_usage_totals = get_agent_usage_totals(agent)
     game_usage = get_usage_delta(current_usage_totals, total_run_usage)
     updated_totals = {
@@ -719,6 +818,7 @@ def persist_interrupted_episode_run(
         success_rate=success_rate,
         error_adjusted_success_rate=error_adjusted_success_rate,
         chat_history_s3_key=s3_key,
+        analyst_trace=analyst_trace,
     )
     return updated_totals
 
@@ -970,6 +1070,7 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
             obs, info = sw_env.reset()
             adapter = ScienceWorldAdapter(sw_env, obs, info, task_name=task_name)
             agent.set_environment(sw_env, obs, info, game_no, adapter=adapter)
+            configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
 
             print(
@@ -1108,6 +1209,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                     success_rate=success_rate,
                     error_adjusted_success_rate=error_adjusted_success_rate,
                     chat_history_s3_key=s3_key,
+                    analyst_trace=get_agent_analyst_trace_text(
+                        agent, prefer_existing=True
+                    ),
                 )
                 print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
 
@@ -1439,6 +1543,7 @@ def main():
                                     current_game_label=f"Game #{i}",
                                 )
                                 agent.set_environment(env, obs, info, i)
+                                configure_live_analyst_trace(agent, experiment.id)
                                 log_paths = agent.log_paths
                                 print(
                                     f"\n[Running Game #{i}] ({num_games_evaluated}/{num_games_to_evaluate})"
@@ -1625,6 +1730,9 @@ def main():
                                         success_rate=success_rate,
                                         error_adjusted_success_rate=error_adjusted_success_rate,
                                         chat_history_s3_key=s3_key,
+                                        analyst_trace=get_agent_analyst_trace_text(
+                                            agent, prefer_existing=True
+                                        ),
                                     )
                                     print(f"✅ Saved Game #{i} to PostgreSQL Database!")
 

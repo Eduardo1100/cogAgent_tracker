@@ -205,3 +205,54 @@ def test_register_log_paths_switches_to_adapter_environment(tmp_path):
     assert Path(agent.log_paths["memory_dir"]) == alfworld_dir
     assert Path(agent.log_paths["memory1_path"]) == alfworld_dir / "memory1.txt"
     assert Path(agent.log_paths["memory2_path"]) == alfworld_dir / "memory2.txt"
+
+
+def test_analyst_trace_is_written_compactly_and_exposed_via_getter(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    analyst_trace_path = tmp_path / "game_1" / "analyst_trace.txt"
+    analyst_trace_path.parent.mkdir(parents=True, exist_ok=True)
+    agent.log_paths = {"analyst_trace_path": str(analyst_trace_path)}
+    agent.percept = {
+        "timestep": 2,
+        "attempted_action": "focus on blue seed",
+        "resulting_observation": "You focus on the blue seed in the flower pot and notice nothing else changes.",
+        "task_status": "INCOMPLETE",
+    }
+    agent.task_status = "INCOMPLETE"
+    agent.num_actions_taken = 2
+    agent.task = ""
+    agent._task_contract = {}
+    agent._task_contract_source = ""
+    agent._reset_episode_reasoning_state()
+    agent.analyst_trace_callback = None
+    agent._last_analyst_trace_text = ""
+
+    summary = {
+        "current_phase": "gather_branch_evidence",
+        "salient_entities": ["blue seed", "flower pot", "green box"],
+        "task_relevant_action_shortlist": [
+            "focus on blue seed",
+            "look at flower pot",
+            "move blue seed to flower pot",
+        ],
+        "candidate_tracking": {},
+        "measurement_tracking": {},
+        "comparison_tracking": {},
+        "conditional_branch_tracking": {
+            "evidence_target": ["unknown plant"],
+            "selected_branch": None,
+        },
+        "relation_frontier": {},
+        "remote_room_signal": {},
+        "substance_search": {},
+        "artifact_creation": {},
+    }
+
+    agent._persist_analyst_trace(summary=summary)
+
+    trace_text = analyst_trace_path.read_text()
+    assert "T2 | gather_branch_evidence | INCOMPLETE" in trace_text
+    assert "Action: focus on blue seed" in trace_text
+    assert "Top actions: focus on blue seed | look at flower pot" in trace_text
+    assert "conditional_branch" in trace_text
+    assert agent.get_analyst_trace_text() == trace_text

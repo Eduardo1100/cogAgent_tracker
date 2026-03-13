@@ -67,6 +67,7 @@ class ExperimentRun(Base):
     selected_games_display: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_game_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_game_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_analyst_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Dataset split evaluated (e.g. "valid_seen", "valid_unseen")
     split: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -168,6 +169,7 @@ class EpisodeRun(Base):
     chat_history_s3_key: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )  # e.g., "experiments/run_1/game_124_chat.txt"
+    analyst_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationship back to the parent Experiment
     experiment: Mapped["ExperimentRun"] = relationship(

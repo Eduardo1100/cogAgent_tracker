@@ -180,7 +180,11 @@ def test_load_prompt_template_supports_iteration_and_ablation_modes():
     ablate_template = load_prompt_template("ablate")
 
     assert "continuing the cognitive-agent iteration workflow" in iterate_template
+    assert "update the analyst trace structure" in iterate_template
+    assert "CI-equivalent checks pass" in iterate_template
     assert "continuing the cognitive-agent consolidation workflow" in ablate_template
+    assert "update the analyst trace format" in ablate_template
+    assert "CI-equivalent checks pass" in ablate_template
     assert "agent-iter-{next_iteration}-consolidate-<topic>" in ablate_template
 
 
