@@ -9912,6 +9912,59 @@ class GWTAutogenAgent(AutogenAgent):
         shared_action_context = self._build_shared_action_context(
             summary=action_runtime_summary
         )
+        self.percept["admissible_action_summary"] = {
+            "total_actions": shared_action_context["total_actions"],
+            "current_phase": shared_action_context["current_phase"],
+            "family_counts": shared_action_context["family_counts"],
+            "salient_entities": shared_action_context["salient_entities"],
+            "deprioritized_families": shared_action_context["deprioritized_families"],
+            "required_families": shared_action_context["task_contract"][
+                "required_families"
+            ],
+        }
+        substance_search = shared_action_context.get("substance_search", {})
+        if self._substance_search_has_signal(substance_search):
+            self.percept["substance_search"] = substance_search
+        artifact_creation = shared_action_context.get("artifact_creation", {})
+        if self._artifact_creation_has_signal(artifact_creation):
+            self.percept["artifact_creation"] = artifact_creation
+        measurement_tracking = shared_action_context.get("measurement_tracking", {})
+        if self._measurement_tracking_has_signal(measurement_tracking):
+            self.percept["measurement_tracking"] = measurement_tracking
+        comparison_tracking = shared_action_context.get("comparison_tracking", {})
+        if self._comparison_tracking_has_signal(comparison_tracking):
+            self.percept["comparison_tracking"] = comparison_tracking
+        conditional_branch_tracking = shared_action_context.get(
+            "conditional_branch_tracking", {}
+        )
+        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+            self.percept["conditional_branch_tracking"] = conditional_branch_tracking
+        relation_frontier = shared_action_context.get("relation_frontier", {})
+        if self._relation_frontier_has_signal(relation_frontier):
+            self.percept["relation_frontier"] = relation_frontier
+        remote_room_signal = shared_action_context.get("remote_room_signal", {})
+        if self._remote_room_signal_has_signal(remote_room_signal):
+            self.percept["remote_room_signal"] = remote_room_signal
+        self.percept["task_relevant_action_shortlist"] = shared_action_context[
+            "task_relevant_action_shortlist"
+        ]
+        ordered_progress = self._get_ordered_target_snapshot()
+        if self._ordered_progress_has_signal(ordered_progress):
+            self.percept["ordered_target_progress"] = ordered_progress
+        candidate_tracking = self._get_candidate_tracking_snapshot()
+        if self._candidate_tracking_has_signal(candidate_tracking):
+            self.percept["candidate_tracking"] = candidate_tracking
+        if self.num_actions_taken > 0:
+            if shared_action_context["newly_relevant_actions"]:
+                self.percept["newly_relevant_actions"] = shared_action_context[
+                    "newly_relevant_actions"
+                ]
+            if shared_action_context["no_longer_relevant_actions"]:
+                self.percept["no_longer_relevant_actions"] = shared_action_context[
+                    "no_longer_relevant_actions"
+                ]
+            if not newly_added and not no_longer:
+                self.percept["admissible_actions_unchanged"] = True
         self._persist_analyst_trace(summary=shared_action_context)
         self._refresh_action_agent_runtime_context(summary=action_runtime_summary)
 
