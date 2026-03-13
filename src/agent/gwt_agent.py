@@ -10432,6 +10432,62 @@ class GWTAutogenAgent(AutogenAgent):
             summary.get("task_contract", {})
         )
 
+    def _get_agent_facing_action_summary_snapshot(self, summary: dict | None) -> dict:
+        summary = summary if isinstance(summary, dict) else {}
+        return self._prune_empty_runtime_fields(
+            {
+                "total_actions": summary.get("total_actions"),
+                "current_phase": summary.get("current_phase"),
+                "salient_entities": list(summary.get("salient_entities", [])[:6]),
+                "deprioritized_families": list(
+                    summary.get("deprioritized_families", [])[:4]
+                ),
+                "required_families": list(summary.get("required_families", [])[:4]),
+            }
+        )
+
+    def _get_agent_facing_runtime_snapshot(self) -> dict:
+        return self._prune_empty_runtime_fields(
+            {
+                "ordered_target_progress": self._limit_runtime_payload(
+                    self.percept.get("ordered_target_progress", {}), list_limit=3
+                ),
+                "candidate_tracking": self._limit_runtime_payload(
+                    self.percept.get("candidate_tracking", {}), list_limit=3
+                ),
+                "substance_search": self._limit_runtime_payload(
+                    self.percept.get("substance_search", {}), list_limit=3
+                ),
+                "artifact_creation": self._limit_runtime_payload(
+                    self.percept.get("artifact_creation", {}), list_limit=3
+                ),
+                "measurement_tracking": self._limit_runtime_payload(
+                    self.percept.get("measurement_tracking", {}), list_limit=3
+                ),
+                "comparison_tracking": self._limit_runtime_payload(
+                    self.percept.get("comparison_tracking", {}), list_limit=3
+                ),
+                "conditional_branch_tracking": self._limit_runtime_payload(
+                    self.percept.get("conditional_branch_tracking", {}), list_limit=3
+                ),
+                "relation_frontier": self._limit_runtime_payload(
+                    self.percept.get("relation_frontier", {}), list_limit=3
+                ),
+                "remote_room_signal": self._limit_runtime_payload(
+                    self.percept.get("remote_room_signal", {}), list_limit=3
+                ),
+                "episode_hypothesis_ledger": self._limit_runtime_payload(
+                    self.percept.get("episode_hypothesis_ledger", {}), list_limit=2
+                ),
+                "referent_resolution": self._limit_runtime_payload(
+                    self.percept.get("referent_resolution", {}), list_limit=3
+                ),
+                "ambiguity_resolution": self._limit_runtime_payload(
+                    self.percept.get("ambiguity_resolution", {}), list_limit=3
+                ),
+            }
+        )
+
     def _get_agent_facing_percept_snapshot(self) -> dict:
         percept_snapshot = self._snapshot_analyst_payload(self.percept)
         if not isinstance(percept_snapshot, dict):
@@ -10443,6 +10499,36 @@ class GWTAutogenAgent(AutogenAgent):
             percept_snapshot["task_contract"] = compact_task_contract
         else:
             percept_snapshot.pop("task_contract", None)
+        compact_action_summary = self._get_agent_facing_action_summary_snapshot(
+            percept_snapshot.get("admissible_action_summary", {})
+        )
+        if compact_action_summary:
+            percept_snapshot["admissible_action_summary"] = compact_action_summary
+        else:
+            percept_snapshot.pop("admissible_action_summary", None)
+        for key in (
+            "ordered_target_progress",
+            "candidate_tracking",
+            "substance_search",
+            "artifact_creation",
+            "measurement_tracking",
+            "comparison_tracking",
+            "conditional_branch_tracking",
+            "relation_frontier",
+            "remote_room_signal",
+            "episode_hypothesis_ledger",
+            "referent_resolution",
+            "ambiguity_resolution",
+        ):
+            percept_snapshot.pop(key, None)
+        percept_snapshot.update(self._get_agent_facing_runtime_snapshot())
+        if "task_relevant_action_shortlist" in percept_snapshot:
+            percept_snapshot["task_relevant_action_shortlist"] = list(
+                percept_snapshot.get("task_relevant_action_shortlist", [])[:8]
+            )
+        for key in ("newly_relevant_actions", "no_longer_relevant_actions"):
+            if key in percept_snapshot:
+                percept_snapshot[key] = list(percept_snapshot.get(key, [])[:4])
         return percept_snapshot
 
     def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
@@ -10477,6 +10563,35 @@ class GWTAutogenAgent(AutogenAgent):
         if self.percept.get("referent_resolution"):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
         return snapshots
+
+    def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
+        summary = summary if isinstance(summary, dict) else {}
+        return self._prune_empty_runtime_fields(
+            {
+                "total_actions": summary.get("total_actions"),
+                "current_phase": summary.get("current_phase"),
+                "salient_entities": list(summary.get("salient_entities", [])[:6]),
+                "task_relevant_action_shortlist": list(
+                    summary.get("task_relevant_action_shortlist", [])[:8]
+                ),
+                "newly_relevant_actions": list(
+                    summary.get("newly_relevant_actions", [])[:4]
+                ),
+                "no_longer_relevant_actions": list(
+                    summary.get("no_longer_relevant_actions", [])[:4]
+                ),
+                "deprioritized_families": list(
+                    summary.get("deprioritized_families", [])[:4]
+                ),
+                "task_contract": self._get_compact_task_contract_snapshot(
+                    summary.get("task_contract", {})
+                ),
+                "runtime_snapshots": self._limit_runtime_payload(
+                    self._get_action_agent_runtime_snapshots(summary),
+                    list_limit=3,
+                ),
+            }
+        )
 
     @staticmethod
     def _snapshot_analyst_payload(value):
@@ -11350,7 +11465,6 @@ class GWTAutogenAgent(AutogenAgent):
         self.percept["admissible_action_summary"] = {
             "total_actions": shared_action_context["total_actions"],
             "current_phase": shared_action_context["current_phase"],
-            "family_counts": shared_action_context["family_counts"],
             "salient_entities": shared_action_context["salient_entities"],
             "deprioritized_families": shared_action_context["deprioritized_families"],
             "required_families": shared_action_context["task_contract"][
@@ -12020,10 +12134,7 @@ class GWTAutogenAgent(AutogenAgent):
             shared_action_context = self._summarize_admissible_actions(
                 self.admissible_actions
             )
-            focus_summary = self._snapshot_analyst_payload(shared_action_context)
-            focus_summary["task_contract"] = self._get_compact_task_contract_snapshot(
-                focus_summary.get("task_contract", {})
-            )
+            focus_summary = self._get_focus_agent_action_summary(shared_action_context)
             return (
                 f"TASK: {self.task}\n"
                 "REPEATING LAST PERCEPT TO HELP CONSTRUCT BELIEF STATE:\n"

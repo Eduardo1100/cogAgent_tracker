@@ -41,7 +41,7 @@ action_agent: |
   12. If candidate_tracking shows a grounded candidate already satisfied the visible task semantics without completing the task, pivot to a different grounded candidate instead of repeating support-entity focus or inspection.
   13. If the current phase is locating a target substance, prefer grounded inspection and opening actions over manipulating unrelated visible objects or testing a mechanism on the wrong substance.
   14. Once the target substance is grounded, keep tool or device actions anchored to that substance instead of resuming broad exploration.
-  15. Never invent a new substance label or container-content phrase. If the percept grounded "sodium chloride", do not rename it to "salt water"; act on the exact grounded label or the exact grounded container instead.
+  15. Never invent a new substance label or container-content phrase. If the percept grounded a substance under one label, do not rename it to a plausible alias or mixture name; act on the exact grounded label or the exact grounded container instead.
   16. If substance_search shows exhausted containers and grounded source candidates, prefer probing those source candidates over reopening containers or moving unrelated objects.
   17. If measurement_tracking is present, keep the instrument, measured target, and branch targets separate. Do not treat a proxy reading on a support object as if it resolved the measured target unless the percept directly confirms that relation.
   18. If measurement_tracking shows an active enclosure for a hidden target, act through the enclosing referent instead of repeating direct commands on the hidden object.

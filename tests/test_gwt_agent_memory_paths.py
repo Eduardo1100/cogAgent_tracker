@@ -334,6 +334,46 @@ def test_agent_facing_percept_snapshot_prunes_inactive_task_contract_fields(tmp_
         "resulting_observation": "You are in the hallway.",
         "task_status": "INCOMPLETE",
         "task_contract": agent._get_task_contract(),
+        "admissible_action_summary": {
+            "total_actions": 27,
+            "current_phase": "locate_substance",
+            "family_counts": {"inspect": 9, "move": 7},
+            "salient_entities": [
+                "sink",
+                "cupboard",
+                "thermometer",
+                "freezer",
+                "fridge",
+                "drawer",
+                "soap",
+            ],
+            "deprioritized_families": ["relation", "move", "pour", "mix", "use"],
+            "required_families": ["focus", "inspect", "move"],
+        },
+        "task_relevant_action_shortlist": [f"action {idx}" for idx in range(10)],
+        "substance_search": {
+            "phase": "probe_sources",
+            "grounded_substances": ["water", "soap", "air", "salt"],
+            "source_candidates": ["sink", "fridge", "freezer", "cupboard"],
+        },
+        "measurement_tracking": {
+            "measurement_target": "water",
+            "measurement_property": "temperature",
+            "measurement_property_type": "instantaneous_state",
+            "recent_direct_readings": [10, 12, 15, 18],
+        },
+        "episode_hypothesis_ledger": {
+            "mechanisms": [
+                {"family": "inspect", "status": "promising"},
+                {"family": "move", "status": "deprioritized"},
+                {"family": "relation", "status": "deprioritized"},
+            ],
+            "recent_tests": [
+                "look at sink",
+                "look in cupboard",
+                "open fridge",
+            ],
+        },
     }
 
     snapshot = agent._get_agent_facing_percept_snapshot()
@@ -347,6 +387,13 @@ def test_agent_facing_percept_snapshot_prunes_inactive_task_contract_fields(tmp_
     assert "measurement_task" not in contract
     assert "comparison_targets" not in contract
     assert "conditional_branch_task" not in contract
+    assert snapshot["admissible_action_summary"]["total_actions"] == 27
+    assert "family_counts" not in snapshot["admissible_action_summary"]
+    assert len(snapshot["admissible_action_summary"]["salient_entities"]) == 6
+    assert len(snapshot["task_relevant_action_shortlist"]) == 8
+    assert len(snapshot["substance_search"]["grounded_substances"]) == 3
+    assert len(snapshot["measurement_tracking"]["recent_direct_readings"]) == 3
+    assert len(snapshot["episode_hypothesis_ledger"]["mechanisms"]) == 2
 
 
 def test_episode_hypothesis_ledger_is_episode_local_and_deprioritizes_repeats(
@@ -440,7 +487,7 @@ def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_
 
     assert summary["total_actions"] == 5
     assert summary["current_phase"] == "gather_evidence"
-    assert summary["family_counts"]["inspect"] >= 2
+    assert "family_counts" not in summary
     assert "aluminum" in summary["salient_entities"]
     assert "action_attempts_left" not in agent.percept
     assert "look at aluminum foil" in shortlist
@@ -451,6 +498,38 @@ def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_
     )
     assert "Salient grounded entities" in agent.action_agent.system_message
     assert "connect aluminum foil to battery" in agent.action_agent.system_message
+
+
+def test_focus_payload_uses_compact_action_summary(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Focus on the red object after comparing the visible materials."
+    focus_summary = agent._get_focus_agent_action_summary(
+        {
+            "total_actions": 12,
+            "current_phase": "gather_evidence",
+            "salient_entities": [
+                "red object",
+                "battery",
+                "drawer",
+                "wire",
+                "switch",
+                "door",
+                "shelf",
+            ],
+            "task_relevant_action_shortlist": [f"action {idx}" for idx in range(10)],
+            "newly_relevant_actions": [f"new {idx}" for idx in range(5)],
+            "no_longer_relevant_actions": [f"old {idx}" for idx in range(5)],
+            "deprioritized_families": ["move", "inspect", "focus", "relation", "use"],
+            "task_contract": agent._get_task_contract(),
+        }
+    )
+
+    assert len(focus_summary["salient_entities"]) == 6
+    assert len(focus_summary["task_relevant_action_shortlist"]) == 8
+    assert len(focus_summary["newly_relevant_actions"]) == 4
+    assert len(focus_summary["no_longer_relevant_actions"]) == 4
+    assert len(focus_summary["deprioritized_families"]) == 4
+    assert "family_counts" not in json.dumps(focus_summary)
 
 
 def test_custom_speaker_selection_repairs_malformed_belief_state_and_continues(
