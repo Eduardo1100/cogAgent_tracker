@@ -1649,6 +1649,63 @@
           }
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "id": 124,
+      "title": "Analyst Trace",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "cogagent-pg"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "id": 125,
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "title": "Live / Latest Analyst Trace",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "cogagent-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  CASE\n    WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'RUNNING'\n      AND NULLIF(TRIM(COALESCE(e.current_analyst_trace, '')), '') IS NOT NULL\n      THEN COALESCE(NULLIF(e.current_game_label, ''), 'current game (live)')\n    WHEN last_ep.game_number IS NOT NULL THEN 'Game #' || last_ep.game_number || ' (persisted)'\n    ELSE 'not available'\n  END AS trace_source,\n  COALESCE(\n    CASE\n      WHEN COALESCE(e.status, CASE WHEN e.end_time IS NULL THEN 'RUNNING' ELSE 'CONCLUDED' END) = 'RUNNING'\n        THEN NULLIF(TRIM(COALESCE(e.current_analyst_trace, '')), '')\n      ELSE NULL\n    END,\n    NULLIF(TRIM(COALESCE(last_ep.analyst_trace, '')), ''),\n    NULLIF(TRIM(COALESCE(e.current_analyst_trace, '')), ''),\n    'Analyst trace not available yet.'\n  ) AS analyst_trace\nFROM experiment_runs e\nLEFT JOIN LATERAL (\n  SELECT game_number, analyst_trace\n  FROM episode_runs\n  WHERE experiment_id = e.id\n  ORDER BY game_number DESC\n  LIMIT 1\n) last_ep ON TRUE\nWHERE e.id = ${experiment_id}",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "5s",
@@ -1685,5 +1742,5 @@
   "timezone": "browser",
   "title": "cogAgent Monitor",
   "uid": "cogagent-monitor",
-  "version": 8
+  "version": 9
 }

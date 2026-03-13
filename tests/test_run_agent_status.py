@@ -8,6 +8,29 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+_STUBBED_MODULE_NAMES = [
+    "autogen",
+    "autogen.oai",
+    "autogen.oai.client",
+    "wandb",
+    "src.agent.baseline_agent",
+    "src.agent.gwt_agent",
+    "src.agent.env_adapter",
+    "src.config.schema_health",
+    "scripts.run_agent",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_stubbed_modules():
+    originals = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    yield
+    for name, module in originals.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
 
 def _install_run_agent_stubs() -> None:
     autogen_module = types.ModuleType("autogen")
@@ -181,6 +204,7 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
     agent = types.SimpleNamespace(
         log_paths={
             "chat_history_path": str(game_dir / "chat_history.txt"),
+            "analyst_trace_path": str(game_dir / "analyst_trace.txt"),
         },
         group_chat=types.SimpleNamespace(
             messages=[
@@ -202,6 +226,7 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
     artifacts = run_agent.persist_chat_artifacts(agent)
 
     chat_history_path = Path(agent.log_paths["chat_history_path"])
+    analyst_trace_path = Path(agent.log_paths["analyst_trace_path"])
     transition_path = game_dir / "transition_log.json"
 
     assert artifacts["chat_rounds"] == 2
@@ -211,6 +236,7 @@ def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
     )
     assert "Belief_State_Agent" in chat_history_path.read_text()
     assert "focus on mouse" in chat_history_path.read_text()
+    assert "Speaker: Belief_State_Agent" in analyst_trace_path.read_text()
     assert transition_path.exists()
     assert artifacts["transitions"][0]["from"] == "Belief_State_Agent"
     assert artifacts["transitions"][0]["to"] == "Action_Agent"
@@ -302,6 +328,16 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
                 ]
             )
         )
+        (game_dir / "analyst_trace.txt").write_text(
+            "\n".join(
+                [
+                    "T1 | locate_substance | INCOMPLETE",
+                    "Action: focus on water",
+                    "Observation: You focus on the water.",
+                    "",
+                ]
+            )
+        )
         (game_dir / "history.txt").write_text(
             "action: 'focus on water'. observation: 'You focus on the water.'\n"
         )
@@ -317,6 +353,7 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
         agent = types.SimpleNamespace(
             log_paths={
                 "chat_history_path": str(chat_history_path),
+                "analyst_trace_path": str(game_dir / "analyst_trace.txt"),
                 "history_path": str(game_dir / "history.txt"),
             },
             group_chat=types.SimpleNamespace(agents=[]),
@@ -362,6 +399,7 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
         assert persisted_episode.belief_state["memory"] == [
             "[I see water in the sink.]"
         ]
+        assert "T1 | locate_substance | INCOMPLETE" in persisted_episode.analyst_trace
         assert (
             fake_s3.calls[0]["Key"]
             == f"experiments/run_{experiment.id}/game_2_chat.txt"
@@ -410,6 +448,16 @@ def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
                 ]
             )
         )
+        (game_dir / "analyst_trace.txt").write_text(
+            "\n".join(
+                [
+                    "T2 | inspect_target_mechanism | INCOMPLETE",
+                    "Action: connect red light bulb cathode to solar panel cathode",
+                    "Observation: Nothing obvious happens.",
+                    "",
+                ]
+            )
+        )
         (game_dir / "history.txt").write_text(
             "action: 'connect red light bulb cathode to solar panel cathode'. observation: 'Nothing obvious happens.'\n"
         )
@@ -429,6 +477,7 @@ def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
         agent = types.SimpleNamespace(
             log_paths={
                 "chat_history_path": str(chat_history_path),
+                "analyst_trace_path": str(game_dir / "analyst_trace.txt"),
                 "history_path": str(game_dir / "history.txt"),
             },
             group_chat=types.SimpleNamespace(agents=[]),
@@ -465,9 +514,77 @@ def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
         )
         assert persisted_episode.task_type is None
         assert persisted_episode.chat_rounds == 1
+        assert (
+            "T2 | inspect_target_mechanism | INCOMPLETE"
+            in persisted_episode.analyst_trace
+        )
         assert persisted_episode.chat_history_s3_key == (
             f"experiments/run_{experiment.id}/game_3_chat.txt"
         )
         assert fake_s3.calls[0]["Key"] == (
             f"experiments/run_{experiment.id}/game_3_chat.txt"
+        )
+
+
+def test_configure_live_analyst_trace_persists_existing_trace(tmp_path, monkeypatch):
+    from src.storage.models import Base, ExperimentRun
+
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    db_path = tmp_path / "live_analyst_trace.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
+
+    with TestingSessionLocal() as db:
+        experiment = ExperimentRun(
+            agent_name="GWTAutogenAgent",
+            llm_model="test-model",
+            eval_env_type="scienceworld",
+            max_actions_per_game=10,
+            max_chat_rounds=20,
+            status="RUNNING",
+        )
+        db.add(experiment)
+        db.commit()
+        db.refresh(experiment)
+        experiment_id = experiment.id
+
+    analyst_trace_path = tmp_path / "game_1" / "analyst_trace.txt"
+    analyst_trace_path.parent.mkdir(parents=True, exist_ok=True)
+    analyst_trace_path.write_text(
+        "\n".join(
+            [
+                "T0 | locate_primary_target | INCOMPLETE",
+                "Action: None",
+                "Observation: You are in the hallway.",
+                "",
+            ]
+        )
+    )
+    agent = types.SimpleNamespace(
+        log_paths={"analyst_trace_path": str(analyst_trace_path)},
+        get_analyst_trace_text=lambda: analyst_trace_path.read_text(),
+    )
+
+    run_agent.configure_live_analyst_trace(agent, experiment_id)
+
+    with TestingSessionLocal() as db:
+        persisted = db.get(ExperimentRun, experiment_id)
+        assert persisted is not None
+        assert (
+            "T0 | locate_primary_target | INCOMPLETE" in persisted.current_analyst_trace
+        )
+
+    callback = getattr(agent, "analyst_trace_callback")
+    callback("T1 | locate_primary_target | INCOMPLETE\nAction: open door to kitchen\n")
+
+    with TestingSessionLocal() as db:
+        persisted = db.get(ExperimentRun, experiment_id)
+        assert persisted is not None
+        assert persisted.current_analyst_trace.startswith(
+            "T1 | locate_primary_target | INCOMPLETE"
         )

@@ -845,6 +845,8 @@ class GWTAutogenAgent(AutogenAgent):
         self._search_location_states: dict[str, dict] = {}
         self._target_status_by_referent: dict[str, str] = {}
         self._admissible_summary_cache: dict[tuple[tuple[str, ...], int], dict] = {}
+        self._analyst_trace_entries: list[dict] = []
+        self._last_analyst_trace_text = ""
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -10105,6 +10107,154 @@ class GWTAutogenAgent(AutogenAgent):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
         return snapshots
 
+    @staticmethod
+    def _truncate_analyst_text(text: str, *, limit: int = 220) -> str:
+        compact = re.sub(r"\s+", " ", (text or "")).strip()
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3].rstrip() + "..."
+
+    def _get_analyst_runtime_snapshots(self, summary: dict) -> dict:
+        snapshots = {}
+
+        ordered_progress = self._get_ordered_target_snapshot()
+        if self._ordered_progress_has_signal(ordered_progress):
+            snapshots["ordered_progress"] = {
+                "focused": ordered_progress.get("focused_stage_labels", [])[:3],
+                "pending": ordered_progress.get("pending_stage_candidates", [])[:3],
+            }
+
+        candidate_tracking = summary.get("candidate_tracking", {})
+        if self._candidate_tracking_has_signal(candidate_tracking):
+            snapshots["candidate"] = {
+                "active": candidate_tracking.get("active_candidate"),
+                "last_seen_room": candidate_tracking.get("last_seen_room"),
+                "rejected": candidate_tracking.get("rejected_candidates", [])[:2],
+            }
+
+        measurement_tracking = summary.get("measurement_tracking", {})
+        if self._measurement_tracking_has_signal(measurement_tracking):
+            snapshots["measurement"] = {
+                "target": measurement_tracking.get("measurement_target"),
+                "property": measurement_tracking.get("measurement_property"),
+                "resolved": measurement_tracking.get("property_resolved"),
+                "branch_ready": measurement_tracking.get("branch_ready"),
+            }
+
+        comparison_tracking = summary.get("comparison_tracking", {})
+        if self._comparison_tracking_has_signal(comparison_tracking):
+            snapshots["comparison"] = {
+                "targets": comparison_tracking.get("comparison_targets", [])[:2],
+                "resolved_target": comparison_tracking.get("selected_target"),
+            }
+
+        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
+        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+            snapshots["conditional_branch"] = {
+                "evidence_target": conditional_branch_tracking.get("evidence_target"),
+                "resolved_target": conditional_branch_tracking.get("selected_branch"),
+            }
+
+        relation_frontier = summary.get("relation_frontier", {})
+        if self._relation_frontier_has_signal(relation_frontier):
+            snapshots["relation_frontier"] = {
+                "referents": relation_frontier.get("frontier_referents", [])[:4],
+                "control_candidates": relation_frontier.get("control_candidates", [])[
+                    :2
+                ],
+            }
+
+        remote_room_signal = summary.get("remote_room_signal", {})
+        if self._remote_room_signal_has_signal(remote_room_signal):
+            snapshots["remote_room"] = {
+                "room": remote_room_signal.get("room"),
+                "reason": remote_room_signal.get("reason"),
+            }
+
+        substance_search = summary.get("substance_search", {})
+        if self._substance_search_has_signal(substance_search):
+            snapshots["substance_search"] = {
+                "phase": substance_search.get("phase"),
+                "grounded_substances": substance_search.get("grounded_substances", [])[
+                    :3
+                ],
+                "source_candidates": substance_search.get("source_candidates", [])[:3],
+            }
+
+        artifact_creation = summary.get("artifact_creation", {})
+        if self._artifact_creation_has_signal(artifact_creation):
+            snapshots["artifact_creation"] = {
+                "artifact_type": artifact_creation.get("artifact_type"),
+                "grounded_artifacts": artifact_creation.get("grounded_artifacts", [])[
+                    :3
+                ],
+            }
+
+        return self._limit_runtime_payload(snapshots, list_limit=3)
+
+    def _render_analyst_trace_entry(self, entry: dict) -> str:
+        lines = [
+            f"T{entry['timestep']} | {entry['phase']} | {entry['task_status']}",
+            f"Action: {entry['attempted_action']}",
+            f"Observation: {entry['observation']}",
+        ]
+        if entry["salient_entities"]:
+            lines.append(f"Salient: {', '.join(entry['salient_entities'])}")
+        if entry["shortlist"]:
+            lines.append(f"Top actions: {' | '.join(entry['shortlist'])}")
+        if entry["runtime"]:
+            lines.append(f"Runtime: {json.dumps(entry['runtime'], sort_keys=True)}")
+        return "\n".join(lines)
+
+    def _render_analyst_trace(self) -> str:
+        if not self._analyst_trace_entries:
+            return ""
+        return (
+            "\n\n".join(
+                self._render_analyst_trace_entry(entry)
+                for entry in self._analyst_trace_entries
+            )
+            + "\n"
+        )
+
+    def _persist_analyst_trace(self, *, summary: dict) -> None:
+        entry = {
+            "timestep": self.percept.get("timestep", self.num_actions_taken),
+            "phase": summary.get("current_phase", "act"),
+            "task_status": self.percept.get("task_status", self.task_status),
+            "attempted_action": self._truncate_analyst_text(
+                self.percept.get("attempted_action", "None"),
+                limit=120,
+            ),
+            "observation": self._truncate_analyst_text(
+                self.percept.get("resulting_observation", ""),
+                limit=260,
+            ),
+            "salient_entities": summary.get("salient_entities", [])[:5],
+            "shortlist": summary.get("task_relevant_action_shortlist", [])[:5],
+            "runtime": self._get_analyst_runtime_snapshots(summary),
+        }
+
+        if (
+            self._analyst_trace_entries
+            and self._analyst_trace_entries[-1]["timestep"] == entry["timestep"]
+        ):
+            self._analyst_trace_entries[-1] = entry
+        else:
+            self._analyst_trace_entries.append(entry)
+
+        text = self._render_analyst_trace()
+        self._last_analyst_trace_text = text
+
+        analyst_trace_path = self.log_paths.get("analyst_trace_path")
+        if analyst_trace_path:
+            with open(analyst_trace_path, "w") as f:
+                f.write(text)
+
+        callback = getattr(self, "analyst_trace_callback", None)
+        if callable(callback):
+            callback(text)
+
     def _build_shared_action_context(self, *, summary: dict | None = None) -> dict:
         summary = dict(
             summary
@@ -10126,6 +10276,15 @@ class GWTAutogenAgent(AutogenAgent):
             action for action in previous_shortlist if action not in current_shortlist
         ]
         return summary
+
+    def get_analyst_trace_text(self) -> str:
+        if self._last_analyst_trace_text:
+            return self._last_analyst_trace_text
+        analyst_trace_path = self.log_paths.get("analyst_trace_path")
+        if analyst_trace_path and os.path.exists(analyst_trace_path):
+            with open(analyst_trace_path) as f:
+                return f.read()
+        return ""
 
     def _refresh_action_agent_runtime_context(
         self, *, summary: dict | None = None
@@ -10535,6 +10694,7 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
             if not newly_added and not no_longer:
                 self.percept["admissible_actions_unchanged"] = True
+        self._persist_analyst_trace(summary=shared_action_context)
         self._refresh_action_agent_runtime_context(summary=action_runtime_summary)
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
@@ -10935,6 +11095,7 @@ class GWTAutogenAgent(AutogenAgent):
         concept_path = os.path.join(game_path, "concepts.txt")
         admissible_commands_path = os.path.join(game_path, "admissible_commands.txt")
         chat_history_path = os.path.join(game_path, "chat_history.txt")
+        analyst_trace_path = os.path.join(game_path, "analyst_trace.txt")
         result_path = os.path.join(game_path, "result.txt")
         error_message_path = os.path.join(game_path, "error_message.txt")
 
@@ -10945,6 +11106,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "concept_path": concept_path,
                 "admissible_commands_path": admissible_commands_path,
                 "chat_history_path": chat_history_path,
+                "analyst_trace_path": analyst_trace_path,
                 "result_path": result_path,
                 "error_message_path": error_message_path,
             }
