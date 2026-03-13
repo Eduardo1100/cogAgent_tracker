@@ -4918,6 +4918,122 @@ class GWTAutogenAgent(AutogenAgent):
     def _relation_frontier_has_signal(snapshot: dict) -> bool:
         return any(bool(value) for value in snapshot.values())
 
+    def _primary_relation_component_is_grounded(
+        self,
+        *,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        primary_roles = role_sets["primary_targets"]
+        if not primary_roles:
+            return False
+
+        inspect_actions: list[str] = []
+        inspect_entry = self.episode_hypothesis_ledger.get("inspect", {})
+        if inspect_entry.get("last_action"):
+            inspect_actions.append(inspect_entry["last_action"])
+        attempted_action = (self.percept or {}).get("attempted_action", "")
+        if attempted_action:
+            inspect_actions.append(attempted_action)
+
+        for action in inspect_actions:
+            family = self._classify_action_family(action)
+            if family not in {"inspect", "focus"}:
+                continue
+            action_tokens = set(
+                self._extract_action_content_tokens(action, family=family)
+            )
+            if not action_tokens:
+                continue
+            for primary_tokens in primary_roles:
+                if not primary_tokens or not primary_tokens.issubset(action_tokens):
+                    continue
+                extra_tokens = action_tokens - primary_tokens
+                if extra_tokens:
+                    return True
+
+        for referent in self._relation_frontier_referents[-6:]:
+            referent_tokens = self._referent_tokens(referent)
+            if not referent_tokens:
+                continue
+            for primary_tokens in primary_roles:
+                if not primary_tokens or not primary_tokens.issubset(referent_tokens):
+                    continue
+                extra_tokens = referent_tokens - primary_tokens
+                if extra_tokens:
+                    return True
+        return False
+
+    def _is_primary_relation_inspect_action(
+        self,
+        action: str,
+        *,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+    ) -> bool:
+        family = self._classify_action_family(action)
+        if family != "inspect":
+            return False
+
+        contract = task_contract or self._get_task_contract()
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        referent_tokens = set(
+            self._extract_action_content_tokens(action, family=family)
+        )
+        if not referent_tokens:
+            referent = self._extract_action_primary_object_signature(
+                action, family=family
+            )
+            if not referent:
+                referent = self._get_action_referent_signature(action, family=family)
+            if not referent:
+                return False
+            referent_tokens = self._referent_tokens(referent)
+        return any(
+            primary_tokens and primary_tokens.issubset(referent_tokens)
+            for primary_tokens in role_sets["primary_targets"]
+        )
+
+    def _is_relation_commit_candidate_action(
+        self,
+        action: str,
+        *,
+        family: str | None = None,
+        task_contract: dict | None = None,
+        role_token_sets: dict[str, list[set[str]]] | None = None,
+        control_candidates: list[str] | None = None,
+    ) -> bool:
+        family = family or self._classify_action_family(action)
+        if family not in {"relation", "device_control"}:
+            return False
+
+        contract = task_contract or self._get_task_contract()
+        role_sets = role_token_sets or self._get_task_role_token_sets(contract)
+        content_token_set = set(
+            self._extract_action_content_tokens(action, family=family)
+        )
+        primary_role_hits, _ = self._best_role_overlap(
+            content_token_set, role_sets["primary_targets"]
+        )
+        support_role_hits, _ = self._best_role_overlap(
+            content_token_set, role_sets["supporting_targets"]
+        )
+        if primary_role_hits or support_role_hits:
+            return True
+
+        if family != "device_control":
+            return False
+
+        referent = self._extract_action_primary_object_signature(action, family=family)
+        if not referent or self._action_mentions_door(action, family=family):
+            return False
+        return bool(
+            self._is_control_candidate_signature(referent)
+            or referent in (control_candidates or [])
+        )
+
     def _extract_remote_inspected_room_signature(
         self,
         *,
@@ -9709,6 +9825,36 @@ class GWTAutogenAgent(AutogenAgent):
             )
         )
 
+        relation_frontier = self._get_relation_frontier_snapshot(actions, task_contract)
+        relation_commit_candidates: list[str] = []
+        relation_commit_ready = bool(
+            "relation" in task_contract.get("required_families", [])
+            and self._role_focus_completed(role_token_sets["primary_targets"])
+            and self._primary_relation_component_is_grounded(
+                task_contract=task_contract, role_token_sets=role_token_sets
+            )
+        )
+        if relation_commit_ready:
+            for item in scored_actions:
+                if item["score"] <= 0:
+                    continue
+                if not self._is_relation_commit_candidate_action(
+                    item["action"],
+                    family=item["family"],
+                    task_contract=task_contract,
+                    role_token_sets=role_token_sets,
+                    control_candidates=relation_frontier.get("control_candidates", []),
+                ):
+                    continue
+                relation_commit_candidates.append(item["action"])
+                if len(relation_commit_candidates) >= 4:
+                    break
+            relation_commit_ready = bool(relation_commit_candidates)
+            if relation_commit_ready:
+                relation_frontier = dict(relation_frontier)
+                relation_frontier["commit_ready"] = True
+                relation_frontier["commit_candidates"] = relation_commit_candidates[:4]
+
         quotas = self._get_shortlist_family_quotas(current_phase)
         if "ordered_sequence" in self._get_task_contract().get(
             "ordering_cues", []
@@ -9726,6 +9872,11 @@ class GWTAutogenAgent(AutogenAgent):
             quotas["relation"] = max(2, quotas.get("relation", 0))
             if quotas.get("focus", 0) > 0:
                 quotas["focus"] -= 1
+        if relation_commit_ready:
+            quotas = dict(quotas)
+            quotas["relation"] = max(3, quotas.get("relation", 0))
+            quotas["device_control"] = max(2, quotas.get("device_control", 0))
+            quotas["inspect"] = min(1, quotas.get("inspect", 0))
         if self._is_candidate_search_task(task_contract):
             quotas = dict(quotas)
             quotas["inspect"] = max(2, quotas.get("inspect", 0))
@@ -9796,6 +9947,16 @@ class GWTAutogenAgent(AutogenAgent):
                     and item["primary_role_hits"] > 0
                     and item["support_role_hits"] == 0
                 )
+        if relation_commit_ready:
+            blocked_actions.update(
+                item["action"]
+                for item in scored_actions
+                if self._is_primary_relation_inspect_action(
+                    item["action"],
+                    task_contract=task_contract,
+                    role_token_sets=role_token_sets,
+                )
+            )
         shortlist: list[str] = []
         selected_actions: set[str] = set()
         selected_by_family: dict[str, int] = {}
@@ -9828,7 +9989,6 @@ class GWTAutogenAgent(AutogenAgent):
             for entry in self.episode_hypothesis_ledger.values()
             if entry["status"] == "deprioritized"
         )
-        relation_frontier = self._get_relation_frontier_snapshot(actions, task_contract)
         artifact_creation = self._get_artifact_creation_snapshot()
         substance_search = self._get_substance_search_snapshot(actions)
         measurement_tracking = self._get_measurement_tracking_snapshot()

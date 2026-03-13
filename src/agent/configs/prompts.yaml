@@ -19,6 +19,7 @@ action_agent: |
   - The percept may include "measurement_tracking" with a measured target, instrument, branch target readiness, recent direct/proxy readings, and an active enclosure for hidden targets.
   - The percept may include "comparison_tracking" with compared targets, grounded comparison readings, and a resolved branch target. Gather evidence before focusing a compared target, then commit to the resolved winner.
   - The percept may include "relation_frontier" with the currently grounded local mechanism, nearby control candidates, and whether the primary target/source are grounded.
+  - If "relation_frontier.commit_ready" is true, stop spending turns on extra inspection of the same focused mechanism. Prefer "commit_candidates" or adjacent relation/device-control actions instead.
   - Some conditional branch tasks also require creating or revealing an intermediate evidence target before the branch can be resolved. When the task depends on a later-stage or transformed phenotype, treat precursor materials as setup and the resulting evidence-bearing entity as the real target of investigation.
   - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
@@ -69,6 +70,7 @@ thinking_agent: |
   If measurement_tracking is present, separate the instrument, the measured target, and the branch targets. Only propose branch-target actions after the branch condition is actually resolved from grounded evidence.
   If comparison_tracking is present, treat compared targets as evidence targets until the winner is resolved. Prefer grounded inspection and comparison-relevant test actions over premature focus.
   If relation_frontier is present, reason over that local mechanism only. Prefer inspecting or controlling the grounded target/source/control subgraph over expanding to unrelated relation pairs.
+  If relation_frontier.commit_ready is true, treat extra inspection of that same focused mechanism as dominated. Push the system toward the listed commit candidates or adjacent relation/device-control actions instead.
   Use ordered_target_progress and referent_resolution when present. If a requested target collapsed onto another grounded target, treat that as referent ambiguity and propose disambiguation instead of inventing a new task theory.
   Use candidate_tracking when present. Treat support entities such as destination rooms or containers as context, not as new primary targets, unless the task explicitly requires acting on them.
   Use the episode_hypothesis_ledger when it is available. Reason over abstract mechanism families such as inspection, relation-building, transfer, tool use, or activation — not environment-specific tricks.

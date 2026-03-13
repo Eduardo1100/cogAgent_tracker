@@ -1089,6 +1089,58 @@ def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_p
     assert "look at blue light bulb" not in shortlist
 
 
+def test_relation_shortlist_commits_after_primary_component_inspection(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "First, focus on the red light bulb. Then, create an electrical circuit "
+        "that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "You are in the workshop. You see a red light bulb, an anode in the red "
+        "light bulb, a cathode in the red light bulb, and a workshop."
+    )
+    agent.percept = {
+        "resulting_observation": observation,
+        "attempted_action": "look at anode in red light bulb",
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on red light bulb",
+        observation="You focus on the red light bulb.",
+    )
+    agent._update_relation_task_tracking(
+        action="look at anode in red light bulb",
+        observation="a anode. it is connected to: nothing.",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at anode in red light bulb",
+            "look at cathode in red light bulb",
+            "connect anode in red light bulb to workshop",
+            "connect workshop to anode in red light bulb",
+            "connect cathode in red light bulb to workshop",
+            "move red light bulb to workshop",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    relation_frontier = summary["relation_frontier"]
+    assert relation_frontier["commit_ready"] is True
+    assert (
+        "connect anode in red light bulb to workshop"
+        in relation_frontier["commit_candidates"]
+    )
+    assert shortlist[:2] == [
+        "connect anode in red light bulb to workshop",
+        "connect workshop to anode in red light bulb",
+    ]
+    assert "look at anode in red light bulb" not in shortlist
+    assert "look at cathode in red light bulb" not in shortlist
+
+
 def test_irrelevant_device_control_does_not_become_promising_from_state_change(
     tmp_path,
 ):
