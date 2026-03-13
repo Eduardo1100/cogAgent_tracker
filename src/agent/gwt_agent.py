@@ -8552,6 +8552,15 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             score -= 10
         if (
+            self._measurement_property_requires_event(task_contract)
+            and not property_resolved
+            and family == "tool_application"
+            and instrument_primary_match
+            and touches_active_enclosure
+            and not subject_matches_target
+        ):
+            score -= 28 if not self._measurement_property_event_observed else 18
+        if (
             normalized in self._invalid_exact_actions
             and self._invalid_exact_actions[normalized] > 0
         ):

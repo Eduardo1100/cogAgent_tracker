@@ -3579,8 +3579,75 @@ def test_measurement_shortlist_prefers_enclosure_activation_before_proxy_reads(
     assert summary["current_phase"] == "induce_property_change"
     assert summary["measurement_tracking"]["active_enclosure"] == ["oven"]
     assert shortlist[0] == "activate oven"
-    assert shortlist.index("activate oven") < shortlist.index("use thermometer on oven")
+    assert "use thermometer on oven" not in shortlist
     assert "mix solid unknown substance c" not in shortlist
+
+
+def test_measurement_shortlist_deprioritizes_proxy_enclosure_reads_before_transition(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to measure the melting point of solid unknown substance C, "
+        "which is located around the kitchen. First, focus on the thermometer. "
+        "Next, focus on the solid unknown substance C. If the melting point of "
+        "solid unknown substance C is above 150.0 degrees celsius, focus on the "
+        "orange box. If the melting point of solid unknown substance C is below "
+        "150.0 degrees celsius, focus on the yellow box."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "This room is called the kitchen. In it, you see the agent, a stove, "
+            "a thermometer, a lighter, solid unknown substance C, an orange box, "
+            "and a yellow box."
+        )
+    }
+    agent._update_ordered_target_progress(
+        executed_action="focus on thermometer",
+        observation="You focus on the thermometer.",
+    )
+    agent._update_ordered_target_progress(
+        executed_action="focus on solid unknown substance c",
+        observation="You focus on the solid unknown substance C.",
+    )
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 10 degrees celsius",
+    )
+    agent._update_measurement_tracking(
+        action="move solid unknown substance c to stove",
+        observation="You move the solid unknown substance C to the stove.",
+    )
+    agent._update_measurement_tracking(
+        action="activate stove",
+        observation="The stove is now activated.",
+    )
+    agent.percept = {
+        "resulting_observation": "the thermometer measures a temperature of 58 degrees celsius"
+    }
+    agent._update_measurement_tracking(
+        action="use thermometer on solid unknown substance c",
+        observation="the thermometer measures a temperature of 58 degrees celsius",
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "use thermometer on stove",
+            "use lighter on stove",
+            "look at stove",
+            "look in stove",
+            "open oven",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert summary["current_phase"] == "induce_property_change"
+    assert summary["measurement_tracking"]["active_enclosure"] == ["stove"]
+    assert shortlist[0] == "use lighter on stove"
+    assert "use thermometer on stove" not in shortlist[:2]
 
 
 def test_measurement_shortlist_escalates_to_powered_heating_setup_before_repeats(
