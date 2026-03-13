@@ -14,6 +14,10 @@ import yaml
 from autogen.oai.client import OpenAIClient
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
@@ -480,34 +484,73 @@ def _format_chat_history(messages: list[dict], *, note: str | None = None) -> st
     return "\n".join(lines) + "\n"
 
 
-def _synthesize_analyst_trace_from_messages(messages: list[dict]) -> str:
+def _synthesize_analyst_trace_from_messages(
+    messages: list[dict], *, styles: bool = False
+) -> str:
     if not messages:
         return ""
+    console = Console(
+        record=True,
+        width=140,
+        soft_wrap=True,
+        force_terminal=styles,
+        color_system="truecolor" if styles else None,
+    )
+    console.print(
+        Panel(
+            Text(
+                "Fallback analyst trace reconstructed from stored group-chat messages. "
+                "Use this when the structured per-step runtime trace is unavailable."
+            ),
+            title="[bold bright_white]Analyst Trace Fallback[/bold bright_white]",
+            border_style="bright_white",
+        )
+    )
 
-    rendered_entries: list[str] = []
     for idx, message in enumerate(messages, start=1):
         if isinstance(message, dict):
             name = str(message.get("name") or message.get("role") or "unknown")
-            content = str(message.get("content") or "").strip()
+            role = str(message.get("role") or "unknown")
+            content_value = message.get("content")
+            metadata = {
+                key: value
+                for key, value in message.items()
+                if key not in {"name", "role", "content"}
+            }
         else:
             name = "unknown"
-            content = str(message).strip()
+            role = "unknown"
+            content_value = message
+            metadata = {}
 
-        content = re.sub(r"\s+", " ", content)
-        if len(content) > 260:
-            content = content[:257].rstrip() + "..."
+        if isinstance(content_value, str):
+            content = content_value.rstrip() or "[empty]"
+        elif content_value in (None, ""):
+            content = "[empty]"
+        else:
+            content = json.dumps(content_value, indent=2, sort_keys=True, default=str)
 
-        rendered_entries.append(
-            "\n".join(
-                [
-                    f"T{idx} | transcript | unknown",
-                    f"Speaker: {name}",
-                    f"Content: {content or '[empty]'}",
-                ]
+        table = Table(expand=True, show_header=False, box=None)
+        table.add_column("key", style="bold yellow", width=18)
+        table.add_column("value", style="white")
+        table.add_row(Text("speaker"), Text(name))
+        table.add_row(Text("role"), Text(role))
+        table.add_row(Text("raw_content"), Text(content))
+        if metadata:
+            table.add_row(
+                Text("metadata"),
+                Text(json.dumps(metadata, indent=2, sort_keys=True, default=str)),
+            )
+
+        console.print(
+            Panel(
+                table,
+                title=f"[bold cyan]T{idx} | transcript | {role}[/bold cyan]",
+                border_style="cyan",
             )
         )
 
-    return "\n\n".join(rendered_entries) + "\n"
+    return console.export_text(styles=styles)
 
 
 def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) -> dict:
@@ -531,11 +574,27 @@ def persist_chat_artifacts(agent, *, chat_result=None, note: str | None = None) 
     _write_text_file(chat_history_path, chat_text)
 
     analyst_trace_path = log_paths.get("analyst_trace_path")
+    analyst_trace_ansi_path = log_paths.get("analyst_trace_ansi_path")
     analyst_trace = get_agent_analyst_trace_text(agent, prefer_existing=True)
+    analyst_trace_ansi = ""
     if not analyst_trace:
-        analyst_trace = _synthesize_analyst_trace_from_messages(messages)
+        analyst_trace = _synthesize_analyst_trace_from_messages(messages, styles=False)
+        analyst_trace_ansi = _synthesize_analyst_trace_from_messages(
+            messages, styles=True
+        )
+    else:
+        getter = getattr(agent, "get_analyst_trace_ansi_text", None)
+        if callable(getter):
+            try:
+                analyst_trace_ansi = getter()
+            except Exception as exc:
+                print(
+                    f"⚠️ Analyst-trace ANSI collection failed from agent runtime: {exc}"
+                )
     if analyst_trace_path and analyst_trace:
         _write_text_file(analyst_trace_path, analyst_trace)
+    if analyst_trace_ansi_path and analyst_trace_ansi:
+        _write_text_file(analyst_trace_ansi_path, analyst_trace_ansi)
 
     transitions, belief_matches = extract_chat_metadata(chat_text)
     transition_path = os.path.join(

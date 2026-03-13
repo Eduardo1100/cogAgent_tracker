@@ -229,11 +229,34 @@ def test_register_log_paths_switches_to_adapter_environment(tmp_path):
     assert Path(agent.log_paths["memory2_path"]) == alfworld_dir / "memory2.txt"
 
 
-def test_analyst_trace_is_written_compactly_and_exposed_via_getter(tmp_path):
+def test_analyst_trace_is_written_as_structured_text_and_exposed_via_getter(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     analyst_trace_path = tmp_path / "game_1" / "analyst_trace.txt"
+    analyst_trace_ansi_path = tmp_path / "game_1" / "analyst_trace.ansi"
     analyst_trace_path.parent.mkdir(parents=True, exist_ok=True)
-    agent.log_paths = {"analyst_trace_path": str(analyst_trace_path)}
+    agent.log_paths = {
+        "analyst_trace_path": str(analyst_trace_path),
+        "analyst_trace_ansi_path": str(analyst_trace_ansi_path),
+    }
+    agent.group_chat = SimpleNamespace(
+        messages=[
+            {
+                "name": "Belief_State_Agent",
+                "role": "assistant",
+                "content": "BELIEF STATE: I have grounded the blue seed and still need evidence about the unknown plant.",
+            },
+            {
+                "name": "Thinking_Agent",
+                "role": "assistant",
+                "content": "We should inspect the flower pot before committing to a branch box.",
+            },
+            {
+                "name": "Action_Agent",
+                "role": "assistant",
+                "content": "focus on blue seed",
+            },
+        ]
+    )
     agent.percept = {
         "timestep": 2,
         "attempted_action": "focus on blue seed",
@@ -268,9 +291,33 @@ def test_analyst_trace_is_written_compactly_and_exposed_via_getter(tmp_path):
 
     trace_text = analyst_trace_path.read_text()
     assert "T2 | gather_branch_evidence | INCOMPLETE" in trace_text
-    assert "Action: focus on blue seed" in trace_text
-    assert "Top actions: focus on blue seed | look at flower pot" in trace_text
-    assert "conditional_branch" in trace_text
+    assert "How To Read The Cognitive Architecture" in trace_text
+    assert "Runtime Glossary" in trace_text
+    assert "Action + Observation" in trace_text
+    assert "attempted_action" in trace_text
+    assert "observation" in trace_text
+    assert "Execute Action Percept (Full)" in trace_text
+    assert "Belief State" in trace_text
+    assert "BELIEF STATE: I have grounded the blue seed" in trace_text
+    assert "Other Agent Outputs" in trace_text
+    assert (
+        "We should inspect the flower pot before committing to a branch box."
+        in trace_text
+    )
+    assert '"attempted_action": "focus on blue seed"' in trace_text
+    assert (
+        '"resulting_observation": "You focus on the blue seed in the flower pot and notice nothing else changes."'
+        in trace_text
+    )
+    assert "Task-Relevant Action Shortlist" in trace_text
+    assert "focus on blue seed" in trace_text
+    assert "look at flower pot" in trace_text
+    assert "Runtime Snapshots" in trace_text
+    assert (
+        "conditional_branch_tracking" in trace_text
+        or "conditional_branch" in trace_text
+    )
+    assert analyst_trace_ansi_path.read_text()
     assert agent.get_analyst_trace_text() == trace_text
 
 

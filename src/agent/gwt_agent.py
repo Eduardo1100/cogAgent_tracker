@@ -10,6 +10,10 @@ import umap
 from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function
 from autogen.agentchat.contrib.capabilities import transform_messages
 from autogen.agentchat.contrib.capabilities.transforms import MessageHistoryLimiter
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
@@ -28,6 +32,347 @@ from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_e
 class GWTAutogenAgent(AutogenAgent):
     _AGENT_DIR = Path(__file__).resolve().parent
     _MEMORY_ROOT = _AGENT_DIR / "memory"
+    _ANALYST_AGENT_GUIDE = {
+        "Belief_State_Agent": (
+            "Maintains the first-person world model from the latest percept. "
+            "It should explain what the agent currently believes is true, uncertain, "
+            "or newly discovered."
+        ),
+        "Thinking_Agent": (
+            "Turns the current belief state into a tactic or hypothesis. "
+            "It proposes what kind of evidence or action family should come next."
+        ),
+        "Action_Agent": (
+            "Chooses the exact environment action to try next, ideally from the "
+            "task-relevant admissible shortlist."
+        ),
+        "External_Perception_Agent": (
+            "Executes the chosen action and returns the raw environment-facing result."
+        ),
+        "Focus_Agent": (
+            "Recovery path used when the belief-state format or internal reasoning "
+            "drifts. It helps re-anchor the cognitive loop."
+        ),
+        "Learning_Agent": (
+            "Summarizes reusable lessons after success or failure without turning them "
+            "into environment-specific hardcoded rules."
+        ),
+        "Retrieve_Memory_Agent": (
+            "Fetches relevant prior concepts or episodic traces to support the current task."
+        ),
+    }
+    _ANALYST_TERM_GLOSSARY = {
+        "task_contract": (
+            "Runtime decomposition of the task into goals, roles, and control signals.",
+            "required_families, support_families, primary_targets, supporting_targets",
+            "This is the architecture's high-level interpretation of what must be solved.",
+        ),
+        "required_families": (
+            "Action families the task explicitly requires, such as focus or connect.",
+            "task_contract, support_families",
+            "These stay protected from premature retirement because the task text named them.",
+        ),
+        "support_families": (
+            "Action families that usually help gather evidence, such as inspect.",
+            "task_contract, required_families",
+            "These support the main task but are not themselves the end goal.",
+        ),
+        "target_entities": (
+            "General task-relevant nouns or phrases extracted from the instruction.",
+            "primary_targets, supporting_targets, target_substances",
+            "These help shortlist scoring stay semantically tied to the task.",
+        ),
+        "ordering_cues": (
+            "Signals that the task has an order, such as earliest-to-latest or before/after.",
+            "procedural_sequence, lifecycle_sequence, ordered_target_progress",
+            "These determine whether the architecture should sequence actions or evidence.",
+        ),
+        "procedural_sequence": (
+            "Task-level cue that one step must happen before another, without implying an ordered object list.",
+            "ordering_cues, required_families",
+            "Used to preserve task step order without confusing it with lifecycle progression.",
+        ),
+        "lifecycle_sequence": (
+            "Task-level cue that the agent is reasoning over ordered stages of a lifecycle.",
+            "ordering_cues, ordered_target_progress, growth_task",
+            "Used for stage-aware focus tasks where the order is over biological or process stages.",
+        ),
+        "growth_task": (
+            "Flag that the task likely requires creating, growing, or revealing a living/process outcome first.",
+            "lifecycle_sequence, conditional_branch_task, evidence_target",
+            "Keeps precursor-generation steps active before the agent branches or commits.",
+        ),
+        "state_change_task": (
+            "Flag that the task is about changing the state of a target substance or object.",
+            "target_substances, desired_transformation, transformation_direction, substance_search",
+            "Routes the controller into substance search and transformation phases.",
+        ),
+        "artifact_creation_task": (
+            "Flag that the task is about constructing or mixing a target artifact from ingredients.",
+            "artifact_creation, artifact_type, artifact_intermediate_targets, artifact_final_targets",
+            "Keeps artifact type and ingredient gaps central to planning.",
+        ),
+        "measurement_task": (
+            "Flag that the task is about measuring a target property before acting on it.",
+            "measurement_tracking, measurement_property, measurement_target, measurement_instrument",
+            "Routes the controller into instrument search, measurement, and branch gating.",
+        ),
+        "comparison_task": (
+            "Flag that the task requires comparing multiple targets before choosing or acting.",
+            "comparison_tracking, comparison_subject, comparison_targets",
+            "Prevents the agent from collapsing compared targets into a single winner too early.",
+        ),
+        "search_mode": (
+            "Explicit task-level instruction that the agent should search for something first.",
+            "inferred_search_mode, primary_targets, candidate_classes",
+            "This comes directly from the task text.",
+        ),
+        "inferred_search_mode": (
+            "Architecture inference that search is needed because the named target is not yet grounded.",
+            "search_mode, primary_targets, remote_room_signal",
+            "Lets the agent search even when the task never literally says find or locate.",
+        ),
+        "relation_mechanism_task": (
+            "Flag that the task depends on building or testing a local relation mechanism, such as a circuit or support graph.",
+            "relation_frontier, required_relations, supporting_targets",
+            "Prunes huge relation spaces down to the active grounded mechanism.",
+        ),
+        "conditional_branch_task": (
+            "Flag that the task has multiple possible outcomes and requires evidence before choosing one.",
+            "conditional_branch_tracking, evidence_target, branch_ready, destination_container",
+            "Keeps branch-target actions suppressed until the evidence actually resolves the branch.",
+        ),
+        "candidate_classes": (
+            "Generic class labels for search tasks, such as living thing or non-living thing.",
+            "candidate_tracking, primary_targets, inferred_search_mode",
+            "These let the agent pivot between grounded candidates without hardcoded object lists.",
+        ),
+        "primary_targets": (
+            "The main objects or entities the task is directly about.",
+            "target_entities, supporting_targets, candidate_classes",
+            "The search, focus, and branch logic should stay anchored to these.",
+        ),
+        "supporting_targets": (
+            "Objects or locations that enable the main task without being the final subject.",
+            "primary_targets, destination_container, destination_room, measurement_instrument",
+            "Examples include destination containers, rooms, tools, or evidence sources.",
+        ),
+        "target_substances": (
+            "Task-compatible substances the state-change controller is searching for or manipulating.",
+            "state_change_task, desired_transformation, substance_search",
+            "These keep the search focused on the right matter instead of unrelated visible substances.",
+        ),
+        "artifact_type": (
+            "The type of artifact the task is trying to create, such as paint or mixture.",
+            "artifact_creation_task, artifact_intermediate_targets, artifact_final_targets",
+            "This protects the agent from adjective-only distractors of the wrong type.",
+        ),
+        "artifact_intermediate_targets": (
+            "Intermediate artifact states or products that may need to exist before the final artifact.",
+            "artifact_type, artifact_final_targets, artifact_creation",
+            "These make multi-step creation tasks explicit instead of collapsing them into one jump.",
+        ),
+        "artifact_final_targets": (
+            "The final artifact outcome the task wants produced or verified.",
+            "artifact_type, artifact_intermediate_targets, supporting_targets",
+            "This is the creation-task end state after ingredients and transformations are resolved.",
+        ),
+        "artifact_descriptor_tokens": (
+            "Descriptors such as colors or modifiers attached to the artifact target.",
+            "artifact_type, target_entities",
+            "These should refine the artifact target, not replace the artifact type itself.",
+        ),
+        "measurement_property": (
+            "The property the task wants measured or inferred, such as temperature or melting point.",
+            "measurement_task, measurement_property_type, measurement_target",
+            "This is the semantic property that must be resolved before acting on measurement branches.",
+        ),
+        "measurement_property_type": (
+            "Architecture classification of the property, such as instantaneous state or stable threshold property.",
+            "measurement_property, branch_ready, measurement_tracking",
+            "This controls whether a raw measurement is enough or whether more evidence is required.",
+        ),
+        "measurement_target": (
+            "The entity whose property is being measured.",
+            "measurement_task, measurement_instrument, measurement_tracking",
+            "This is the true evidence-bearing object for measurement tasks.",
+        ),
+        "measurement_instrument": (
+            "The tool or device used to obtain measurement evidence.",
+            "measurement_target, measurement_tracking, supporting_targets",
+            "This can become its own search frontier when the instrument is not yet grounded.",
+        ),
+        "measurement_branch_targets": (
+            "Branch outcomes that become relevant after the measured property crosses or resolves a threshold.",
+            "measurement_branches, branch_ready, destination_container",
+            "These stay suppressed until the measurement controller resolves the relevant property.",
+        ),
+        "measurement_branches": (
+            "Explicit branch rules derived from the task for measurement outcomes.",
+            "measurement_branch_targets, measurement_property, branch_ready",
+            "These connect evidence about a property to the actions that should follow.",
+        ),
+        "comparison_subject": (
+            "The shared attribute or substance being compared across multiple targets.",
+            "comparison_targets, comparison_property, comparison_tracking",
+            "This anchors the comparison to a common basis instead of letting targets drift apart semantically.",
+        ),
+        "comparison_property": (
+            "The property used to decide which compared target wins.",
+            "comparison_subject, comparison_direction, comparison_tracking",
+            "This tells the architecture what evidence should settle the comparison.",
+        ),
+        "comparison_direction": (
+            "The direction of the comparison, such as hotter, larger, or more conductive.",
+            "comparison_property, comparison_targets",
+            "This determines what kind of evidence counts as better or worse in the comparison.",
+        ),
+        "comparison_targets": (
+            "The entities being compared before one is selected.",
+            "comparison_subject, comparison_tracking, selected_target",
+            "These remain separate until the comparison evidence resolves the winner.",
+        ),
+        "conditional_branch_subject": (
+            "The entity whose trait or property determines which branch should be chosen.",
+            "conditional_branch_evidence_target, conditional_branch_targets, evidence_subject",
+            "This is the thing being tested before the architecture commits to a branch target.",
+        ),
+        "conditional_branch_evidence_target": (
+            "The evidence-bearing object or phenomenon used to resolve a conditional branch.",
+            "conditional_branch_subject, evidence_target, conditional_branch_tracking",
+            "This keeps branch reasoning tied to what must actually be observed.",
+        ),
+        "conditional_branch_targets": (
+            "The possible task outcomes that become available once branch evidence resolves.",
+            "conditional_branch_tracking, selected_branch, branch_ready",
+            "These remain inactive until the evidence target resolves the branch.",
+        ),
+        "conditional_branches": (
+            "The parsed mapping from evidence condition to branch outcome.",
+            "conditional_branch_targets, evidence_target, destination_container",
+            "This is the explicit branch logic extracted from the task.",
+        ),
+        "destination_container": (
+            "A container destination the task wants the target placed into after evidence or search is resolved.",
+            "supporting_targets, conditional_branch_targets, candidate_tracking",
+            "This is a support role, not normally a primary focus target.",
+        ),
+        "destination_room": (
+            "A room destination the task wants the target moved to or verified in.",
+            "supporting_targets, remote_room_signal, candidate_tracking",
+            "This stays a support location unless the task explicitly makes it the main target.",
+        ),
+        "required_relations": (
+            "Named relations or connectors the task implies, such as circuit or anode/cathode links.",
+            "relation_mechanism_task, relation_frontier",
+            "These constrain relation-building to the intended mechanism family.",
+        ),
+        "desired_transformation": (
+            "The state or process change the target substance or object should undergo.",
+            "state_change_task, transformation_direction, target_substances",
+            "This is the transformation goal that guides probe and verification phases.",
+        ),
+        "transformation_direction": (
+            "The directional hint for a state change, such as heat up, cool down, melt, or freeze.",
+            "desired_transformation, state_change_task, measurement_tracking",
+            "This biases which tools, devices, or interventions look plausible.",
+        ),
+        "candidate_tracking": (
+            "Episode-local memory of which candidate object is currently being pursued.",
+            "candidate_classes, destination_container, destination_room",
+            "Used for search-and-place tasks so the agent can reacquire or pivot cleanly.",
+        ),
+        "ordered_target_progress": (
+            "Episode-local progress tracker for ordered focus tasks.",
+            "lifecycle_sequence, growth_task, primary_targets",
+            "This tracks what ordered stage or target has already been resolved.",
+        ),
+        "substance_search": (
+            "State-change search controller for finding and probing the target substance.",
+            "target_substances, desired_transformation, source_candidates",
+            "It separates locating the substance from changing or verifying its state.",
+        ),
+        "artifact_creation": (
+            "Creation-task controller for building a target artifact from ingredients or reagents.",
+            "artifact_creation_task, artifact_type, grounded_artifacts",
+            "It keeps artifact type distinct from distracting descriptors like color.",
+        ),
+        "measurement_tracking": (
+            "Measurement-task controller for instrument search, target measurement, and branch gating.",
+            "measurement_property, measurement_target, branch_ready",
+            "It distinguishes raw measurements from the task property that must be inferred.",
+        ),
+        "comparison_tracking": (
+            "Comparison-task controller for evidence gathering across multiple targets.",
+            "comparison_subject, comparison_targets, selected_target",
+            "It preserves compared subjects separately from the final target to act on.",
+        ),
+        "conditional_branch_tracking": (
+            "Branch controller for tasks that require evidence before committing to one outcome.",
+            "conditional_branch_subject, evidence_target, selected_branch, branch_ready",
+            "It keeps the branch target inactive until evidence resolves the branch.",
+        ),
+        "evidence_target": (
+            "The object or phenomenon the agent must observe to resolve a branch or comparison.",
+            "conditional_branch_evidence_target, comparison_subject, branch_ready",
+            "The architecture should gather evidence here before committing downstream actions.",
+        ),
+        "evidence_subject": (
+            "Human-readable alias for the evidence-bearing target in a branching or comparison task.",
+            "conditional_branch_subject, evidence_target",
+            "If this appears, read it as the thing whose observed property decides the next step.",
+        ),
+        "relation_frontier": (
+            "Local mechanism graph for relation-building tasks such as circuits or support structures.",
+            "relation_mechanism_task, required_relations, control_candidates",
+            "It prunes the enormous relation space down to the currently grounded mechanism.",
+        ),
+        "remote_room_signal": (
+            "Memory that a remote inspection revealed task-relevant evidence in another room.",
+            "destination_room, inferred_search_mode, candidate_tracking",
+            "Used to bias travel/opening decisions without confusing remote evidence with current location.",
+        ),
+        "referent_resolution": (
+            "Record of how a suggested action was canonicalized or ambiguously mapped to an environment referent.",
+            "requested_action, canonicalized_action",
+            "This prevents the architecture from silently learning the wrong object identity.",
+        ),
+        "branch_ready": (
+            "Whether the evidence required to commit to a branch has actually been resolved.",
+            "conditional_branch_tracking, measurement_tracking, selected_branch",
+            "If false, branch-target actions should stay suppressed.",
+        ),
+        "selected_branch": (
+            "The currently resolved branch target after evidence has been interpreted.",
+            "conditional_branch_targets, branch_ready, destination_container",
+            "This is the branch the agent should now commit to.",
+        ),
+        "selected_target": (
+            "The currently resolved winner of a comparison task.",
+            "comparison_targets, comparison_tracking",
+            "This is the target that comparison evidence selected.",
+        ),
+        "source_candidates": (
+            "Objects or fixtures that look like plausible sources for a substance or state-change interaction.",
+            "substance_search, target_substances, desired_transformation",
+            "These are the next likely places to probe when the target substance is still missing.",
+        ),
+        "grounded_substances": (
+            "Substance labels explicitly grounded in observations during the current episode.",
+            "target_substances, substance_search",
+            "These prevent the agent from inventing ungrounded substance names.",
+        ),
+        "grounded_artifacts": (
+            "Artifact labels explicitly grounded in observations during the current episode.",
+            "artifact_type, artifact_creation",
+            "These anchor creation logic to real observed objects instead of lexical lookalikes.",
+        ),
+        "control_candidates": (
+            "Objects in a local mechanism that might mediate activation or state changes, such as switches or powered devices.",
+            "relation_frontier, measurement_tracking",
+            "These become important after a direct mechanism setup still fails to produce the target effect.",
+        ),
+    }
     _TASK_STOPWORDS = {
         "a",
         "about",
@@ -847,6 +1192,8 @@ class GWTAutogenAgent(AutogenAgent):
         self._admissible_summary_cache: dict[tuple[tuple[str, ...], int], dict] = {}
         self._analyst_trace_entries: list[dict] = []
         self._last_analyst_trace_text = ""
+        self._last_analyst_trace_ansi_text = ""
+        self._analyst_trace_message_cursor = 0
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -10108,11 +10455,100 @@ class GWTAutogenAgent(AutogenAgent):
         return snapshots
 
     @staticmethod
-    def _truncate_analyst_text(text: str, *, limit: int = 220) -> str:
-        compact = re.sub(r"\s+", " ", (text or "")).strip()
-        if len(compact) <= limit:
-            return compact
-        return compact[: limit - 3].rstrip() + "..."
+    def _snapshot_analyst_payload(value):
+        return json.loads(json.dumps(value, default=str))
+
+    @staticmethod
+    def _indent_analyst_text(text: str, *, prefix: str = "  ") -> str:
+        if not text:
+            return f"{prefix}[empty]"
+        return "\n".join(
+            f"{prefix}{line}" if line else prefix.rstrip()
+            for line in str(text).splitlines()
+        )
+
+    def _render_analyst_section(self, title: str, body) -> str:
+        lines = [title, "-" * len(title)]
+        if isinstance(body, str):
+            rendered = body
+        elif isinstance(body, (dict, list)):
+            rendered = json.dumps(body, indent=2, sort_keys=True)
+        elif body is None:
+            rendered = "[empty]"
+        else:
+            rendered = str(body)
+        lines.append(self._indent_analyst_text(rendered))
+        return "\n".join(lines)
+
+    def _render_analyst_list_section(self, title: str, items: list[str]) -> str:
+        lines = [title, "-" * len(title)]
+        if not items:
+            lines.append("  [none]")
+            return "\n".join(lines)
+        lines.extend(f"  {idx}. {item}" for idx, item in enumerate(items, start=1))
+        return "\n".join(lines)
+
+    def _get_recent_analyst_messages(self) -> list[dict]:
+        group_chat = getattr(self, "group_chat", None)
+        messages = getattr(group_chat, "messages", None) or []
+        if self._analyst_trace_message_cursor >= len(messages):
+            self._analyst_trace_message_cursor = len(messages)
+            return []
+        recent_messages = [
+            self._snapshot_analyst_payload(message)
+            for message in messages[self._analyst_trace_message_cursor :]
+        ]
+        self._analyst_trace_message_cursor = len(messages)
+        return recent_messages
+
+    def _render_analyst_messages_section(self, title: str, messages: list[dict]) -> str:
+        lines = [title, "-" * len(title)]
+        if not messages:
+            lines.append("  [none]")
+            return "\n".join(lines)
+
+        for idx, message in enumerate(messages, start=1):
+            name = str(message.get("name") or message.get("role") or "unknown")
+            role = str(message.get("role") or "unknown")
+            content = message.get("content")
+            metadata = {
+                key: value
+                for key, value in message.items()
+                if key not in {"name", "role", "content"}
+            }
+            if isinstance(content, str):
+                rendered_content = content or "[empty]"
+            elif content is None:
+                rendered_content = "[empty]"
+            else:
+                rendered_content = json.dumps(
+                    content, indent=2, sort_keys=True, default=str
+                )
+
+            lines.extend(
+                [
+                    f"  [{idx}] {name}",
+                    f"    role: {role}",
+                    "    content:",
+                    *(
+                        f"      {line}" if line else ""
+                        for line in rendered_content.splitlines()
+                    ),
+                ]
+            )
+            if metadata:
+                lines.extend(
+                    [
+                        "    metadata:",
+                        *(
+                            f"      {line}"
+                            for line in json.dumps(
+                                metadata, indent=2, sort_keys=True, default=str
+                            ).splitlines()
+                        ),
+                    ]
+                )
+        return "\n".join(lines)
 
     def _get_analyst_runtime_snapshots(self, summary: dict) -> dict:
         snapshots = {}
@@ -10192,47 +10628,267 @@ class GWTAutogenAgent(AutogenAgent):
 
         return self._limit_runtime_payload(snapshots, list_limit=3)
 
-    def _render_analyst_trace_entry(self, entry: dict) -> str:
-        lines = [
-            f"T{entry['timestep']} | {entry['phase']} | {entry['task_status']}",
-            f"Action: {entry['attempted_action']}",
-            f"Observation: {entry['observation']}",
-        ]
-        if entry["salient_entities"]:
-            lines.append(f"Salient: {', '.join(entry['salient_entities'])}")
-        if entry["shortlist"]:
-            lines.append(f"Top actions: {' | '.join(entry['shortlist'])}")
-        if entry["runtime"]:
-            lines.append(f"Runtime: {json.dumps(entry['runtime'], sort_keys=True)}")
-        return "\n".join(lines)
+    @staticmethod
+    def _render_analyst_value(value) -> str:
+        if isinstance(value, str):
+            return value or "[empty]"
+        if value in (None, [], {}):
+            return "[empty]"
+        return json.dumps(value, indent=2, sort_keys=True, default=str)
 
-    def _render_analyst_trace(self) -> str:
-        if not self._analyst_trace_entries:
-            return ""
-        return (
-            "\n\n".join(
-                self._render_analyst_trace_entry(entry)
-                for entry in self._analyst_trace_entries
-            )
-            + "\n"
+    def _build_analyst_architecture_overview(self) -> Panel:
+        table = Table(expand=True, box=None, show_header=True, header_style="bold cyan")
+        table.add_column("Component", style="bold yellow", ratio=1)
+        table.add_column("Purpose In The Cognitive Loop", style="white", ratio=3)
+        for component, description in self._ANALYST_AGENT_GUIDE.items():
+            table.add_row(component, description)
+        return Panel(
+            table,
+            title="[bold bright_blue]How To Read The Cognitive Architecture[/bold bright_blue]",
+            border_style="bright_blue",
         )
 
+    def _collect_analyst_glossary_terms(self) -> list[str]:
+        return sorted(self._ANALYST_TERM_GLOSSARY)
+
+    def _build_analyst_glossary(self) -> Panel | None:
+        terms = self._collect_analyst_glossary_terms()
+        if not terms:
+            return None
+        table = Table(
+            expand=True,
+            show_lines=True,
+            header_style="bold magenta",
+        )
+        table.add_column("Term", style="bold yellow", width=28)
+        table.add_column("Meaning", style="white", ratio=2)
+        table.add_column("Related Terms", style="green", ratio=2)
+        table.add_column("How It Fits The Architecture", style="cyan", ratio=3)
+        for term in terms:
+            meaning, related_terms, role = self._ANALYST_TERM_GLOSSARY[term]
+            table.add_row(term, meaning, related_terms, role)
+        return Panel(
+            table,
+            title="[bold magenta]Runtime Glossary[/bold magenta]",
+            border_style="magenta",
+        )
+
+    def _build_analyst_key_value_panel(
+        self,
+        *,
+        title: str,
+        rows: list[tuple[str, str]],
+        border_style: str = "cyan",
+    ) -> Panel:
+        table = Table(expand=True, box=None, show_header=False)
+        table.add_column("key", style="bold yellow", width=24)
+        table.add_column("value", style="white")
+        for key, value in rows:
+            table.add_row(Text(str(key)), Text(str(value)))
+        return Panel(table, title=title, border_style=border_style)
+
+    def _build_analyst_message_panel(
+        self,
+        *,
+        title: str,
+        messages: list[dict],
+        border_style: str,
+    ) -> Panel:
+        if not messages:
+            return Panel("[dim][none][/dim]", title=title, border_style=border_style)
+        table = Table(expand=True, show_lines=True)
+        table.add_column("Agent", style="bold yellow", width=24)
+        table.add_column("Role", style="cyan", width=14)
+        table.add_column("Output", style="white", ratio=4)
+        for message in messages:
+            name = str(message.get("name") or message.get("role") or "unknown")
+            role = str(message.get("role") or "unknown")
+            content = self._render_analyst_value(message.get("content"))
+            metadata = {
+                key: value
+                for key, value in message.items()
+                if key not in {"name", "role", "content"}
+            }
+            if metadata:
+                content = f"{content}\n\nMetadata:\n" + json.dumps(
+                    metadata, indent=2, sort_keys=True, default=str
+                )
+            table.add_row(Text(name), Text(role), Text(content))
+        return Panel(table, title=title, border_style=border_style)
+
+    def _build_analyst_list_panel(
+        self,
+        *,
+        title: str,
+        items: list[str],
+        border_style: str,
+    ) -> Panel:
+        table = Table(expand=True, box=None, show_header=False)
+        table.add_column("#", style="bold cyan", width=4)
+        table.add_column("Item", style="white")
+        if not items:
+            table.add_row(Text("-"), Text("[none]"))
+        else:
+            for idx, item in enumerate(items, start=1):
+                table.add_row(Text(str(idx)), Text(item))
+        return Panel(table, title=title, border_style=border_style)
+
+    def _build_analyst_trace_entry_renderable(self, entry: dict) -> Panel:
+        belief_messages = [
+            message
+            for message in entry["agent_messages"]
+            if str(message.get("name") or "") == "Belief_State_Agent"
+        ]
+        other_agent_messages = [
+            message
+            for message in entry["agent_messages"]
+            if str(message.get("name") or "") != "Belief_State_Agent"
+        ]
+        status_style = {
+            "COMPLETED": "green",
+            "FAILED": "red",
+            "INCOMPLETE": "bright_blue",
+        }.get(entry["task_status"], "white")
+
+        renderables = [
+            self._build_analyst_key_value_panel(
+                title="[bold]Action + Observation[/bold]",
+                border_style=status_style,
+                rows=[
+                    ("timestep", str(entry["timestep"])),
+                    ("phase", entry["phase"]),
+                    ("task_status", entry["task_status"]),
+                    ("attempted_action", entry["attempted_action"]),
+                    ("observation", entry["observation"]),
+                ],
+            )
+        ]
+
+        if entry.get("task_contract"):
+            renderables.append(
+                Panel(
+                    Text(self._render_analyst_value(entry["task_contract"])),
+                    title="[bold]Task Contract[/bold]",
+                    border_style="yellow",
+                )
+            )
+
+        renderables.extend(
+            [
+                Panel(
+                    Text(self._render_analyst_value(entry["percept"])),
+                    title="[bold]Execute Action Percept (Full)[/bold]",
+                    border_style="bright_blue",
+                ),
+                self._build_analyst_message_panel(
+                    title="[bold]Belief State[/bold]",
+                    messages=belief_messages,
+                    border_style="green",
+                ),
+                self._build_analyst_message_panel(
+                    title="[bold]Other Agent Outputs[/bold]",
+                    messages=other_agent_messages,
+                    border_style="cyan",
+                ),
+                self._build_analyst_list_panel(
+                    title="[bold]Salient Entities[/bold]",
+                    items=entry["salient_entities"],
+                    border_style="magenta",
+                ),
+                self._build_analyst_list_panel(
+                    title="[bold]Task-Relevant Action Shortlist[/bold]",
+                    items=entry["shortlist"],
+                    border_style="yellow",
+                ),
+                Panel(
+                    Text(self._render_analyst_value(entry["runtime"])),
+                    title="[bold]Runtime Snapshots[/bold]",
+                    border_style="magenta",
+                ),
+            ]
+        )
+
+        if entry["newly_relevant_actions"]:
+            renderables.append(
+                self._build_analyst_list_panel(
+                    title="[bold]Newly Relevant Actions[/bold]",
+                    items=entry["newly_relevant_actions"],
+                    border_style="green",
+                )
+            )
+        if entry["no_longer_relevant_actions"]:
+            renderables.append(
+                self._build_analyst_list_panel(
+                    title="[bold]No Longer Relevant Actions[/bold]",
+                    items=entry["no_longer_relevant_actions"],
+                    border_style="red",
+                )
+            )
+
+        return Panel(
+            Group(*renderables),
+            title=(
+                f"[bold {status_style}]T{entry['timestep']} | "
+                f"{entry['phase']} | {entry['task_status']}[/bold {status_style}]"
+            ),
+            border_style=status_style,
+        )
+
+    def _render_analyst_trace(self, *, styles: bool = False) -> str:
+        if not self._analyst_trace_entries:
+            return ""
+
+        console = Console(
+            record=True,
+            width=140,
+            soft_wrap=True,
+            force_terminal=styles,
+            color_system="truecolor" if styles else None,
+        )
+        console.print(
+            Panel(
+                Text(
+                    "This trace is written for a human analyst. Read top-to-bottom: "
+                    "task interpretation, belief updates, supporting agent reasoning, "
+                    "the exact execute_action observation/percept, and the shortlist/runtime "
+                    "state that shaped the next move."
+                ),
+                title="[bold bright_white]Analyst Trace[/bold bright_white]",
+                border_style="bright_white",
+            )
+        )
+        console.print(self._build_analyst_architecture_overview())
+        glossary_panel = self._build_analyst_glossary()
+        if glossary_panel is not None:
+            console.print(glossary_panel)
+        for entry in self._analyst_trace_entries:
+            console.print(self._build_analyst_trace_entry_renderable(entry))
+        return console.export_text(styles=styles)
+
     def _persist_analyst_trace(self, *, summary: dict) -> None:
+        recent_messages = self._get_recent_analyst_messages()
         entry = {
             "timestep": self.percept.get("timestep", self.num_actions_taken),
             "phase": summary.get("current_phase", "act"),
             "task_status": self.percept.get("task_status", self.task_status),
-            "attempted_action": self._truncate_analyst_text(
-                self.percept.get("attempted_action", "None"),
-                limit=120,
+            "attempted_action": self.percept.get("attempted_action", "None"),
+            "observation": self.percept.get("resulting_observation", ""),
+            "percept": self._snapshot_analyst_payload(self.percept),
+            "task_contract": self._snapshot_analyst_payload(
+                self.percept.get("task_contract", {})
             ),
-            "observation": self._truncate_analyst_text(
-                self.percept.get("resulting_observation", ""),
-                limit=260,
+            "agent_messages": recent_messages,
+            "salient_entities": list(summary.get("salient_entities", [])[:6]),
+            "shortlist": list(summary.get("task_relevant_action_shortlist", [])[:8]),
+            "runtime": self._snapshot_analyst_payload(
+                self._get_analyst_runtime_snapshots(summary)
             ),
-            "salient_entities": summary.get("salient_entities", [])[:5],
-            "shortlist": summary.get("task_relevant_action_shortlist", [])[:5],
-            "runtime": self._get_analyst_runtime_snapshots(summary),
+            "newly_relevant_actions": list(
+                summary.get("newly_relevant_actions", [])[:6]
+            ),
+            "no_longer_relevant_actions": list(
+                summary.get("no_longer_relevant_actions", [])[:6]
+            ),
         }
 
         if (
@@ -10243,13 +10899,19 @@ class GWTAutogenAgent(AutogenAgent):
         else:
             self._analyst_trace_entries.append(entry)
 
-        text = self._render_analyst_trace()
+        text = self._render_analyst_trace(styles=False)
+        ansi_text = self._render_analyst_trace(styles=True)
         self._last_analyst_trace_text = text
+        self._last_analyst_trace_ansi_text = ansi_text
 
         analyst_trace_path = self.log_paths.get("analyst_trace_path")
         if analyst_trace_path:
             with open(analyst_trace_path, "w") as f:
                 f.write(text)
+        analyst_trace_ansi_path = self.log_paths.get("analyst_trace_ansi_path")
+        if analyst_trace_ansi_path:
+            with open(analyst_trace_ansi_path, "w") as f:
+                f.write(ansi_text)
 
         callback = getattr(self, "analyst_trace_callback", None)
         if callable(callback):
@@ -10283,6 +10945,15 @@ class GWTAutogenAgent(AutogenAgent):
         analyst_trace_path = self.log_paths.get("analyst_trace_path")
         if analyst_trace_path and os.path.exists(analyst_trace_path):
             with open(analyst_trace_path) as f:
+                return f.read()
+        return ""
+
+    def get_analyst_trace_ansi_text(self) -> str:
+        if self._last_analyst_trace_ansi_text:
+            return self._last_analyst_trace_ansi_text
+        analyst_trace_ansi_path = self.log_paths.get("analyst_trace_ansi_path")
+        if analyst_trace_ansi_path and os.path.exists(analyst_trace_ansi_path):
+            with open(analyst_trace_ansi_path) as f:
                 return f.read()
         return ""
 
@@ -11096,6 +11767,7 @@ class GWTAutogenAgent(AutogenAgent):
         admissible_commands_path = os.path.join(game_path, "admissible_commands.txt")
         chat_history_path = os.path.join(game_path, "chat_history.txt")
         analyst_trace_path = os.path.join(game_path, "analyst_trace.txt")
+        analyst_trace_ansi_path = os.path.join(game_path, "analyst_trace.ansi")
         result_path = os.path.join(game_path, "result.txt")
         error_message_path = os.path.join(game_path, "error_message.txt")
 
@@ -11107,6 +11779,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "admissible_commands_path": admissible_commands_path,
                 "chat_history_path": chat_history_path,
                 "analyst_trace_path": analyst_trace_path,
+                "analyst_trace_ansi_path": analyst_trace_ansi_path,
                 "result_path": result_path,
                 "error_message_path": error_message_path,
             }
