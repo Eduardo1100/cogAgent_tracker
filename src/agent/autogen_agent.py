@@ -98,9 +98,7 @@ class AutogenAgent:
     def resume_chat(self, last_message):
         def _resume():
             assert self.group_chat_manager is not None
-            last_agent, message = self.group_chat_manager.resume(
-                messages=last_message
-            )
+            last_agent, message = self.group_chat_manager.resume(messages=last_message)
             # Resume the chat using the last agent and message
             return last_agent.initiate_chat(
                 recipient=self.group_chat_manager,

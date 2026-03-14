@@ -3506,7 +3506,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["branch_ready"] = bool(self._selected_measurement_branch_target)
         return snapshot
 
-
     def _extract_comparison_primary_signature(self, action: str) -> str:
         normalized = self._normalize_runtime_text(action)
         if not normalized:
@@ -3798,7 +3797,6 @@ class GWTAutogenAgent(AutogenAgent):
             }
         return snapshot
 
-
     def _update_conditional_branch_tracking(
         self, *, action: str | None, observation: str
     ) -> None:
@@ -3893,7 +3891,6 @@ class GWTAutogenAgent(AutogenAgent):
             )
             if signature
         )
-
 
     def _should_probe_sources(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
@@ -5267,7 +5264,6 @@ class GWTAutogenAgent(AutogenAgent):
             "target_status": target_status,
         }
 
-
     def _primary_relation_component_is_grounded(
         self,
         *,
@@ -5483,7 +5479,6 @@ class GWTAutogenAgent(AutogenAgent):
         for tokens in role_token_sets.get("candidate_classes", []):
             match_tokens.update(tokens)
         return match_tokens
-
 
     def _matches_any_role(
         self, token_set: set[str], role_token_sets: list[set[str]]
@@ -6053,7 +6048,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["rejected_candidates"] = self._rejected_candidates[-3:]
         return snapshot
 
-
     def _extract_action_content_tokens(
         self, action: str, family: str | None = None
     ) -> list[str]:
@@ -6194,7 +6188,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["observed_stage_labels"] = self._observed_stage_labels[-6:]
             snapshot["pending_stage_candidates"] = pending_stage_candidates[:4]
         return snapshot
-
 
     def _get_recent_invalid_actions(self, *, limit: int = 4) -> list[str]:
         invalid_actions: list[str] = []
@@ -10376,17 +10369,23 @@ class GWTAutogenAgent(AutogenAgent):
             key: value for key, value in data.items() if value not in ({}, [], "", None)
         }
 
-    def _limit_runtime_payload(self, value, *, list_limit: int = 4, filter_false: bool = False):
+    def _limit_runtime_payload(
+        self, value, *, list_limit: int = 4, filter_false: bool = False
+    ):
         if isinstance(value, dict):
             limited = {
-                key: self._limit_runtime_payload(item, list_limit=list_limit, filter_false=filter_false)
+                key: self._limit_runtime_payload(
+                    item, list_limit=list_limit, filter_false=filter_false
+                )
                 for key, item in value.items()
             }
             exclude = ({}, [], "", None, False) if filter_false else ({}, [], "", None)
             return {key: item for key, item in limited.items() if item not in exclude}
         if isinstance(value, list):
             return [
-                self._limit_runtime_payload(item, list_limit=list_limit, filter_false=filter_false)
+                self._limit_runtime_payload(
+                    item, list_limit=list_limit, filter_false=filter_false
+                )
                 for item in value[:list_limit]
             ]
         return value
@@ -10422,10 +10421,14 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
     def _get_agent_facing_runtime_snapshot(self) -> dict:
-        return self._prune_empty_runtime_fields({
-            key: self._limit_runtime_payload(self.percept.get(key, {}), list_limit=limit)
-            for key, limit in self._RUNTIME_PERCEPT_KEYS
-        })
+        return self._prune_empty_runtime_fields(
+            {
+                key: self._limit_runtime_payload(
+                    self.percept.get(key, {}), list_limit=limit
+                )
+                for key, limit in self._RUNTIME_PERCEPT_KEYS
+            }
+        )
 
     def _get_agent_facing_percept_snapshot(self) -> dict:
         percept_snapshot = self._snapshot_analyst_payload(self.percept)
@@ -10446,7 +10449,9 @@ class GWTAutogenAgent(AutogenAgent):
         else:
             percept_snapshot.pop("admissible_action_summary", None)
         _runtime_key_set = {key for key, _ in self._RUNTIME_PERCEPT_KEYS}
-        percept_snapshot = {k: v for k, v in percept_snapshot.items() if k not in _runtime_key_set}
+        percept_snapshot = {
+            k: v for k, v in percept_snapshot.items() if k not in _runtime_key_set
+        }
         percept_snapshot.update(self._get_agent_facing_runtime_snapshot())
         if "task_relevant_action_shortlist" in percept_snapshot:
             percept_snapshot["task_relevant_action_shortlist"] = list(
