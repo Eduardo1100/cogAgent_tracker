@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import re
@@ -518,6 +519,20 @@ class GWTAutogenAgent(AutogenAgent):
         "use",
         "wait",
     }
+    _RUNTIME_PERCEPT_KEYS: tuple[tuple[str, int], ...] = (
+        ("ordered_target_progress", 3),
+        ("candidate_tracking", 3),
+        ("substance_search", 3),
+        ("artifact_creation", 3),
+        ("measurement_tracking", 3),
+        ("comparison_tracking", 3),
+        ("conditional_branch_tracking", 3),
+        ("relation_frontier", 3),
+        ("remote_room_signal", 3),
+        ("episode_hypothesis_ledger", 2),
+        ("referent_resolution", 3),
+        ("ambiguity_resolution", 3),
+    )
     _TASK_FAMILY_HINTS = {
         "focus": ("focus",),
         "inspect": ("inspect", "examine", "look at"),
@@ -2726,7 +2741,9 @@ class GWTAutogenAgent(AutogenAgent):
         return snapshot
 
     @staticmethod
-    def _artifact_creation_has_signal(snapshot: dict) -> bool:
+    def _snapshot_has_signal(snapshot: dict, *, key: str | None = None) -> bool:
+        if key is not None:
+            return bool(snapshot.get(key))
         return any(bool(value) for value in snapshot.values())
 
     def _get_grounded_substance_labels(self, *, limit: int = 6) -> list[str]:
@@ -3489,9 +3506,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["branch_ready"] = bool(self._selected_measurement_branch_target)
         return snapshot
 
-    @staticmethod
-    def _measurement_tracking_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _extract_comparison_primary_signature(self, action: str) -> str:
         normalized = self._normalize_runtime_text(action)
@@ -3784,9 +3798,6 @@ class GWTAutogenAgent(AutogenAgent):
             }
         return snapshot
 
-    @staticmethod
-    def _comparison_tracking_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _update_conditional_branch_tracking(
         self, *, action: str | None, observation: str
@@ -3883,13 +3894,6 @@ class GWTAutogenAgent(AutogenAgent):
             if signature
         )
 
-    @staticmethod
-    def _conditional_branch_tracking_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
-
-    @staticmethod
-    def _substance_search_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _should_probe_sources(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
@@ -5263,9 +5267,6 @@ class GWTAutogenAgent(AutogenAgent):
             "target_status": target_status,
         }
 
-    @staticmethod
-    def _relation_frontier_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _primary_relation_component_is_grounded(
         self,
@@ -5483,9 +5484,6 @@ class GWTAutogenAgent(AutogenAgent):
             match_tokens.update(tokens)
         return match_tokens
 
-    @staticmethod
-    def _remote_room_signal_has_signal(snapshot: dict) -> bool:
-        return bool(snapshot.get("room"))
 
     def _matches_any_role(
         self, token_set: set[str], role_token_sets: list[set[str]]
@@ -6055,9 +6053,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["rejected_candidates"] = self._rejected_candidates[-3:]
         return snapshot
 
-    @staticmethod
-    def _candidate_tracking_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _extract_action_content_tokens(
         self, action: str, family: str | None = None
@@ -6200,9 +6195,6 @@ class GWTAutogenAgent(AutogenAgent):
             snapshot["pending_stage_candidates"] = pending_stage_candidates[:4]
         return snapshot
 
-    @staticmethod
-    def _ordered_progress_has_signal(snapshot: dict) -> bool:
-        return any(bool(value) for value in snapshot.values())
 
     def _get_recent_invalid_actions(self, *, limit: int = 4) -> list[str]:
         invalid_actions: list[str] = []
@@ -9685,7 +9677,7 @@ class GWTAutogenAgent(AutogenAgent):
                 current_observation,
                 current_observation,
             )
-            if self._remote_room_signal_has_signal(remote_room_signal):
+            if self._snapshot_has_signal(remote_room_signal, key="room"):
                 if family == "relocation":
                     if remote_room_navigation_action:
                         score += 40
@@ -10232,7 +10224,7 @@ class GWTAutogenAgent(AutogenAgent):
             if self._rejected_candidates:
                 quotas["focus"] = max(2, quotas.get("focus", 0))
                 quotas["relocation"] = max(2, quotas.get("relocation", 0))
-        if self._remote_room_signal_has_signal(remote_room_signal):
+        if self._snapshot_has_signal(remote_room_signal, key="room"):
             quotas = dict(quotas)
             quotas["relocation"] = max(1, quotas.get("relocation", 0))
             quotas["device_control"] = max(1, quotas.get("device_control", 0))
@@ -10384,34 +10376,17 @@ class GWTAutogenAgent(AutogenAgent):
             key: value for key, value in data.items() if value not in ({}, [], "", None)
         }
 
-    def _limit_runtime_payload(self, value, *, list_limit: int = 4):
+    def _limit_runtime_payload(self, value, *, list_limit: int = 4, filter_false: bool = False):
         if isinstance(value, dict):
             limited = {
-                key: self._limit_runtime_payload(item, list_limit=list_limit)
+                key: self._limit_runtime_payload(item, list_limit=list_limit, filter_false=filter_false)
                 for key, item in value.items()
             }
-            return self._prune_empty_runtime_fields(limited)
+            exclude = ({}, [], "", None, False) if filter_false else ({}, [], "", None)
+            return {key: item for key, item in limited.items() if item not in exclude}
         if isinstance(value, list):
             return [
-                self._limit_runtime_payload(item, list_limit=list_limit)
-                for item in value[:list_limit]
-            ]
-        return value
-
-    def _limit_task_contract_payload(self, value, *, list_limit: int = 4):
-        if isinstance(value, dict):
-            limited = {
-                key: self._limit_task_contract_payload(item, list_limit=list_limit)
-                for key, item in value.items()
-            }
-            return {
-                key: item
-                for key, item in limited.items()
-                if item not in ({}, [], "", None, False)
-            }
-        if isinstance(value, list):
-            return [
-                self._limit_task_contract_payload(item, list_limit=list_limit)
+                self._limit_runtime_payload(item, list_limit=list_limit, filter_false=filter_false)
                 for item in value[:list_limit]
             ]
         return value
@@ -10420,8 +10395,8 @@ class GWTAutogenAgent(AutogenAgent):
         self, task_contract: dict | None, *, list_limit: int = 4
     ) -> dict:
         contract = task_contract if isinstance(task_contract, dict) else {}
-        compact_contract = self._limit_task_contract_payload(
-            contract, list_limit=list_limit
+        compact_contract = self._limit_runtime_payload(
+            contract, list_limit=list_limit, filter_false=True
         )
         compact_contract.pop("measurement_branches", None)
         compact_contract.pop("conditional_branches", None)
@@ -10447,46 +10422,10 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
     def _get_agent_facing_runtime_snapshot(self) -> dict:
-        return self._prune_empty_runtime_fields(
-            {
-                "ordered_target_progress": self._limit_runtime_payload(
-                    self.percept.get("ordered_target_progress", {}), list_limit=3
-                ),
-                "candidate_tracking": self._limit_runtime_payload(
-                    self.percept.get("candidate_tracking", {}), list_limit=3
-                ),
-                "substance_search": self._limit_runtime_payload(
-                    self.percept.get("substance_search", {}), list_limit=3
-                ),
-                "artifact_creation": self._limit_runtime_payload(
-                    self.percept.get("artifact_creation", {}), list_limit=3
-                ),
-                "measurement_tracking": self._limit_runtime_payload(
-                    self.percept.get("measurement_tracking", {}), list_limit=3
-                ),
-                "comparison_tracking": self._limit_runtime_payload(
-                    self.percept.get("comparison_tracking", {}), list_limit=3
-                ),
-                "conditional_branch_tracking": self._limit_runtime_payload(
-                    self.percept.get("conditional_branch_tracking", {}), list_limit=3
-                ),
-                "relation_frontier": self._limit_runtime_payload(
-                    self.percept.get("relation_frontier", {}), list_limit=3
-                ),
-                "remote_room_signal": self._limit_runtime_payload(
-                    self.percept.get("remote_room_signal", {}), list_limit=3
-                ),
-                "episode_hypothesis_ledger": self._limit_runtime_payload(
-                    self.percept.get("episode_hypothesis_ledger", {}), list_limit=2
-                ),
-                "referent_resolution": self._limit_runtime_payload(
-                    self.percept.get("referent_resolution", {}), list_limit=3
-                ),
-                "ambiguity_resolution": self._limit_runtime_payload(
-                    self.percept.get("ambiguity_resolution", {}), list_limit=3
-                ),
-            }
-        )
+        return self._prune_empty_runtime_fields({
+            key: self._limit_runtime_payload(self.percept.get(key, {}), list_limit=limit)
+            for key, limit in self._RUNTIME_PERCEPT_KEYS
+        })
 
     def _get_agent_facing_percept_snapshot(self) -> dict:
         percept_snapshot = self._snapshot_analyst_payload(self.percept)
@@ -10506,21 +10445,8 @@ class GWTAutogenAgent(AutogenAgent):
             percept_snapshot["admissible_action_summary"] = compact_action_summary
         else:
             percept_snapshot.pop("admissible_action_summary", None)
-        for key in (
-            "ordered_target_progress",
-            "candidate_tracking",
-            "substance_search",
-            "artifact_creation",
-            "measurement_tracking",
-            "comparison_tracking",
-            "conditional_branch_tracking",
-            "relation_frontier",
-            "remote_room_signal",
-            "episode_hypothesis_ledger",
-            "referent_resolution",
-            "ambiguity_resolution",
-        ):
-            percept_snapshot.pop(key, None)
+        _runtime_key_set = {key for key, _ in self._RUNTIME_PERCEPT_KEYS}
+        percept_snapshot = {k: v for k, v in percept_snapshot.items() if k not in _runtime_key_set}
         percept_snapshot.update(self._get_agent_facing_runtime_snapshot())
         if "task_relevant_action_shortlist" in percept_snapshot:
             percept_snapshot["task_relevant_action_shortlist"] = list(
@@ -10534,31 +10460,31 @@ class GWTAutogenAgent(AutogenAgent):
     def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
         snapshots = {}
         ordered_progress = self._get_ordered_target_snapshot()
-        if self._ordered_progress_has_signal(ordered_progress):
+        if self._snapshot_has_signal(ordered_progress):
             snapshots["ordered_target_progress"] = ordered_progress
         candidate_tracking = summary.get("candidate_tracking", {})
-        if self._candidate_tracking_has_signal(candidate_tracking):
+        if self._snapshot_has_signal(candidate_tracking):
             snapshots["candidate_tracking"] = candidate_tracking
         relation_frontier = summary.get("relation_frontier", {})
-        if self._relation_frontier_has_signal(relation_frontier):
+        if self._snapshot_has_signal(relation_frontier):
             snapshots["relation_frontier"] = relation_frontier
         substance_search = summary.get("substance_search", {})
-        if self._substance_search_has_signal(substance_search):
+        if self._snapshot_has_signal(substance_search):
             snapshots["substance_search"] = substance_search
         artifact_creation = summary.get("artifact_creation", {})
-        if self._artifact_creation_has_signal(artifact_creation):
+        if self._snapshot_has_signal(artifact_creation):
             snapshots["artifact_creation"] = artifact_creation
         measurement_tracking = summary.get("measurement_tracking", {})
-        if self._measurement_tracking_has_signal(measurement_tracking):
+        if self._snapshot_has_signal(measurement_tracking):
             snapshots["measurement_tracking"] = measurement_tracking
         comparison_tracking = summary.get("comparison_tracking", {})
-        if self._comparison_tracking_has_signal(comparison_tracking):
+        if self._snapshot_has_signal(comparison_tracking):
             snapshots["comparison_tracking"] = comparison_tracking
         conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
-        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+        if self._snapshot_has_signal(conditional_branch_tracking):
             snapshots["conditional_branch_tracking"] = conditional_branch_tracking
         remote_room_signal = summary.get("remote_room_signal", {})
-        if self._remote_room_signal_has_signal(remote_room_signal):
+        if self._snapshot_has_signal(remote_room_signal, key="room"):
             snapshots["remote_room_signal"] = remote_room_signal
         if self.percept.get("referent_resolution"):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
@@ -10693,14 +10619,14 @@ class GWTAutogenAgent(AutogenAgent):
         snapshots = {}
 
         ordered_progress = self._get_ordered_target_snapshot()
-        if self._ordered_progress_has_signal(ordered_progress):
+        if self._snapshot_has_signal(ordered_progress):
             snapshots["ordered_progress"] = {
                 "focused": ordered_progress.get("focused_stage_labels", [])[:3],
                 "pending": ordered_progress.get("pending_stage_candidates", [])[:3],
             }
 
         candidate_tracking = summary.get("candidate_tracking", {})
-        if self._candidate_tracking_has_signal(candidate_tracking):
+        if self._snapshot_has_signal(candidate_tracking):
             snapshots["candidate"] = {
                 "active": candidate_tracking.get("active_candidate"),
                 "last_seen_room": candidate_tracking.get("last_seen_room"),
@@ -10708,7 +10634,7 @@ class GWTAutogenAgent(AutogenAgent):
             }
 
         measurement_tracking = summary.get("measurement_tracking", {})
-        if self._measurement_tracking_has_signal(measurement_tracking):
+        if self._snapshot_has_signal(measurement_tracking):
             snapshots["measurement"] = {
                 "target": measurement_tracking.get("measurement_target"),
                 "property": measurement_tracking.get("measurement_property"),
@@ -10717,21 +10643,21 @@ class GWTAutogenAgent(AutogenAgent):
             }
 
         comparison_tracking = summary.get("comparison_tracking", {})
-        if self._comparison_tracking_has_signal(comparison_tracking):
+        if self._snapshot_has_signal(comparison_tracking):
             snapshots["comparison"] = {
                 "targets": comparison_tracking.get("comparison_targets", [])[:2],
                 "resolved_target": comparison_tracking.get("selected_target"),
             }
 
         conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
-        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+        if self._snapshot_has_signal(conditional_branch_tracking):
             snapshots["conditional_branch"] = {
                 "evidence_target": conditional_branch_tracking.get("evidence_target"),
                 "resolved_target": conditional_branch_tracking.get("selected_branch"),
             }
 
         relation_frontier = summary.get("relation_frontier", {})
-        if self._relation_frontier_has_signal(relation_frontier):
+        if self._snapshot_has_signal(relation_frontier):
             snapshots["relation_frontier"] = {
                 "referents": relation_frontier.get("frontier_referents", [])[:4],
                 "control_candidates": relation_frontier.get("control_candidates", [])[
@@ -10740,14 +10666,14 @@ class GWTAutogenAgent(AutogenAgent):
             }
 
         remote_room_signal = summary.get("remote_room_signal", {})
-        if self._remote_room_signal_has_signal(remote_room_signal):
+        if self._snapshot_has_signal(remote_room_signal, key="room"):
             snapshots["remote_room"] = {
                 "room": remote_room_signal.get("room"),
                 "reason": remote_room_signal.get("reason"),
             }
 
         substance_search = summary.get("substance_search", {})
-        if self._substance_search_has_signal(substance_search):
+        if self._snapshot_has_signal(substance_search):
             snapshots["substance_search"] = {
                 "phase": substance_search.get("phase"),
                 "grounded_substances": substance_search.get("grounded_substances", [])[
@@ -10757,7 +10683,7 @@ class GWTAutogenAgent(AutogenAgent):
             }
 
         artifact_creation = summary.get("artifact_creation", {})
-        if self._artifact_creation_has_signal(artifact_creation):
+        if self._snapshot_has_signal(artifact_creation):
             snapshots["artifact_creation"] = {
                 "artifact_type": artifact_creation.get("artifact_type"),
                 "grounded_artifacts": artifact_creation.get("grounded_artifacts", [])[
@@ -10988,6 +10914,7 @@ class GWTAutogenAgent(AutogenAgent):
             soft_wrap=True,
             force_terminal=styles,
             color_system="truecolor" if styles else None,
+            file=io.StringIO(),
         )
         console.print(
             Panel(
@@ -11472,36 +11399,36 @@ class GWTAutogenAgent(AutogenAgent):
             ],
         }
         substance_search = shared_action_context.get("substance_search", {})
-        if self._substance_search_has_signal(substance_search):
+        if self._snapshot_has_signal(substance_search):
             self.percept["substance_search"] = substance_search
         artifact_creation = shared_action_context.get("artifact_creation", {})
-        if self._artifact_creation_has_signal(artifact_creation):
+        if self._snapshot_has_signal(artifact_creation):
             self.percept["artifact_creation"] = artifact_creation
         measurement_tracking = shared_action_context.get("measurement_tracking", {})
-        if self._measurement_tracking_has_signal(measurement_tracking):
+        if self._snapshot_has_signal(measurement_tracking):
             self.percept["measurement_tracking"] = measurement_tracking
         comparison_tracking = shared_action_context.get("comparison_tracking", {})
-        if self._comparison_tracking_has_signal(comparison_tracking):
+        if self._snapshot_has_signal(comparison_tracking):
             self.percept["comparison_tracking"] = comparison_tracking
         conditional_branch_tracking = shared_action_context.get(
             "conditional_branch_tracking", {}
         )
-        if self._conditional_branch_tracking_has_signal(conditional_branch_tracking):
+        if self._snapshot_has_signal(conditional_branch_tracking):
             self.percept["conditional_branch_tracking"] = conditional_branch_tracking
         relation_frontier = shared_action_context.get("relation_frontier", {})
-        if self._relation_frontier_has_signal(relation_frontier):
+        if self._snapshot_has_signal(relation_frontier):
             self.percept["relation_frontier"] = relation_frontier
         remote_room_signal = shared_action_context.get("remote_room_signal", {})
-        if self._remote_room_signal_has_signal(remote_room_signal):
+        if self._snapshot_has_signal(remote_room_signal, key="room"):
             self.percept["remote_room_signal"] = remote_room_signal
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
         ]
         ordered_progress = self._get_ordered_target_snapshot()
-        if self._ordered_progress_has_signal(ordered_progress):
+        if self._snapshot_has_signal(ordered_progress):
             self.percept["ordered_target_progress"] = ordered_progress
         candidate_tracking = self._get_candidate_tracking_snapshot()
-        if self._candidate_tracking_has_signal(candidate_tracking):
+        if self._snapshot_has_signal(candidate_tracking):
             self.percept["candidate_tracking"] = candidate_tracking
         if self.num_actions_taken > 0:
             if shared_action_context["newly_relevant_actions"]:
@@ -12067,7 +11994,7 @@ class GWTAutogenAgent(AutogenAgent):
             if hypothesis_snapshot["mechanisms"] or hypothesis_snapshot["recent_tests"]:
                 self.percept["episode_hypothesis_ledger"] = hypothesis_snapshot
             ordered_progress = self._get_ordered_target_snapshot()
-            if self._ordered_progress_has_signal(ordered_progress):
+            if self._snapshot_has_signal(ordered_progress):
                 self.percept["ordered_target_progress"] = ordered_progress
             self._refresh_action_agent_runtime_context()
 

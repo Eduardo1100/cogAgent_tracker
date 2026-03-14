@@ -80,20 +80,28 @@ def _load_run_agent_module():
     return importlib.import_module("scripts.run_agent")
 
 
-def test_finalize_experiment_persists_cancelled_after_session_commit_failure(
-    tmp_path, monkeypatch
-):
-    from src.storage.models import Base, ExperimentRun
+@pytest.fixture()
+def tmp_db(tmp_path, monkeypatch):
+    from src.storage.models import Base
 
     _install_run_agent_stubs()
     run_agent = _load_run_agent_module()
 
-    db_path = tmp_path / "status_retry.sqlite"
+    db_path = tmp_path / "test.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
-
     monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
+    return TestingSessionLocal
+
+
+def test_finalize_experiment_persists_cancelled_after_session_commit_failure(
+    tmp_db, monkeypatch
+):
+    from src.storage.models import ExperimentRun
+
+    TestingSessionLocal = tmp_db
+    run_agent = sys.modules["scripts.run_agent"]
 
     with TestingSessionLocal() as seed_db:
         experiment = ExperimentRun(
@@ -154,18 +162,11 @@ def test_sigterm_handler_routes_to_keyboard_interrupt():
         run_agent._raise_keyboard_interrupt(signal.SIGTERM, None)
 
 
-def test_signal_handler_marks_active_experiment_cancelled(tmp_path, monkeypatch):
-    from src.storage.models import Base, ExperimentRun
+def test_signal_handler_marks_active_experiment_cancelled(tmp_db):
+    from src.storage.models import ExperimentRun
 
-    _install_run_agent_stubs()
-    run_agent = _load_run_agent_module()
-
-    db_path = tmp_path / "signal_cancel.sqlite"
-    engine = create_engine(f"sqlite:///{db_path}")
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-
-    monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
+    TestingSessionLocal = tmp_db
+    run_agent = sys.modules["scripts.run_agent"]
 
     with TestingSessionLocal() as db:
         experiment = ExperimentRun(
@@ -530,18 +531,11 @@ def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
         )
 
 
-def test_configure_live_analyst_trace_persists_existing_trace(tmp_path, monkeypatch):
-    from src.storage.models import Base, ExperimentRun
+def test_configure_live_analyst_trace_persists_existing_trace(tmp_db, tmp_path):
+    from src.storage.models import ExperimentRun
 
-    _install_run_agent_stubs()
-    run_agent = _load_run_agent_module()
-
-    db_path = tmp_path / "live_analyst_trace.sqlite"
-    engine = create_engine(f"sqlite:///{db_path}")
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-
-    monkeypatch.setattr(run_agent, "SessionLocal", TestingSessionLocal)
+    TestingSessionLocal = tmp_db
+    run_agent = sys.modules["scripts.run_agent"]
 
     with TestingSessionLocal() as db:
         experiment = ExperimentRun(

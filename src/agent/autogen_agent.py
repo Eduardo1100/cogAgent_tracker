@@ -68,6 +68,15 @@ class AutogenAgent:
     def initialize_groupchat(self):
         raise NotImplementedError
 
+    def _execute_chat_operation(self, fn):
+        chat_result = None
+        error_message = None
+        try:
+            chat_result = fn()
+        except Exception as e:
+            error_message = self._recover_chat_error(e)
+        return chat_result, error_message
+
     def run_chat(self, initial_message_content):
         assert self.start_agent is not None, "self.start_agent must be defined"
         assert self.group_chat_manager is not None, (
@@ -78,42 +87,34 @@ class AutogenAgent:
         self.num_actions_taken = 0
         self.success = False
 
-        chat_result = None
-        error_message = None
-        try:
-            # Start the chat with the Planner Agent proposing a plan
-            chat_result = self.start_agent.initiate_chat(
+        return self._execute_chat_operation(
+            lambda: self.start_agent.initiate_chat(
                 self.group_chat_manager,
                 message={"role": "system", "content": initial_message_content},
                 summary_method="reflection_with_llm",
             )
-        except Exception as e:
-            print(f"Group Chat manager fails to chat with error message {e}")
-            error_message = e
-
-        return chat_result, error_message
+        )
 
     def resume_chat(self, last_message):
-        chat_result = None
-        error_message = None
-        try:
+        def _resume():
             assert self.group_chat_manager is not None
-            last_agent, last_message = self.group_chat_manager.resume(
+            last_agent, message = self.group_chat_manager.resume(
                 messages=last_message
             )
-
             # Resume the chat using the last agent and message
-            chat_result = last_agent.initiate_chat(
+            return last_agent.initiate_chat(
                 recipient=self.group_chat_manager,
-                message=last_message,
+                message=message,
                 clear_history=False,
             )
 
-        except Exception as e:
-            print(f"Group Chat manager fails to chat with error message {e}")
-            error_message = e
+        return self._execute_chat_operation(_resume)
 
-        return chat_result, error_message
+    def _recover_chat_error(self, error):
+        recover = getattr(self, "recover_from_chat_error", None)
+        if callable(recover):
+            return recover(error=error)
+        return None
 
     def register_log_paths(self):
 
@@ -156,14 +157,14 @@ class AutogenAgent:
     def get_log_paths(self):
         return self.log_paths
 
-    def get_analyst_trace_text(self) -> str:
-        analyst_trace_path = self.log_paths.get("analyst_trace_path")
-        if analyst_trace_path and os.path.exists(analyst_trace_path):
-            return Path(analyst_trace_path).read_text()
+    def _read_log_file(self, key: str) -> str:
+        path = self.log_paths.get(key)
+        if path and os.path.exists(path):
+            return Path(path).read_text()
         return ""
 
+    def get_analyst_trace_text(self) -> str:
+        return self._read_log_file("analyst_trace_path")
+
     def get_analyst_trace_ansi_text(self) -> str:
-        analyst_trace_ansi_path = self.log_paths.get("analyst_trace_ansi_path")
-        if analyst_trace_ansi_path and os.path.exists(analyst_trace_ansi_path):
-            return Path(analyst_trace_ansi_path).read_text()
-        return ""
+        return self._read_log_file("analyst_trace_ansi_path")
