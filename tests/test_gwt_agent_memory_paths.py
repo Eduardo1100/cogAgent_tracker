@@ -704,6 +704,49 @@ def test_action_family_classification_covers_common_general_verbs(tmp_path):
     assert agent._classify_action_family("turn on stove") == "device_control"
 
 
+def test_interaction_family_classification(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    assert agent._classify_action_family("give attendant card") == "interaction"
+    assert agent._classify_action_family("ask librarian about book") == "interaction"
+    assert agent._classify_action_family("tell guard the password") == "interaction"
+    assert agent._classify_action_family("show badge to receptionist") == "interaction"
+    assert agent._classify_action_family("talk to bartender") == "interaction"
+    assert agent._classify_action_family("say hello") == "interaction"
+    assert agent._classify_action_family("pay toll") == "interaction"
+    # Ensure no collision with other families
+    assert agent._classify_action_family("go north") == "relocation"
+    assert agent._classify_action_family("take key") == "relocation"
+
+
+def test_shortlist_floor_admits_interaction_when_quotas_sparse(tmp_path):
+    """Verify shortlist floor fills to 3 items when quota-based selection yields fewer."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the library."
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "You are in the lobby. There is an attendant here. "
+            "You can go east or north. The attendant is waiting."
+        )
+    }
+
+    # Only 2 nav exits + 1 interaction action; the floor must admit the give action
+    summary = agent._summarize_admissible_actions(
+        [
+            "east",
+            "north",
+            "give attendant card",
+        ],
+        shortlist_limit=12,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    assert len(shortlist) >= 3
+    assert "give attendant card" in shortlist
+
+
 def test_shortlist_balances_families_and_grounds_on_observation(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = "Boil water in the kitchen."

@@ -23,8 +23,8 @@ action_agent: |
   - Some conditional branch tasks also require creating or revealing an intermediate evidence target before the branch can be resolved. When the task depends on a later-stage or transformed phenotype, treat precursor materials as setup and the resulting evidence-bearing entity as the real target of investigation.
   - The percept may include "ordered_target_progress" and "referent_resolution". Use them to avoid refocusing completed targets and to treat target remapping as ambiguity, not as proof that two targets are the same.
   - Your private runtime context may also contain an exact admissible shortlist for the current timestep.
-  - Treat the shortlist as the preferred exact candidate set, not as proof that other actions are impossible.
-  - If the shortlist seems insufficient, stay close to the current salient entities and known admissible verb families. Do not invent a new command template unless the current context strongly supports it.
+  - When the shortlist is non-empty, you MUST choose an exact string from it. Do not go off-shortlist when candidates are provided.
+  - Only when the shortlist is empty: stay close to salient entities and known admissible verb families. Never invent a command not grounded in the current observation.
 
   Rules (in priority order):
   1. If the task contract explicitly requires an action family such as focus, connect, measure, or sort, keep that family available in your reasoning instead of suppressing it globally.

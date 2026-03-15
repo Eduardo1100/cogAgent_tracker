@@ -536,8 +536,21 @@ class GWTAutogenAgent(AutogenAgent):
         "focus": ("focus",),
         "inspect": ("inspect", "examine", "look at"),
         "relation": ("connect", "link", "disconnect"),
-        "relocation": ("go to", "go", "enter", "move", "bring", "carry", "transport",
-                       "north", "south", "east", "west", "up", "down"),
+        "relocation": (
+            "go to",
+            "go",
+            "enter",
+            "move",
+            "bring",
+            "carry",
+            "transport",
+            "north",
+            "south",
+            "east",
+            "west",
+            "up",
+            "down",
+        ),
         "transfer_or_transform": (
             "fill",
             "pour",
@@ -1052,6 +1065,10 @@ class GWTAutogenAgent(AutogenAgent):
         (("use ", "heat ", "cool ", "boil ", "cook "), "tool_application"),
         (("eat ",), "consumption"),
         (("wait",), "idle"),
+        (
+            ("give ", "ask ", "tell ", "show ", "talk ", "say ", "pay "),
+            "interaction",
+        ),
     )
     _DEPRIORITIZE_ELIGIBLE_FAMILIES = {
         "relation",
@@ -1686,6 +1703,7 @@ class GWTAutogenAgent(AutogenAgent):
             return 0
         try:
             import numpy as np
+
             action_vec = self._action_embedding_cache.get(action_content)
             if action_vec is None:
                 action_vec = sentence_transformer_model.encode([action_content])[0]
@@ -4756,7 +4774,9 @@ class GWTAutogenAgent(AutogenAgent):
                 break
         # Fallback: Jericho/Inform games output the room name as the first line
         if not location_tokens:
-            match = re.match(r"^([A-Z][a-zA-Z0-9][a-zA-Z0-9\s\-']{1,38}?)\s*\n", observation or "")
+            match = re.match(
+                r"^([A-Z][a-zA-Z0-9][a-zA-Z0-9\s\-']{1,38}?)\s*\n", observation or ""
+            )
             if match:
                 for token in self._extract_runtime_tokens(match.group(1), limit=4):
                     if token not in location_tokens:
@@ -6412,12 +6432,14 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 3,
                 "focus": 1,
                 "relation": 1,
+                "interaction": 1,
             },
             "confirm_primary_target": {
                 "focus": 3,
                 "inspect": 3,
                 "device_control": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "locate_supporting_source": {
                 "inspect": 4,
@@ -6425,6 +6447,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "focus": 2,
                 "relation": 1,
+                "interaction": 1,
             },
             "inspect_target_mechanism": {
                 "inspect": 3,
@@ -6432,6 +6455,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "focus": 2,
                 "relocation": 1,
+                "interaction": 1,
             },
             "integrate_control_or_verify": {
                 "device_control": 3,
@@ -6439,6 +6463,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "inspect": 3,
                 "focus": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "locate_base_artifact": {
                 "inspect": 4,
@@ -6446,6 +6471,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "focus": 1,
                 "transfer_or_transform": 1,
+                "interaction": 1,
             },
             "find_missing_ingredient_or_reagent": {
                 "inspect": 4,
@@ -6454,6 +6480,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "transfer_or_transform": 1,
                 "tool_application": 1,
+                "interaction": 1,
             },
             "combine_or_transform": {
                 "transfer_or_transform": 3,
@@ -6462,6 +6489,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "focus": 2,
                 "relocation": 1,
+                "interaction": 1,
             },
             "verify_intermediate": {
                 "focus": 2,
@@ -6470,6 +6498,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 2,
                 "device_control": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "verify_final": {
                 "focus": 2,
@@ -6478,6 +6507,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 2,
                 "device_control": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "locate_instrument": {
                 "inspect": 3,
@@ -6485,6 +6515,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "relocation": 2,
                 "tool_application": 1,
+                "interaction": 1,
             },
             "locate_measured_target": {
                 "inspect": 3,
@@ -6492,6 +6523,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "relocation": 2,
                 "tool_application": 1,
+                "interaction": 1,
             },
             "measure_target": {
                 "tool_application": 3,
@@ -6499,6 +6531,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 2,
                 "device_control": 2,
                 "relocation": 1,
+                "interaction": 1,
             },
             "induce_property_change": {
                 "tool_application": 3,
@@ -6507,6 +6540,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 2,
                 "relocation": 1,
                 "focus": 1,
+                "interaction": 1,
             },
             "verify_transition": {
                 "tool_application": 3,
@@ -6514,6 +6548,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "device_control": 2,
                 "focus": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "resolve_branch": {
                 "tool_application": 3,
@@ -6522,6 +6557,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "transfer_or_transform": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "execute_branch": {
                 "focus": 2,
@@ -6529,6 +6565,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "transfer_or_transform": 1,
                 "device_control": 1,
+                "interaction": 1,
             },
             "locate_substance": {
                 "inspect": 4,
@@ -6536,6 +6573,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "focus": 1,
                 "transfer_or_transform": 1,
+                "interaction": 1,
             },
             "probe_sources": {
                 "inspect": 4,
@@ -6543,6 +6581,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "relocation": 1,
                 "transfer_or_transform": 1,
+                "interaction": 1,
             },
             "confirm_referent": {
                 "inspect": 3,
@@ -6551,6 +6590,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 1,
                 "transfer_or_transform": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "test_transformation": {
                 "inspect": 2,
@@ -6559,6 +6599,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 2,
                 "focus": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "verify_outcome": {
                 "inspect": 3,
@@ -6567,6 +6608,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 2,
                 "transfer_or_transform": 1,
                 "relocation": 1,
+                "interaction": 1,
             },
             "gather_branch_evidence": {
                 "inspect": 4,
@@ -6575,6 +6617,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "transfer_or_transform": 1,
                 "tool_application": 1,
+                "interaction": 1,
             },
             "gather_evidence": {
                 "inspect": 3,
@@ -6583,6 +6626,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 2,
                 "tool_application": 1,
                 "focus": 1,
+                "interaction": 1,
             },
             "test_mechanism": {
                 "inspect": 2,
@@ -6592,6 +6636,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 3,
                 "relation": 1,
                 "focus": 1,
+                "interaction": 1,
             },
             "commit_to_goal": {
                 "inspect": 1,
@@ -6600,6 +6645,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 3,
                 "tool_application": 2,
                 "focus": 1,
+                "interaction": 1,
             },
             "act": {
                 "inspect": 2,
@@ -6608,6 +6654,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 2,
                 "tool_application": 2,
                 "focus": 1,
+                "interaction": 1,
             },
         }
         return quotas_by_phase.get(current_phase, quotas_by_phase["act"])
@@ -6624,6 +6671,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -6,
                 "tool_application": -6,
                 "other": -3,
+                "interaction": 4,
                 "idle": -5,
             },
             "confirm_primary_target": {
@@ -6635,6 +6683,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -4,
                 "tool_application": -4,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "locate_supporting_source": {
@@ -6646,6 +6695,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -4,
                 "tool_application": -4,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "inspect_target_mechanism": {
@@ -6657,6 +6707,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -4,
                 "tool_application": -4,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "integrate_control_or_verify": {
@@ -6668,6 +6719,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -4,
                 "tool_application": -4,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "locate_base_artifact": {
@@ -6679,6 +6731,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -3,
                 "relation": -4,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "find_missing_ingredient_or_reagent": {
@@ -6690,6 +6743,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -4,
                 "relation": -4,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "combine_or_transform": {
@@ -6701,6 +6755,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -1,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "verify_intermediate": {
@@ -6712,6 +6767,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -2,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "verify_final": {
@@ -6723,6 +6779,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -2,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "locate_instrument": {
@@ -6734,6 +6791,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -2,
                 "relation": -4,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "locate_measured_target": {
@@ -6745,6 +6803,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": -2,
                 "relation": -4,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "measure_target": {
@@ -6756,6 +6815,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 1,
                 "relation": -3,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "induce_property_change": {
@@ -6767,6 +6827,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "relation": -3,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "verify_transition": {
@@ -6778,6 +6839,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 1,
                 "relation": -3,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "resolve_branch": {
@@ -6789,6 +6851,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -3,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "execute_branch": {
@@ -6800,6 +6863,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 2,
                 "relation": -3,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "locate_substance": {
@@ -6811,6 +6875,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -2,
                 "relation": -4,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "probe_sources": {
@@ -6822,6 +6887,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -4,
                 "relation": -5,
                 "other": -3,
+                "interaction": 2,
                 "idle": -5,
             },
             "confirm_referent": {
@@ -6833,6 +6899,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 2,
                 "relation": -2,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "test_transformation": {
@@ -6844,6 +6911,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -1,
                 "other": -2,
+                "interaction": 2,
                 "idle": -5,
             },
             "verify_outcome": {
@@ -6855,6 +6923,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relocation": 1,
                 "relation": -2,
                 "other": -2,
+                "interaction": 4,
                 "idle": -5,
             },
             "gather_branch_evidence": {
@@ -6866,6 +6935,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": -2,
                 "relation": -6,
                 "other": -1,
+                "interaction": 4,
                 "idle": -5,
             },
             "gather_evidence": {
@@ -6877,6 +6947,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 2,
                 "relation": 1,
                 "other": 0,
+                "interaction": 4,
                 "idle": -5,
             },
             "test_mechanism": {
@@ -6888,6 +6959,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "relation": 3,
                 "focus": 1,
                 "other": 0,
+                "interaction": 4,
                 "idle": -5,
             },
             "commit_to_goal": {
@@ -6899,6 +6971,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "relation": 0,
                 "other": 0,
+                "interaction": 4,
                 "idle": -5,
             },
             "act": {
@@ -6910,6 +6983,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "focus": 1,
                 "relation": 1,
                 "other": 0,
+                "interaction": 4,
                 "idle": -5,
             },
         }
@@ -6918,8 +6992,18 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
     _BARE_DIRECTION_WORDS: frozenset[str] = frozenset(
-        {"north", "south", "east", "west", "up", "down",
-         "northeast", "northwest", "southeast", "southwest"}
+        {
+            "north",
+            "south",
+            "east",
+            "west",
+            "up",
+            "down",
+            "northeast",
+            "northwest",
+            "southeast",
+            "southwest",
+        }
     )
 
     def _classify_action_family(self, action: str) -> str:
@@ -9704,6 +9788,8 @@ class GWTAutogenAgent(AutogenAgent):
                 score -= 2
         if family == "other":
             score -= 2
+        if family == "interaction" and (grounded_hits or target_hits):
+            score += 3
         invalid_repeat_count = self._invalid_exact_actions.get(normalized, 0)
         if invalid_repeat_count:
             score -= 12 + invalid_repeat_count * 4
@@ -10106,7 +10192,11 @@ class GWTAutogenAgent(AutogenAgent):
                 support_role_hits=support_role_hits,
             )
 
-        if exploration_task and self._is_agent_navigation_action(action, family=family) and action not in tried_exits:
+        if (
+            exploration_task
+            and self._is_agent_navigation_action(action, family=family)
+            and action not in tried_exits
+        ):
             score += 6
             if exploration_room_search_stalled:
                 score += 4
@@ -10398,6 +10488,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "transfer_or_transform": 1,
                 "tool_application": 1,
                 "relation": 1,
+                "interaction": 2,
                 "focus": 0,
             }
         if "ordered_sequence" in self._get_task_contract().get(
@@ -10540,6 +10631,22 @@ class GWTAutogenAgent(AutogenAgent):
             selected_actions.add(item["action"])
             if exploration_task:
                 selected_by_family[family] = selected_by_family.get(family, 0) + 1
+
+        # Floor: ensure at least 3 shortlist items regardless of family quota.
+        # Prevents sparse shortlists (e.g. only 2 nav exits) from causing the
+        # Action_Agent to hallucinate off-shortlist. Respects blocked_actions
+        # and shortlist_limit.
+        _SHORTLIST_FLOOR = min(3, shortlist_limit)
+        if len(shortlist) < _SHORTLIST_FLOOR:
+            for item in scored_actions:
+                if len(shortlist) >= _SHORTLIST_FLOOR:
+                    break
+                if item["action"] in selected_actions:
+                    continue
+                if item["action"] in blocked_actions:
+                    continue
+                shortlist.append(item["action"])
+                selected_actions.add(item["action"])
 
         deprioritized_families = sorted(
             entry["family"]
@@ -12470,7 +12577,7 @@ class GWTAutogenAgent(AutogenAgent):
         roles, prior concept, and the current task state.
         """
         intro = (
-            "You and all other Agents are collectively a unified cognitive system named ALFRED. "
+            "You and all other Agents are collectively a unified cognitive system. "
             "Each of you plays a distinct role in perception, memory, planning, reasoning, or action execution. "
             "Together, your goal is to solve the following task as efficiently and intelligently as possible.\n\n"
         )
