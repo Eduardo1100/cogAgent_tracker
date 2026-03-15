@@ -1699,7 +1699,11 @@ def main():
     ensure_s3_bucket(s3, BUCKET_NAME)
 
     wandb.login()
-    wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY)
+    wandb.init(
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY,
+        settings=wandb.Settings(console="off"),
+    )
 
     llm_profile = get_llm_profile(config)
     base_path = os.path.join("runs", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
