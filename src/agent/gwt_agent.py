@@ -1031,12 +1031,6 @@ class GWTAutogenAgent(AutogenAgent):
                 "grab ",
                 "put down ",
                 "drop ",
-                "north",
-                "south",
-                "east",
-                "west",
-                "up",
-                "down",
             ),
             "relocation",
         ),
@@ -6906,10 +6900,21 @@ class GWTAutogenAgent(AutogenAgent):
             family, 0
         )
 
+    _BARE_DIRECTION_WORDS: frozenset[str] = frozenset(
+        {"north", "south", "east", "west", "up", "down",
+         "northeast", "northwest", "southeast", "southwest"}
+    )
+
     def _classify_action_family(self, action: str) -> str:
         normalized = self._normalize_runtime_text(action)
         if not normalized:
             return "unknown"
+
+        # Bare direction words are exact actions in Jericho/Inform games.
+        # Checked before the startswith loop to avoid false matches on prefixes
+        # like "update", "download", "northeast" (a separate direction).
+        if normalized in self._BARE_DIRECTION_WORDS:
+            return "relocation"
 
         for prefixes, family in self._ACTION_FAMILY_PREFIXES:
             if normalized.startswith(prefixes):
