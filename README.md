@@ -8,7 +8,7 @@
 
 - FastAPI service for experiment and episode data in `src/app.py`
 - SQLAlchemy models and Alembic migrations for persistent run metadata
-- Agent runner scripts for ALFWorld and ScienceWorld evaluations
+- Agent runner scripts for ALFWorld, ScienceWorld, and TextWorld (Tales) evaluations
 - Docker Compose stack with Postgres, Redis, MinIO, Grafana, and the app container
 - Marimo notebook for local exploration in `notebooks/exploration.py`
 

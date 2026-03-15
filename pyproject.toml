@@ -3,7 +3,7 @@ name = "production-template"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "ag2[gemini,openai]>=0.11.2",
     "alembic>=1.16.5",
@@ -18,7 +18,8 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "redis>=7.2.1",
     "rich>=14.2.0",
-    "scienceworld>=1.1.4",
+    "scienceworld>=1.2.2",
+    "tale-suite>=0.1.0",
     "sentence-transformers>=5.2.3",
     "setuptools<82",
     "sqlalchemy>=2.0.47",

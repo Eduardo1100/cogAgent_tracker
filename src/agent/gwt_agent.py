@@ -659,6 +659,19 @@ class GWTAutogenAgent(AutogenAgent):
         "flower",
         "blossom",
     }
+    _RECIPE_DIRECTIONS_RE = re.compile(
+        r"^-\s+(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _RECIPE_INGREDIENTS_RE = re.compile(
+        r"^-\s+(?:a\s+|an\s+|the\s+)?(.+?)$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _RECIPE_SECTION_RE = re.compile(
+        r"ingredients?.*?:(.*?)(?:directions?|steps?).*?:(.*?)(?:\n\n|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
     _TASK_ROLE_PATTERNS = {
         "primary_targets": (
             r"\bfocus on\s+(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
@@ -666,6 +679,7 @@ class GWTAutogenAgent(AutogenAgent):
             r"\bactivate\s+(.+?)(?=$|[.;,\n]|\bby\b|\busing\b|\bwith\b|\bthen\b|\band then\b)",
             r"\bmove\s+(.+?)\s+\bto\b",
             r"\b(?:put|place)\s+(.+?)\s+\b(?:in|into|on)\b",
+            r"\b(?:check|read|examine)\s+(.+?)(?=$|[.;,\n]|\bfor\b|\bin\b|\bthen\b|\band then\b)",
         ),
         "supporting_targets": (
             r"\busing\s+(.+?)(?=$|[.;,\n]|\bthen\b|\band then\b)",
@@ -1070,7 +1084,9 @@ class GWTAutogenAgent(AutogenAgent):
         r"(heats up|cools down|produces|transforms?|changes? state|"
         r"temperature (?:of|reads|measures)|opens?|closes?|activates?|deactivates?|"
         r"moves?|picked up|put down|mixed?|created|appears?|disappears?|"
-        r"filled?|emptied?|turned (?:on|off)|boils?|freezes?|burns?)",
+        r"filled?|emptied?|turned (?:on|off)|boils?|freezes?|burns?|"
+        r"roasted?|grilled?|fried|baked|chopped?|sliced?|diced?|cooked?|"
+        r"cut|prepared?|seasoned?|dropped?|taken|removed?)",
         re.IGNORECASE,
     )
     _EFFECTLESS_RE = re.compile(
@@ -4438,6 +4454,38 @@ class GWTAutogenAgent(AutogenAgent):
             limit=6,
         )
         return " ".join(phrase_tokens[:4])
+
+    def _update_task_contract_from_recipe_observation(
+        self, action: str, observation: str
+    ) -> None:
+        """If a cookbook/recipe was just read, extract ingredients and inject
+        them as discovered primary_targets in the task contract cache."""
+        if not re.search(r"\b(?:read|check|examine)\b", action, re.IGNORECASE):
+            return
+        match = self._RECIPE_SECTION_RE.search(observation)
+        if not match:
+            return
+        ingredients_block, directions_block = match.group(1), match.group(2)
+        ingredients = [
+            self._normalize_task_phrase(m.group(1), role="primary_targets")
+            for m in self._RECIPE_INGREDIENTS_RE.finditer(ingredients_block)
+            if m.group(1).strip()
+        ]
+        verbs_found = bool(self._RECIPE_DIRECTIONS_RE.search(directions_block))
+        if not ingredients and not verbs_found:
+            return
+        contract = self._get_task_contract()
+        existing = set(contract.get("primary_targets", []))
+        new_targets = [t for t in ingredients if t and t not in existing]
+        if new_targets:
+            contract["primary_targets"] = list(existing) + new_targets
+            contract["target_entities"] = list(
+                set(contract.get("target_entities", [])) | set(new_targets)
+            )
+        if verbs_found and "tool_application" not in contract.get(
+            "required_families", []
+        ):
+            contract.setdefault("required_families", []).append("tool_application")
 
     def _extract_candidate_classes(self, task: str) -> list[str]:
         normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
@@ -11322,7 +11370,7 @@ class GWTAutogenAgent(AutogenAgent):
         with open(self.log_paths["admissible_commands_path"], "w") as f:
             f.write(f"{self.admissible_actions}\n")
 
-    def update_percept(self, action):
+    def update_percept(self, action, executed: bool = True):
         previous_observation = (self.percept or {}).get("resulting_observation", "")
         curr_admissible = self.adapter.admissible_actions
         no_longer = sorted(set(self.admissible_actions) - set(curr_admissible))
@@ -11332,6 +11380,7 @@ class GWTAutogenAgent(AutogenAgent):
         self.percept = {
             "timestep": self.num_actions_taken,
             "attempted_action": action,
+            "action_executed": executed,
             "resulting_observation": self.adapter.observation,
             "task_status": self.task_status,
         }
@@ -11385,6 +11434,9 @@ class GWTAutogenAgent(AutogenAgent):
             previous_observation=previous_observation,
         )
         self._invalidate_action_summary_cache()
+        self._update_task_contract_from_recipe_observation(
+            action=action, observation=self.adapter.observation
+        )
         task_contract = self._get_task_contract()
         if any(task_contract.values()):
             self.percept["task_contract"] = task_contract
@@ -11973,7 +12025,7 @@ class GWTAutogenAgent(AutogenAgent):
             attempted_action = (
                 canonical_suggested_action if executed_action else suggested_action
             )
-            self.update_percept(attempted_action)
+            self.update_percept(attempted_action, executed=executed_action is not None)
             if canonical_suggested_action != suggested_action:
                 self.percept["requested_action"] = suggested_action
                 self.percept["canonicalized_action"] = canonical_suggested_action

@@ -67,6 +67,7 @@ def _install_run_agent_stubs() -> None:
 
     env_adapter_module = types.ModuleType("src.agent.env_adapter")
     env_adapter_module.ScienceWorldAdapter = type("ScienceWorldAdapter", (), {})
+    env_adapter_module.TalesAdapter = type("TalesAdapter", (), {})
     env_adapter_module.infer_task_type = lambda task: None
     sys.modules["src.agent.env_adapter"] = env_adapter_module
 

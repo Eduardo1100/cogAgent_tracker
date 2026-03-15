@@ -26,9 +26,17 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; exec env PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
 
-debug: ## Debug a single game. ENV=alfworld(default)|scienceworld. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: random 1 game by default; SW_TASKS="task-1-boil ..." narrows tasks; SW_VARS=k variations considered for sampling.
+debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: random 1 game by default; SW_TASKS="task-1-boil ..." narrows tasks; SW_VARS=k variations considered for sampling. TALES: random 1 env by default; TALES_ENVS="JerichoEnvZork1 ..." to select specific envs.
 	docker compose run --rm app \
-	sh -lc 'set -eux; uv sync --frozen; $(if $(filter scienceworld,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) exec env WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py $(if $(filter scienceworld,$(ENV)),src/agent/configs/scienceworld.yaml --env-type scienceworld --num_games 1 $(if $(SW_TASKS),--sw-tasks $(SW_TASKS),) $(if $(SW_VARS),--sw-variations $(SW_VARS),--sw-variations 1),src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))) --gwt'
+	sh -lc 'set -eux; uv sync --frozen; \
+	$(if $(filter scienceworld tales,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) \
+	exec env WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py \
+	$(if $(filter scienceworld,$(ENV)), \
+	  src/agent/configs/scienceworld.yaml --env-type scienceworld --num_games 1 $(if $(SW_TASKS),--sw-tasks $(SW_TASKS),) $(if $(SW_VARS),--sw-variations $(SW_VARS),--sw-variations 1), \
+	$(if $(filter tales,$(ENV)), \
+	  src/agent/configs/tales.yaml --env-type tales --num_games 1 $(if $(TALES_ENVS),--tales-envs $(TALES_ENVS),), \
+	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1))))) \
+	--gwt'
 
 iterate-scienceworld: ## Run one random ScienceWorld debug episode, then hand the resulting experiment to Codex. Optional: SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
 	uv run python scripts/iterate_scienceworld.py $(if $(SKIP_DEBUG),--skip-debug,) $(if $(ALLOW_DIRTY),--allow-dirty,) $(if $(PROMPT_ONLY),--prompt-only,) $(if $(DANGEROUS),--dangerous,)
