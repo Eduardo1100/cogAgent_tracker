@@ -5135,7 +5135,7 @@ class GWTAutogenAgent(AutogenAgent):
         normalized = self._normalize_runtime_text(action)
         if normalized in self._BARE_DIRECTION_WORDS:
             return True
-        if normalized.startswith(("go to ", "enter ")):
+        if normalized.startswith(("go to ", "move to ", "enter ")):
             return True
         if normalized.startswith(("go ", "move ")):
             prefix_len = 3 if normalized.startswith("go ") else 5
