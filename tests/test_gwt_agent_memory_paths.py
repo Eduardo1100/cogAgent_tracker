@@ -2775,11 +2775,15 @@ def test_measurement_task_contract_extracts_measurement_roles_and_cleans_tokens(
     assert contract["measurement_instrument"] == ["thermometer"]
     assert contract["measurement_branch_targets"] == ["orange box", "yellow box"]
     assert contract["primary_targets"] == ["solid unknown substance c"]
-    assert contract["supporting_targets"] == ["thermometer"]
+    # Branch destinations are now included in supporting_targets so the agent
+    # can score whichever box the condition resolves to as a high-priority target.
+    assert contract["supporting_targets"] == ["thermometer", "orange box", "yellow box"]
     assert "which" not in contract["target_entities"]
     assert "next" not in contract["target_entities"]
     assert "above" not in contract["target_entities"]
-    assert "orange" not in contract["target_entities"]
+    # "orange" / "yellow" are now present because branch destinations are in supporting_targets
+    assert "orange" in contract["target_entities"]
+    assert "yellow" in contract["target_entities"]
 
 
 def test_measurement_task_does_not_emit_substance_search_snapshot(tmp_path):
@@ -4556,3 +4560,142 @@ def test_action_agent_runtime_context_uses_compact_task_snapshot(tmp_path):
     assert "measurement_branch_targets" in system_message
     assert "measurement_branches" not in system_message
     assert "Action family counts" not in system_message
+
+
+# ---------------------------------------------------------------------------
+# cogfix-01: Exp-135 — measurement branch destinations in supporting_targets
+# ---------------------------------------------------------------------------
+
+
+def test_measurement_branch_destinations_in_supporting_targets(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Measure the temperature of the metal. "
+        "If the temperature of the metal is above 200.0 degrees celsius, "
+        "focus on the yellow box. "
+        "If the temperature of the metal is below 200.0 degrees celsius, "
+        "focus on the purple box."
+    )
+    contract = agent._get_task_contract()
+
+    assert contract["measurement_task"] is True
+    supporting = contract["supporting_targets"]
+    assert "yellow box" in supporting
+    assert "purple box" in supporting
+
+
+# ---------------------------------------------------------------------------
+# cogfix-01: Exp-136 — exploration stall detection
+# ---------------------------------------------------------------------------
+
+
+def test_exploration_room_search_stalled_fires(tmp_path):
+    # "enter X" and "move X" are classified as relocation by _ACTION_FAMILY_PREFIXES.
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent._search_location_states["kitchen"] = {
+        "local_exploration": 0,
+        "target_grounded": False,
+        "visit_count": 3,
+        "tried_exits": {"enter north"},
+    }
+    agent.admissible_actions = ["enter north", "enter west"]
+
+    result = agent._exploration_room_search_stalled(
+        current_room="kitchen",
+        visible_doors=2,
+    )
+    assert result is True
+
+
+def test_exploration_room_search_stalled_does_not_fire_all_exits_tried(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent._search_location_states["kitchen"] = {
+        "local_exploration": 0,
+        "target_grounded": False,
+        "visit_count": 3,
+        "tried_exits": {"enter north", "enter west"},
+    }
+    agent.admissible_actions = ["enter north", "enter west"]
+
+    result = agent._exploration_room_search_stalled(
+        current_room="kitchen",
+        visible_doors=2,
+    )
+    assert result is False
+
+
+def test_exploration_room_search_stalled_does_not_fire_low_visit_count(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent._search_location_states["kitchen"] = {
+        "local_exploration": 0,
+        "target_grounded": False,
+        "visit_count": 2,
+        "tried_exits": {"enter north"},
+    }
+    agent.admissible_actions = ["enter north", "enter west"]
+
+    result = agent._exploration_room_search_stalled(
+        current_room="kitchen",
+        visible_doors=2,
+    )
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# cogfix-01: Exp-136 — novel-exit bonus in shortlist scoring
+# ---------------------------------------------------------------------------
+
+
+def test_novel_exit_bonus_applied(tmp_path):
+    # Use "enter X" — classified as relocation by _ACTION_FAMILY_PREFIXES.
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent.admissible_actions = ["enter north", "enter west"]
+
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    # Inject tried_exits into room_state
+    scoring_context["room_state"]["tried_exits"] = {"enter north"}
+
+    _kw = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+    score_west, _, _ = agent._score_action_for_shortlist(action="enter west", **_kw)
+    score_north, _, _ = agent._score_action_for_shortlist(action="enter north", **_kw)
+    assert score_west - score_north >= 6
+
+
+def test_novel_exit_bonus_with_stall(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent.admissible_actions = ["enter north", "enter west"]
+
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    # Force stall signal on and inject tried_exits
+    scoring_context["exploration_room_search_stalled"] = True
+    scoring_context["room_state"]["tried_exits"] = {"enter north"}
+
+    _kw = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+    score_west, _, _ = agent._score_action_for_shortlist(action="enter west", **_kw)
+    score_north, _, _ = agent._score_action_for_shortlist(action="enter north", **_kw)
+    assert score_west - score_north >= 10

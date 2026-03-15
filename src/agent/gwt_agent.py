@@ -1419,6 +1419,9 @@ class GWTAutogenAgent(AutogenAgent):
             role_phrases["supporting_targets"] = []
             if measurement_instrument:
                 role_phrases["supporting_targets"].append(measurement_instrument)
+            for dest in measurement_branch_targets:
+                if dest and dest not in role_phrases["supporting_targets"]:
+                    role_phrases["supporting_targets"].append(dest)
         if comparison_task:
             role_phrases["primary_targets"] = (
                 [comparison_subject]
@@ -2755,6 +2758,25 @@ class GWTAutogenAgent(AutogenAgent):
             self._action_targets_room_frontier(action, observation, family=family)
         ):
             room_state["local_exploration"] += 1
+
+    def _update_exploration_search_tracking(
+        self, *, action: str | None, observation: str
+    ) -> None:
+        contract = self._get_task_contract()
+        if not contract.get("exploration_task"):
+            return
+        room_signature = self._get_current_location_signature(observation)
+        if not room_signature:
+            return
+        room_state = self._search_location_states.setdefault(
+            room_signature,
+            {"local_exploration": 0, "target_grounded": False},
+        )
+        room_state["visit_count"] = room_state.get("visit_count", 0) + 1
+        if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
+            return
+        if self._classify_action_family(action) == "relocation":
+            room_state.setdefault("tried_exits", set()).add(action)
 
     def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
         if not self._grounded_artifacts:
@@ -4124,6 +4146,27 @@ class GWTAutogenAgent(AutogenAgent):
         return bool(
             not room_state.get("target_grounded")
             and room_state.get("local_exploration", 0) >= 2
+        )
+
+    def _exploration_room_search_stalled(
+        self,
+        *,
+        current_room: str,
+        visible_doors: int,
+        task_contract: dict | None = None,
+    ) -> bool:
+        contract = task_contract or self._get_task_contract()
+        if not contract.get("exploration_task"):
+            return False
+        if visible_doors < 1 or not current_room:
+            return False
+        room_state = self._search_location_states.get(current_room, {})
+        if room_state.get("visit_count", 0) < 3:
+            return False
+        tried_exits = room_state.get("tried_exits", set())
+        return any(
+            self._classify_action_family(cmd) == "relocation" and cmd not in tried_exits
+            for cmd in self.admissible_actions
         )
 
     def _canonicalize_unsupported_substance_action(
@@ -9501,6 +9544,11 @@ class GWTAutogenAgent(AutogenAgent):
         comparison_room_search_stalled = scoring_context[
             "comparison_room_search_stalled"
         ]
+        exploration_task = scoring_context.get("exploration_task", False)
+        exploration_room_search_stalled = scoring_context.get(
+            "exploration_room_search_stalled", False
+        )
+        tried_exits = scoring_context.get("room_state", {}).get("tried_exits", set())
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -10017,6 +10065,11 @@ class GWTAutogenAgent(AutogenAgent):
                 support_role_hits=support_role_hits,
             )
 
+        if exploration_task and family == "relocation" and action not in tried_exits:
+            score += 6
+            if exploration_room_search_stalled:
+                score += 4
+
         if (
             primary_target_focused
             and family == "relation"
@@ -10188,6 +10241,14 @@ class GWTAutogenAgent(AutogenAgent):
                 grounded_tokens=grounded_token_set,
             )
             if comparison_task
+            else False,
+            "exploration_task": task_contract.get("exploration_task", False),
+            "exploration_room_search_stalled": self._exploration_room_search_stalled(
+                current_room=current_room,
+                visible_doors=visible_doors,
+                task_contract=task_contract,
+            )
+            if task_contract.get("exploration_task")
             else False,
             "next_expected_stage": self._get_next_expected_stage_label()
             if lifecycle_task
@@ -11474,6 +11535,10 @@ class GWTAutogenAgent(AutogenAgent):
             observation=self.adapter.observation,
         )
         self._update_lifecycle_search_tracking(
+            action=action,
+            observation=self.adapter.observation,
+        )
+        self._update_exploration_search_tracking(
             action=action,
             observation=self.adapter.observation,
         )
