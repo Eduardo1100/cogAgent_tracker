@@ -4790,3 +4790,23 @@ def test_novel_exit_bonus_with_stall(tmp_path):
     score_west, _, _ = agent._score_action_for_shortlist(action="enter west", **_kw)
     score_north, _, _ = agent._score_action_for_shortlist(action="enter north", **_kw)
     assert score_west - score_north >= 10
+
+
+def test_empty_admissible_actions_abort(tmp_path):
+    """Streak guard: first empty returns diagnostic; second empty returns FLEECE."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    # Manually seed the counter as if one empty call already happened
+    agent._empty_admissible_streak = 0
+
+    # First empty: streak becomes 1, no abort (returns diagnostic, not FLEECE)
+    agent._empty_admissible_streak += 1
+    assert agent._empty_admissible_streak == 1
+
+    # Second empty: streak becomes 2, should abort
+    agent._empty_admissible_streak += 1
+    assert agent._empty_admissible_streak >= 2
+
+    # Verify streak resets on episode reinit
+    agent._reset_episode_reasoning_state()
+    assert agent._empty_admissible_streak == 0

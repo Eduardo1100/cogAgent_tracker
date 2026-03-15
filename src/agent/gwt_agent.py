@@ -1253,6 +1253,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._episode_target_embeddings: "np.ndarray | None" = None
         self._episode_target_entity_list: list[str] = []
         self._action_embedding_cache: dict[str, "np.ndarray"] = {}
+        self._empty_admissible_streak: int = 0
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -12266,7 +12267,19 @@ class GWTAutogenAgent(AutogenAgent):
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
 
             admissible_commands = self.adapter.admissible_actions
-            assert admissible_commands, "No admissible commands found."
+            if not admissible_commands:
+                self._empty_admissible_streak += 1
+                if self._empty_admissible_streak >= 2:
+                    self.result_dict[self.game_no] = "FAILURE"
+                    with open(self.log_paths["result_path"], "w") as f:
+                        f.write("Success: False\n")
+                    return "FLEECE"
+                return (
+                    "NO ACTION EXECUTED — admissible action list is empty "
+                    f"(streak={self._empty_admissible_streak}). "
+                    "Environment may not be fully initialized; re-polling next turn."
+                )
+            self._empty_admissible_streak = 0
 
             previous_observation = self.percept.get("resulting_observation", "")
             canonical_suggested_action = self._canonicalize_suggested_action(
