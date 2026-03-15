@@ -2777,7 +2777,7 @@ class GWTAutogenAgent(AutogenAgent):
         room_state["visit_count"] = room_state.get("visit_count", 0) + 1
         if not action or action == "None" or self._HARD_FAILURE_RE.search(observation):
             return
-        if self._classify_action_family(action) == "relocation":
+        if self._is_agent_navigation_action(action):
             room_state.setdefault("tried_exits", set()).add(action)
 
     def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
@@ -4167,7 +4167,7 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         tried_exits = room_state.get("tried_exits", set())
         return any(
-            self._classify_action_family(cmd) == "relocation" and cmd not in tried_exits
+            self._is_agent_navigation_action(cmd) and cmd not in tried_exits
             for cmd in self.admissible_actions
         )
 
@@ -5133,7 +5133,14 @@ class GWTAutogenAgent(AutogenAgent):
         if family != "relocation":
             return False
         normalized = self._normalize_runtime_text(action)
-        return normalized.startswith(("go to ", "enter "))
+        if normalized in self._BARE_DIRECTION_WORDS:
+            return True
+        if normalized.startswith(("go to ", "enter ")):
+            return True
+        if normalized.startswith(("go ", "move ")):
+            prefix_len = 3 if normalized.startswith("go ") else 5
+            return normalized[prefix_len:] in self._BARE_DIRECTION_WORDS
+        return False
 
     def _action_mentions_door(self, action: str, *, family: str | None = None) -> bool:
         action_tokens = set(self._extract_action_content_tokens(action, family=family))
@@ -10089,7 +10096,7 @@ class GWTAutogenAgent(AutogenAgent):
                 support_role_hits=support_role_hits,
             )
 
-        if exploration_task and family == "relocation" and action not in tried_exits:
+        if exploration_task and self._is_agent_navigation_action(action, family=family) and action not in tried_exits:
             score += 6
             if exploration_room_search_stalled:
                 score += 4
