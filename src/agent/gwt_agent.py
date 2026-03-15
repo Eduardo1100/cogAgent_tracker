@@ -536,7 +536,8 @@ class GWTAutogenAgent(AutogenAgent):
         "focus": ("focus",),
         "inspect": ("inspect", "examine", "look at"),
         "relation": ("connect", "link", "disconnect"),
-        "relocation": ("go to", "enter", "move", "bring", "carry", "transport"),
+        "relocation": ("go to", "go", "enter", "move", "bring", "carry", "transport",
+                       "north", "south", "east", "west", "up", "down"),
         "transfer_or_transform": (
             "fill",
             "pour",
@@ -1023,12 +1024,19 @@ class GWTAutogenAgent(AutogenAgent):
             (
                 "move ",
                 "go to ",
+                "go ",
                 "enter ",
                 "pick up ",
                 "take ",
                 "grab ",
                 "put down ",
                 "drop ",
+                "north",
+                "south",
+                "east",
+                "west",
+                "up",
+                "down",
             ),
             "relocation",
         ),
@@ -4752,6 +4760,13 @@ class GWTAutogenAgent(AutogenAgent):
                     location_tokens.append(token)
             if location_tokens:
                 break
+        # Fallback: Jericho/Inform games output the room name as the first line
+        if not location_tokens:
+            match = re.match(r"^([A-Z][a-zA-Z0-9][a-zA-Z0-9\s\-']{1,38}?)\s*\n", observation or "")
+            if match:
+                for token in self._extract_runtime_tokens(match.group(1), limit=4):
+                    if token not in location_tokens:
+                        location_tokens.append(token)
         return location_tokens
 
     def _get_observation_grounded_tokens(self) -> list[str]:
@@ -9673,6 +9688,10 @@ class GWTAutogenAgent(AutogenAgent):
         if recent_repeat_count >= 2 and family in {"focus", "inspect"}:
             score -= 10
         elif recent_repeat_count >= 1 and family in {"focus", "inspect"}:
+            score -= 4
+        if recent_repeat_count >= 2 and family == "relocation":
+            score -= 8
+        elif recent_repeat_count >= 1 and family == "relocation":
             score -= 4
 
         if lifecycle_task:
