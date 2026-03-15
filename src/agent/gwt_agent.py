@@ -1048,7 +1048,7 @@ class GWTAutogenAgent(AutogenAgent):
             "relocation",
         ),
         (
-            ("pour ", "dunk ", "mix ", "fill ", "empty ", "insert ", "place "),
+            ("pour ", "dunk ", "mix ", "fill ", "empty ", "insert ", "place ", "put "),
             "transfer_or_transform",
         ),
         (
@@ -1069,6 +1069,10 @@ class GWTAutogenAgent(AutogenAgent):
             ("give ", "ask ", "tell ", "show ", "talk ", "say ", "pay "),
             "interaction",
         ),
+        (
+            ("hit ", "knock ", "push ", "pull ", "throw ", "attack "),
+            "manipulation",
+        ),
     )
     _DEPRIORITIZE_ELIGIBLE_FAMILIES = {
         "relation",
@@ -1076,6 +1080,16 @@ class GWTAutogenAgent(AutogenAgent):
         "transfer_or_transform",
         "device_control",
         "tool_application",
+    }
+    # Default quota/priority for families not explicitly listed in a phase dict.
+    # Adding a new action family only requires updating these constants + _ACTION_FAMILY_PREFIXES.
+    # Phases that need different values still override explicitly in their dicts.
+    _FAMILY_DEFAULT_QUOTA: dict[str, int] = {
+        "manipulation": 1,
+    }
+    _FAMILY_DEFAULT_PRIORITY: dict[str, int] = {
+        "manipulation": 2,
+        "other": -3,  # matches the explicit value in most phases; no behavioral change
     }
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
@@ -6657,7 +6671,8 @@ class GWTAutogenAgent(AutogenAgent):
                 "interaction": 1,
             },
         }
-        return quotas_by_phase.get(current_phase, quotas_by_phase["act"])
+        phase_quotas = quotas_by_phase.get(current_phase, quotas_by_phase["act"])
+        return {**GWTAutogenAgent._FAMILY_DEFAULT_QUOTA, **phase_quotas}
 
     @staticmethod
     def _get_family_priority(current_phase: str, family: str) -> int:
@@ -6987,9 +7002,8 @@ class GWTAutogenAgent(AutogenAgent):
                 "idle": -5,
             },
         }
-        return priorities_by_phase.get(current_phase, priorities_by_phase["act"]).get(
-            family, 0
-        )
+        phase_priorities = priorities_by_phase.get(current_phase, priorities_by_phase["act"])
+        return {**GWTAutogenAgent._FAMILY_DEFAULT_PRIORITY, **phase_priorities}.get(family, 0)
 
     _BARE_DIRECTION_WORDS: frozenset[str] = frozenset(
         {
@@ -9790,6 +9804,8 @@ class GWTAutogenAgent(AutogenAgent):
             score -= 2
         if family == "interaction" and (grounded_hits or target_hits):
             score += 3
+        if family == "manipulation" and (grounded_hits or target_hits):
+            score += 2
         invalid_repeat_count = self._invalid_exact_actions.get(normalized, 0)
         if invalid_repeat_count:
             score -= 12 + invalid_repeat_count * 4
@@ -10489,6 +10505,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "tool_application": 1,
                 "relation": 1,
                 "interaction": 2,
+                "manipulation": 2,
                 "focus": 0,
             }
         if "ordered_sequence" in self._get_task_contract().get(

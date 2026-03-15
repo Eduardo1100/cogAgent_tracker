@@ -719,6 +719,54 @@ def test_interaction_family_classification(tmp_path):
     assert agent._classify_action_family("take key") == "relocation"
 
 
+def test_manipulation_family_classification(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    assert agent._classify_action_family("hit window") == "manipulation"
+    assert agent._classify_action_family("knock door") == "manipulation"
+    assert agent._classify_action_family("push cart") == "manipulation"
+    assert agent._classify_action_family("pull lever") == "manipulation"
+    assert agent._classify_action_family("throw rock") == "manipulation"
+    assert agent._classify_action_family("attack troll") == "manipulation"
+    # No collision
+    assert agent._classify_action_family("give attendant card") == "interaction"
+    assert agent._classify_action_family("take key") == "relocation"
+
+
+def test_put_jericho_word_order_classified_as_transfer(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    # Jericho word order: put X down / put X in Y -> transfer_or_transform
+    assert agent._classify_action_family("put notepad down") == "transfer_or_transform"
+    assert agent._classify_action_family("put all in curb") == "transfer_or_transform"
+    assert agent._classify_action_family("put newspaper in car") == "transfer_or_transform"
+    # ScienceWorld word order: put down X -> relocation (backward compat)
+    assert agent._classify_action_family("put down notepad") == "relocation"
+
+
+def test_manipulation_default_quota_and_exploration_shortlist(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    # Default quota via _FAMILY_DEFAULT_QUOTA (no explicit per-phase entry needed)
+    assert agent._get_shortlist_family_quotas("act").get("manipulation") == 1
+    assert agent._get_shortlist_family_quotas("locate_primary_target").get("manipulation") == 1
+    # Default priority via _FAMILY_DEFAULT_PRIORITY
+    assert agent._get_family_priority("locate_primary_target", "manipulation") == 2
+    assert agent._get_family_priority("act", "manipulation") == 2
+
+    # Regression test: hit window must reach shortlist in exploration task
+    agent.task = "Explore the area and find the entrance."
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    agent.percept = {
+        "resulting_observation": (
+            "You are outside. There is a window here. You can go east or west."
+        )
+    }
+    summary = agent._summarize_admissible_actions(
+        ["hit window", "east", "west"],
+        shortlist_limit=12,
+    )
+    assert "hit window" in summary["task_relevant_action_shortlist"]
+
+
 def test_shortlist_floor_admits_interaction_when_quotas_sparse(tmp_path):
     """Verify shortlist floor fills to 3 items when quota-based selection yields fewer."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
