@@ -145,7 +145,7 @@
 - If you change SQLAlchemy models, inspect Alembic impact immediately.
 - Keep Docker and local env assumptions aligned. A change that works only for `localhost` or only for Compose hostnames is incomplete.
 - Preserve `uv`/`mise` workflows; do not introduce ad hoc package-management paths unless explicitly requested.
-- Keep Python compatible with `>=3.11,<3.12` even though Ruff targets `py313`.
+- Keep Python compatible with `>=3.12,<3.13` (project requires Python 3.12; CI uses 3.12.10).
 
 ## Verification Strategy
 - Small Python changes:
