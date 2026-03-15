@@ -33,10 +33,10 @@ ENV UV_LINK_MODE=copy \
 
 COPY pyproject.toml uv.lock ./
 
-RUN uv python install 3.11.15
+RUN uv python install 3.12.10
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --python 3.11.15
+    uv sync --frozen --no-install-project --no-dev --python 3.12.10
 
 # ==========================================
 # Stage 3: Runtime
@@ -65,11 +65,11 @@ COPY --from=builder /opt/uv-python /opt/uv-python
 
 # make python available on PATH
 RUN mkdir -p /usr/local/bin && \
-    PY="$(find /opt/uv-python -type f -path '*/bin/python3.11' | head -n 1)" && \
+    PY="$(find /opt/uv-python -type f -path '*/bin/python3.12' | head -n 1)" && \
     test -n "$PY" && test -x "$PY" && \
-    ln -sf "$PY" /usr/local/bin/python3.11 && \
-    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 && \
-    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python
+    ln -sf "$PY" /usr/local/bin/python3.12 && \
+    ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3 && \
+    ln -sf /usr/local/bin/python3.12 /usr/local/bin/python
 
 # writable runtime dirs
 RUN mkdir -p /opt/venv /opt/uv-cache /datasets/alfworld /wandb
