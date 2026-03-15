@@ -31,6 +31,8 @@ PROMPT_TEMPLATE_PATHS = {
 CODEX_MODEL = "gpt-5.4"
 CODEX_REASONING_EFFORT = "xhigh"
 
+AGENT_CHOICES = ("claudecode", "codex")
+
 
 class IterationWorkflowError(RuntimeError):
     pass
@@ -135,8 +137,8 @@ def wait_for_experiment(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run or reuse a ScienceWorld debug episode and hand the resulting "
-            "experiment to Codex for either a new iteration or a consolidation pass."
+            "Run or reuse a tales debug episode and hand the resulting "
+            "experiment to an agent for either a new iteration or a consolidation pass."
         )
     )
     parser.add_argument(
@@ -144,14 +146,26 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("iterate", "ablate"),
         default="iterate",
         help=(
-            "Iteration mode. `iterate` asks Codex for a new improvement iteration; "
-            "`ablate` asks Codex to simplify or consolidate recent changes."
+            "Iteration mode. `iterate` asks the agent for a new improvement iteration; "
+            "`ablate` asks the agent to simplify or consolidate recent changes."
         ),
     )
     parser.add_argument(
         "--env",
-        default="scienceworld",
+        default="tales",
         help="Environment type to use for make debug and experiment lookup.",
+    )
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=None,
+        help="Number of games to run in the debug episode (passed as GAMES=N to make debug).",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=AGENT_CHOICES,
+        default="claudecode",
+        help="Agent to invoke for the iteration pass (default: claudecode).",
     )
     parser.add_argument(
         "--skip-debug",
@@ -172,12 +186,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-only",
         action="store_true",
-        help="Print the rendered Codex prompt and stop before invoking Codex.",
+        help="Print the rendered prompt and stop before invoking the agent.",
     )
     parser.add_argument(
         "--dangerous",
         action="store_true",
-        help="Invoke Codex with --dangerously-bypass-approvals-and-sandbox.",
+        help="Invoke the agent with its bypass-approvals/sandbox flag.",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -202,6 +216,19 @@ def build_codex_command(*, dangerous: bool) -> list[str]:
         command.append("--dangerously-bypass-approvals-and-sandbox")
     command.extend(["-C", str(REPO_ROOT), "-"])
     return command
+
+
+def build_claude_code_command(*, dangerous: bool) -> list[str]:
+    command = ["claude", "--print"]
+    if dangerous:
+        command.append("--dangerously-skip-permissions")
+    return command
+
+
+def build_agent_command(agent: str, *, dangerous: bool) -> list[str]:
+    if agent == "codex":
+        return build_codex_command(dangerous=dangerous)
+    return build_claude_code_command(dangerous=dangerous)
 
 
 def main() -> int:
@@ -230,8 +257,11 @@ def main() -> int:
 
     experiment_id = args.experiment_id
     if experiment_id is None and not args.skip_debug:
+        debug_cmd = ["make", "debug", f"ENV={args.env}"]
+        if args.games is not None:
+            debug_cmd.append(f"GAMES={args.games}")
         debug_result = subprocess.run(
-            ["make", "debug", f"ENV={args.env}"],
+            debug_cmd,
             cwd=REPO_ROOT,
             check=False,
         )
@@ -295,7 +325,7 @@ def main() -> int:
         return 0
 
     return subprocess.run(
-        build_codex_command(dangerous=args.dangerous),
+        build_agent_command(args.agent, dangerous=args.dangerous),
         cwd=REPO_ROOT,
         text=True,
         input=prompt,

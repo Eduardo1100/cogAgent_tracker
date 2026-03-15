@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug iterate-scienceworld ablate-scienceworld test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
+.PHONY: help setup dev train eval debug iterate-tales ablate-tales test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -38,11 +38,25 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales. ALFWorl
 	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1))))) \
 	--gwt'
 
-iterate-scienceworld: ## Run one random ScienceWorld debug episode, then hand the resulting experiment to Codex. Optional: SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
-	uv run python scripts/iterate_scienceworld.py $(if $(SKIP_DEBUG),--skip-debug,) $(if $(ALLOW_DIRTY),--allow-dirty,) $(if $(PROMPT_ONLY),--prompt-only,) $(if $(DANGEROUS),--dangerous,)
+iterate-tales: ## Run one tales debug episode then hand to agent. ENV=tales GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+	uv run python scripts/iterate_scienceworld.py \
+	  $(if $(ENV),--env $(ENV),) \
+	  $(if $(GAMES),--games $(GAMES),) \
+	  $(if $(AGENT),--agent $(AGENT),) \
+	  $(if $(SKIP_DEBUG),--skip-debug,) \
+	  $(if $(ALLOW_DIRTY),--allow-dirty,) \
+	  $(if $(PROMPT_ONLY),--prompt-only,) \
+	  $(if $(DANGEROUS),--dangerous,)
 
-ablate-scienceworld: ## Reuse the latest ScienceWorld experiment for a consolidation/ablation Codex pass. Optional: RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
-	uv run python scripts/iterate_scienceworld.py --mode ablate $(if $(RUN_DEBUG),,--skip-debug) $(if $(ALLOW_DIRTY),--allow-dirty,) $(if $(PROMPT_ONLY),--prompt-only,) $(if $(DANGEROUS),--dangerous,)
+ablate-tales: ## Reuse the latest tales experiment for a consolidation/ablation pass. ENV=tales GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+	uv run python scripts/iterate_scienceworld.py --mode ablate \
+	  $(if $(ENV),--env $(ENV),) \
+	  $(if $(GAMES),--games $(GAMES),) \
+	  $(if $(AGENT),--agent $(AGENT),) \
+	  $(if $(RUN_DEBUG),,--skip-debug) \
+	  $(if $(ALLOW_DIRTY),--allow-dirty,) \
+	  $(if $(PROMPT_ONLY),--prompt-only,) \
+	  $(if $(DANGEROUS),--dangerous,)
 
 test: ## Run tests with pytest
 	uv run pytest tests/

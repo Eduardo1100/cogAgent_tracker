@@ -1,6 +1,6 @@
 You are continuing the cognitive-agent iteration workflow in {repo_root}.
 
-Random ScienceWorld experiment to analyze: {experiment_id}
+Random experiment to analyze: {experiment_id}
 Current stacked base branch: {current_branch}
 Suggested next agent-iteration number: {next_iteration}
 
@@ -13,7 +13,7 @@ Workflow:
 3. Implement only the best improvement, with token-efficiency, task generalization, and environment agnosticism as top priorities.
 4. If your changes affect runtime state, transcript persistence, or human debugging surfaces, update the analyst trace structure so it stays readable, intuitive, and interpretable without changing the model-facing conversation style. The analyst trace should remain text-file readable and, at minimum, preserve the full execute-action observation/percept plus the timestep-local belief state and other agent outputs in a structured multiline format. Maintain the Rich-based glossary and architecture explanation whenever new runtime terms or control structures appear.
 5. Update AGENTS.md if the new iteration changes the documented stack or workflow expectations.
-6. Run the relevant tests for the files you touched and make sure CI-equivalent checks pass before you finish.
-7. If the best change is a meaningful agent-behavior iteration, create a new stacked branch named `agent-iter-{next_iteration}-<topic>` from `{current_branch}`, commit the work, push it, and open a PR against `{current_branch}`.
+6. Run the relevant tests for the files you touched and make sure CI-equivalent checks pass before you finish. Use `uv run pytest tests/ -x -q` for the test suite.
+7. If the best change is a meaningful agent-behavior iteration, create a new stacked branch named `agent-iter-{next_iteration}-<topic>` from `{current_branch}` using `gt create agent-iter-{next_iteration}-<topic>`, commit the work with `gt commit`, push and open a PR with `gt submit --no-edit`, targeting `{current_branch}`.
 8. If the best change is cross-cutting and belongs on `main` instead of the agent stack, do not create an agent-iteration PR. Stop after explaining that recommendation clearly.
 9. Do not touch unrelated local changes already present in the worktree.
