@@ -5142,6 +5142,16 @@ class GWTAutogenAgent(AutogenAgent):
             return normalized[prefix_len:] in self._BARE_DIRECTION_WORDS
         return False
 
+    def _is_exploration_disposal_action(self, action: str) -> bool:
+        """Return True for disposal/drop verbs that clutter exploration shortlists."""
+        n = self._normalize_runtime_text(action)
+        return (
+            (n.startswith("put ") and n.endswith(" down"))
+            or n.startswith("put down ")
+            or n.startswith("drop ")
+            or n.startswith("throw ")
+        )
+
     def _action_mentions_door(self, action: str, *, family: str | None = None) -> bool:
         action_tokens = set(self._extract_action_content_tokens(action, family=family))
         return "door" in action_tokens or "doors" in action_tokens
@@ -10378,7 +10388,18 @@ class GWTAutogenAgent(AutogenAgent):
                 relation_frontier["commit_ready"] = True
                 relation_frontier["commit_candidates"] = relation_commit_candidates[:4]
 
+        exploration_task = bool(task_contract.get("exploration_task"))
         quotas = self._get_shortlist_family_quotas(current_phase)
+        if exploration_task:
+            quotas = {
+                "relocation": 6,
+                "inspect": 3,
+                "device_control": 2,
+                "transfer_or_transform": 1,
+                "tool_application": 1,
+                "relation": 1,
+                "focus": 0,
+            }
         if "ordered_sequence" in self._get_task_contract().get(
             "ordering_cues", []
         ) and set(grounded_tokens) & set(
@@ -10450,6 +10471,12 @@ class GWTAutogenAgent(AutogenAgent):
                 item["action"], family=item["family"]
             )
         }
+        if exploration_task:
+            blocked_actions.update(
+                item["action"]
+                for item in scored_actions
+                if self._is_exploration_disposal_action(item["action"])
+            )
         if unresolved_conditional_branch:
             blocked_actions.update(
                 item["action"]
@@ -10504,8 +10531,15 @@ class GWTAutogenAgent(AutogenAgent):
                 continue
             if item["action"] in blocked_actions:
                 continue
+            if exploration_task:
+                family = item["family"]
+                quota = quotas.get(family, 0)
+                if quota <= 0 or selected_by_family.get(family, 0) >= quota:
+                    continue
             shortlist.append(item["action"])
             selected_actions.add(item["action"])
+            if exploration_task:
+                selected_by_family[family] = selected_by_family.get(family, 0) + 1
 
         deprioritized_families = sorted(
             entry["family"]
