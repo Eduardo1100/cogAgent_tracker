@@ -1244,12 +1244,13 @@ def test_task_contract_preserves_primary_target_and_relation_roles(tmp_path):
     contract = agent._get_task_contract()
 
     assert "focus" in contract["required_families"]
-    assert "relation" in contract["required_families"]
+    # "relation" family now only triggers on "connect", "link", "disconnect"
+    # — "electrical circuit" was pruned as ScienceWorld-specific
+    assert "relation" not in contract["required_families"]
     assert contract["primary_targets"] == ["red light bulb"]
     assert contract["supporting_targets"] == ["renewable power source"]
     assert contract["required_relations"] == ["electrical circuit"]
     assert contract["inferred_search_mode"] is True
-    assert contract["relation_mechanism_task"] is True
     assert "red" in contract["target_entities"]
     assert "circuit" in contract["target_entities"]
     assert "create" not in contract["target_entities"]
@@ -1319,8 +1320,8 @@ def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_p
 def test_relation_shortlist_commits_after_primary_component_inspection(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (
-        "First, focus on the red light bulb. Then, create an electrical circuit "
-        "that powers it on."
+        "First, focus on the red light bulb. Then, connect the anode and cathode "
+        "to power it on."
     )
     agent.task_status = "INCOMPLETE"
     agent._reset_episode_reasoning_state()

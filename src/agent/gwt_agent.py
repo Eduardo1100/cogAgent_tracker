@@ -391,7 +391,6 @@ class GWTAutogenAgent(AutogenAgent):
         "current",
         "determine",
         "do",
-        "electrically",
         "first",
         "for",
         "from",
@@ -536,16 +535,7 @@ class GWTAutogenAgent(AutogenAgent):
     _TASK_FAMILY_HINTS = {
         "focus": ("focus",),
         "inspect": ("inspect", "examine", "look at"),
-        "relation": (
-            "connect",
-            "link",
-            "disconnect",
-            "circuit",
-            "electrical circuit",
-            "wire",
-            "anode",
-            "cathode",
-        ),
+        "relation": ("connect", "link", "disconnect"),
         "relocation": ("go to", "enter", "move", "bring", "carry", "transport"),
         "transfer_or_transform": (
             "fill",
@@ -572,6 +562,15 @@ class GWTAutogenAgent(AutogenAgent):
         "identify",
         "discover",
         "determine whether",
+    )
+    _EXPLORATION_TASK_HINTS = (
+        "explore the world",
+        "explore the",
+        "collect treasures",
+        "collect all",
+        "find all",
+        "gather all",
+        "navigate the",
     )
     _TASK_ARTIFACT_CREATION_HINTS = (
         "create",
@@ -735,9 +734,6 @@ class GWTAutogenAgent(AutogenAgent):
     _MEASUREMENT_TASK_STOPWORDS = {
         "above",
         "below",
-        "celsius",
-        "degrees",
-        "degree",
         "melting",
         "next",
         "point",
@@ -778,16 +774,12 @@ class GWTAutogenAgent(AutogenAgent):
         "create",
         "creating",
         "earliest",
-        "electrically",
         "identify",
         "latest",
         "life",
         "locate",
         "matter",
         "point",
-        "powered",
-        "powering",
-        "powers",
         "sequence",
         "stage",
         "stages",
@@ -1225,6 +1217,9 @@ class GWTAutogenAgent(AutogenAgent):
         self._last_analyst_trace_text = ""
         self._last_analyst_trace_ansi_text = ""
         self._analyst_trace_message_cursor = 0
+        self._episode_target_embeddings: "np.ndarray | None" = None
+        self._episode_target_entity_list: list[str] = []
+        self._action_embedding_cache: dict[str, "np.ndarray"] = {}
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -1239,6 +1234,10 @@ class GWTAutogenAgent(AutogenAgent):
         explicit_search_mode = any(
             self._task_contains_hint(task_lower, hint)
             for hint in self._TASK_SEARCH_HINTS
+        )
+        exploration_task = any(
+            self._task_contains_hint(task_lower, hint)
+            for hint in self._EXPLORATION_TASK_HINTS
         )
         (
             target_substances,
@@ -1392,6 +1391,14 @@ class GWTAutogenAgent(AutogenAgent):
             or conditional_branch_task
         ) and "inspect" not in required_families:
             support_families.append("inspect")
+
+        if exploration_task and not required_families:
+            required_families = ["relocation", "inspect"]
+        if exploration_task and not support_families:
+            support_families = ["device_control"]
+        if exploration_task:
+            explicit_search_mode = True
+            inferred_search_mode = True
 
         ordering_cues: list[str] = []
         ordering_tokens: set[str] = set()
@@ -1639,6 +1646,7 @@ class GWTAutogenAgent(AutogenAgent):
             "required_relations": role_phrases["required_relations"],
             "desired_transformation": desired_transformation,
             "transformation_direction": transformation_direction,
+            "exploration_task": exploration_task,
         }
 
     def _get_task_contract(self) -> dict:
@@ -1647,6 +1655,46 @@ class GWTAutogenAgent(AutogenAgent):
             self._task_contract = self._build_task_contract(task)
             self._task_contract_source = task
         return self._task_contract
+
+    def _get_target_entity_embeddings(self) -> "tuple[list[str], np.ndarray | None]":
+        contract = self._get_task_contract()
+        entities = contract.get("target_entities", [])
+        if not entities:
+            return [], None
+        if (
+            self._episode_target_entity_list == entities
+            and self._episode_target_embeddings is not None
+        ):
+            return self._episode_target_entity_list, self._episode_target_embeddings
+        try:
+            self._episode_target_entity_list = list(entities)
+            self._episode_target_embeddings = sentence_transformer_model.encode(
+                self._episode_target_entity_list, convert_to_tensor=False
+            )
+        except Exception:
+            self._episode_target_embeddings = None
+        return self._episode_target_entity_list, self._episode_target_embeddings
+
+    def _compute_semantic_entity_score(self, action_content: str) -> int:
+        _, target_vecs = self._get_target_entity_embeddings()
+        if target_vecs is None or not action_content:
+            return 0
+        try:
+            import numpy as np
+            action_vec = self._action_embedding_cache.get(action_content)
+            if action_vec is None:
+                action_vec = sentence_transformer_model.encode([action_content])[0]
+                if len(self._action_embedding_cache) < 512:
+                    self._action_embedding_cache[action_content] = action_vec
+            norms = np.linalg.norm(target_vecs, axis=1, keepdims=True)
+            action_norm = np.linalg.norm(action_vec)
+            if action_norm == 0 or np.any(norms == 0):
+                return 0
+            sims = (target_vecs / norms) @ (action_vec / action_norm)
+            max_sim = float(np.max(sims))
+            return round(max_sim * 8) if max_sim > 0.6 else 0
+        except Exception:
+            return 0
 
     @staticmethod
     def _task_contains_hint(task_text: str, hint: str) -> bool:
@@ -3936,7 +3984,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
         if self._state_change_target_is_grounded(contract, grounded_token_set):
             return False
-        if visible_doors < 2 or not current_room:
+        if visible_doors < 1 or not current_room:
             return False
         room_state = self._search_location_states.get(current_room, {})
         return bool(
@@ -3980,7 +4028,7 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         if self._get_grounded_artifact_labels(limit=1):
             return False
-        if visible_doors < 2 or not current_room:
+        if visible_doors < 1 or not current_room:
             return False
         room_state = self._search_location_states.get(current_room, {})
         return bool(
@@ -9475,6 +9523,7 @@ class GWTAutogenAgent(AutogenAgent):
         score += keyword_hits * 5
         score += grounded_hits * 6
         score += target_hits * 5
+        score += self._compute_semantic_entity_score(" ".join(content_tokens))
         if primary_full_match:
             score += 12
         elif primary_role_hits:
@@ -11052,7 +11101,7 @@ class GWTAutogenAgent(AutogenAgent):
             summary
             if summary is not None
             else self._summarize_admissible_actions(
-                self.admissible_actions, shortlist_limit=20
+                self.admissible_actions, shortlist_limit=15
             )
         )
         summary["task_relevant_action_shortlist"] = summary[
@@ -11097,7 +11146,7 @@ class GWTAutogenAgent(AutogenAgent):
             summary
             if summary is not None
             else self._summarize_admissible_actions(
-                self.admissible_actions, shortlist_limit=20
+                self.admissible_actions, shortlist_limit=15
             )
         )
         recent_invalid_actions = self._get_recent_invalid_actions()
@@ -11441,7 +11490,7 @@ class GWTAutogenAgent(AutogenAgent):
         if any(task_contract.values()):
             self.percept["task_contract"] = task_contract
         action_runtime_summary = self._summarize_admissible_actions(
-            self.admissible_actions, shortlist_limit=20
+            self.admissible_actions, shortlist_limit=15
         )
         shared_action_context = self._build_shared_action_context(
             summary=action_runtime_summary

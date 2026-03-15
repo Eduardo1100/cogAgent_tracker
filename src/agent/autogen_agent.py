@@ -75,7 +75,25 @@ class AutogenAgent:
             chat_result = fn()
         except Exception as e:
             error_message = self._recover_chat_error(e)
+            if error_message is None:
+                # Non-recoverable — log before discarding so triage is possible
+                self._log_chat_exception(e)
+                error_message = f"[chat_error] {type(e).__name__}: {e}"
         return chat_result, error_message
+
+    def _log_chat_exception(self, exc: Exception) -> None:
+        """Write a non-recoverable chat exception to error_message.txt."""
+        import traceback
+        error_path = (getattr(self, "log_paths", {}) or {}).get("error_message_path")
+        if not error_path:
+            return
+        try:
+            msg = f"[chat_error] {type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+            Path(error_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(error_path, "a") as f:
+                f.write(msg)
+        except Exception:
+            pass  # best-effort; never mask the original problem
 
     def run_chat(self, initial_message_content):
         assert self.start_agent is not None, "self.start_agent must be defined"
