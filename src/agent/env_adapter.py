@@ -377,6 +377,102 @@ _VARIANT_TASKS: dict[str, str] = {
 
 _ASCENSION_RE = re.compile(r"\b(ascended|escaped the Planes)\b", re.IGNORECASE)
 
+# ── NetHack glyph classification for surroundings summary ─────────────────────
+
+_NH_GLYPH: dict[str, str] = {
+    # Walls & rock
+    "|": "wall", "-": "wall", " ": "rock",
+    # Floor & corridors
+    ".": "floor", "#": "corridor",
+    # Doors
+    "+": "closed door", "'": "open door",
+    # Stairs
+    "<": "upstairs", ">": "downstairs",
+    # Water / lava / air
+    "}": "water/pool", "{": "fountain", "\\": "throne",
+    "^": "trap", "_": "altar",
+    # Items (broad categories)
+    ")": "weapon", "[": "armor", "!": "potion", "?": "scroll",
+    "/": "wand", "=": "ring", '"': "amulet", "$": "gold",
+    "*": "gem/rock", "%": "corpse/food", "(": "tool", "`": "statue/boulder",
+}
+
+# Characters that are walkable (floor-like)
+_NH_WALKABLE = frozenset(".#<>}{\\^_+'\"")
+
+_DIRECTION_LABELS = {
+    (-1, 0): "north",
+    (1, 0): "south",
+    (0, -1): "west",
+    (0, 1): "east",
+    (-1, -1): "northwest",
+    (-1, 1): "northeast",
+    (1, -1): "southwest",
+    (1, 1): "southeast",
+}
+
+
+def _parse_surroundings(tty_chars) -> str | None:
+    """Parse the 24x80 TTY grid and return a concise spatial summary.
+
+    Returns None if the player position cannot be found.
+    """
+    # Find @ position (skip row 0 which is often the message line)
+    player_row, player_col = None, None
+    for r in range(24):
+        for c in range(80):
+            if chr(tty_chars[r][c]) == "@":
+                player_row, player_col = r, c
+                break
+        if player_row is not None:
+            break
+
+    if player_row is None:
+        return None
+
+    parts: list[str] = []
+    walkable_dirs: list[str] = []
+    blocked_dirs: list[str] = []
+
+    for (dr, dc), direction in _DIRECTION_LABELS.items():
+        nr, nc = player_row + dr, player_col + dc
+        if 0 <= nr < 24 and 0 <= nc < 80:
+            ch = chr(tty_chars[nr][nc])
+            label = _NH_GLYPH.get(ch)
+            if label is None:
+                # Uppercase = monster, lowercase = monster/pet, other = unknown
+                if ch.isalpha():
+                    label = f"creature '{ch}'"
+                elif ch == ":":
+                    label = "creature ':'"
+                elif ch == ";":
+                    label = "creature ';'"
+                elif ch == "&":
+                    label = "creature '&'"
+                elif ch == "@":
+                    label = "creature '@'"
+                else:
+                    label = f"'{ch}'"
+
+            if ch in _NH_WALKABLE or ch.isalpha():
+                walkable_dirs.append(direction)
+
+            parts.append(f"  {direction}: {label}")
+
+            if ch in ("|", "-", " "):
+                blocked_dirs.append(direction)
+        else:
+            blocked_dirs.append(direction)
+
+    lines = ["[Surroundings]"]
+    lines.extend(parts)
+    if walkable_dirs:
+        lines.append(f"  passable: {', '.join(walkable_dirs)}")
+    if blocked_dirs:
+        lines.append(f"  blocked: {', '.join(blocked_dirs)}")
+
+    return "\n".join(lines)
+
 # Patterns for interactive prompts that the agent cannot answer through the
 # normal action space.  Auto-confirming prevents the cognitive loop from
 # burning its entire action budget on an unanswerable prompt.
@@ -475,10 +571,17 @@ class NetHackAdapter:
     def observation(self) -> str:
         if self._obs_override is not None:
             return self._obs_override
-        return self._render_tty(self._obs)
+        screen = self._render_tty(self._obs)
+        surroundings = _parse_surroundings(self._obs["tty_chars"])
+        if surroundings:
+            return screen + "\n" + surroundings
+        return screen
 
     @property
     def initial_observation(self) -> str:
+        surroundings = _parse_surroundings(self._obs["tty_chars"])
+        if surroundings:
+            return self._initial_obs_str + "\n" + surroundings
         return self._initial_obs_str
 
     @property
