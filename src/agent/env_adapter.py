@@ -377,6 +377,12 @@ _VARIANT_TASKS: dict[str, str] = {
 
 _ASCENSION_RE = re.compile(r"\b(ascended|escaped the Planes)\b", re.IGNORECASE)
 
+# Patterns for interactive prompts that the agent cannot answer through the
+# normal action space.  Auto-confirming prevents the cognitive loop from
+# burning its entire action budget on an unanswerable prompt.
+_YN_PROMPT_RE = re.compile(r"\[y[naq]+\]")
+_MORE_PROMPT_RE = re.compile(r"--More--")
+
 
 class NetHackAdapter:
     """EnvironmentAdapter for the NetHack Learning Environment (NLE)."""
@@ -399,9 +405,49 @@ class NetHackAdapter:
         self._render = render
 
         self._action_labels, self._label_to_idx = _build_action_labels(env)
+        self._yn_confirm_idx = self._find_char_action_idx(env, ord("y"))
+        self._more_dismiss_idx = self._find_char_action_idx(env, ord(" "))
         self._initial_obs_str = self._render_tty(obs)
         if self._render:
             self._print_tty(self._initial_obs_str)
+
+    # ── prompt helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_char_action_idx(env, char_ord: int) -> int | None:
+        """Return the action-space index whose enum value equals *char_ord*, or None."""
+        action_space = env.unwrapped.actions if hasattr(env, "unwrapped") else env.actions
+        for idx, action in enumerate(action_space):
+            val = getattr(action, "value", None)
+            if val is not None and int(val) == char_ord:
+                return idx
+        return None
+
+    def _auto_dismiss_prompts(self) -> None:
+        """Auto-confirm [ynq] prompts and dismiss --More-- messages.
+
+        NetHack uses interactive prompts (e.g. "eat it? [ynq]") that the agent
+        cannot answer through the normal action shortlist.  When the agent
+        deliberately chose an action (eat, quaff, …), the confirmation is a
+        formality — auto-sending 'y' preserves intent and prevents the
+        cognitive loop from stalling.  --More-- messages are similarly
+        auto-dismissed so the agent always sees the final game state.
+        """
+        for _ in range(5):  # bounded loop to prevent infinite cycling
+            if self._terminated:
+                break
+            screen = self._render_tty(self._obs)
+            if self._yn_confirm_idx is not None and _YN_PROMPT_RE.search(screen):
+                send_idx = self._yn_confirm_idx
+            elif self._more_dismiss_idx is not None and _MORE_PROMPT_RE.search(screen):
+                send_idx = self._more_dismiss_idx
+            else:
+                break
+            obs, reward, terminated, truncated, info = self._env.step(send_idx)
+            self._obs = obs
+            self._info = info
+            self._terminated = terminated or truncated
+            self._cumulative_reward += float(reward)
 
     # ── rendering ─────────────────────────────────────────────────────────
 
@@ -477,6 +523,7 @@ class NetHackAdapter:
         self._info = info
         self._terminated = terminated or truncated
         self._cumulative_reward += float(reward)
+        self._auto_dismiss_prompts()
         result = self.observation
         if self._render:
             self._print_tty(result)
