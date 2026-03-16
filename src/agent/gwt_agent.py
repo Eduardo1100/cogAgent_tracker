@@ -800,6 +800,29 @@ class GWTAutogenAgent(AutogenAgent):
         "use chemistry to produce",
         "use chemistry to synthesize",
     )
+    # Labels whose first token is one of these are recipe/instruction documents,
+    # not the actual artifact substance.  Filtering them out prevents the recipe
+    # object (e.g. "instructions to make sugar water") from being mistakenly
+    # tracked as a grounded artifact and incorrectly boosting focus-on-recipe
+    # actions in the shortlist scorer.
+    _RECIPE_DOCUMENT_NOUN_PREFIXES = frozenset(
+        {
+            "book",
+            "description",
+            "directions",
+            "formula",
+            "guide",
+            "instructions",
+            "label",
+            "manual",
+            "message",
+            "note",
+            "notice",
+            "recipe",
+            "sign",
+            "text",
+        }
+    )
     _CONDITIONAL_BRANCH_TASK_STOPWORDS = {
         "answer",
         "branch",
@@ -2777,11 +2800,24 @@ class GWTAutogenAgent(AutogenAgent):
                     grounded_labels.append(label)
         return grounded_labels[:6]
 
+    def _is_recipe_document_label(self, label: str) -> bool:
+        """Return True if a normalized artifact label names a recipe/instruction document.
+
+        Recipe document objects (e.g. "instructions make sugar water") contain the
+        artifact-type token and are therefore matched by the grounded-artifact
+        extraction patterns.  They are *not* the artifact itself and must not be
+        tracked as such.  We identify them by their first content token.
+        """
+        first_token = label.split()[0] if label else ""
+        return first_token in self._RECIPE_DOCUMENT_NOUN_PREFIXES
+
     def _record_grounded_artifact_labels(self, labels: list[str]) -> None:
         if not self._is_artifact_creation_task():
             return
 
         for label in labels:
+            if self._is_recipe_document_label(label):
+                continue
             entry = self._grounded_artifacts.setdefault(
                 label,
                 {
