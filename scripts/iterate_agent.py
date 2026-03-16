@@ -27,10 +27,10 @@ from src.storage.models import ExperimentRun
 
 RUNS_ROOT = REPO_ROOT / "runs"
 PROMPT_TEMPLATE_PATHS = {
-    ("iterate", "claudecode"): REPO_ROOT / "prompts" / "iterate_cogfix_prompt.txt",
-    ("ablate", "claudecode"): REPO_ROOT / "prompts" / "ablate_cogfix_prompt.txt",
-    ("iterate", "codex"): REPO_ROOT / "prompts" / "iterate_scienceworld_prompt.txt",
-    ("ablate", "codex"): REPO_ROOT / "prompts" / "ablate_scienceworld_prompt.txt",
+    ("iterate", "claudecode"): REPO_ROOT / "prompts" / "iterate_claude_prompt.txt",
+    ("ablate", "claudecode"): REPO_ROOT / "prompts" / "ablate_claude_prompt.txt",
+    ("iterate", "codex"): REPO_ROOT / "prompts" / "iterate_codex_prompt.txt",
+    ("ablate", "codex"): REPO_ROOT / "prompts" / "ablate_codex_prompt.txt",
 }
 CODEX_MODEL = "gpt-5.4"
 CODEX_REASONING_EFFORT = "xhigh"

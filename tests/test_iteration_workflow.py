@@ -9,7 +9,7 @@ from scripts.get_latest_experiment import (
     build_db_unavailable_message,
     describe_database_target,
 )
-from scripts.iterate_scienceworld import (
+from scripts.iterate_agent import (
     CODEX_MODEL,
     CODEX_REASONING_EFFORT,
     build_codex_command,

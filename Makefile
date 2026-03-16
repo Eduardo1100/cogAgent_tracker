@@ -39,7 +39,7 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales. ALFWorl
 	--gwt'
 
 iterate-tales: ## Run one tales debug episode then hand to agent. ENV=tales GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
-	uv run python scripts/iterate_scienceworld.py \
+	uv run python scripts/iterate_agent.py \
 	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
 	  $(if $(AGENT),--agent $(AGENT),) \
@@ -49,7 +49,7 @@ iterate-tales: ## Run one tales debug episode then hand to agent. ENV=tales GAME
 	  $(if $(DANGEROUS),--dangerous,)
 
 ablate-tales: ## Reuse the latest tales experiment for a consolidation/ablation pass. ENV=tales GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
-	uv run python scripts/iterate_scienceworld.py --mode ablate \
+	uv run python scripts/iterate_agent.py --mode ablate \
 	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
 	  $(if $(AGENT),--agent $(AGENT),) \
