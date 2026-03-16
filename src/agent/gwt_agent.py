@@ -373,6 +373,11 @@ class GWTAutogenAgent(AutogenAgent):
             "relation_frontier, measurement_tracking",
             "These become important after a direct mechanism setup still fails to produce the target effect.",
         ),
+        "thinking_agent_entity_hints": (
+            "Entity tokens extracted from the most recent Thinking_Agent message and injected into the grounded-token set.",
+            "grounded_tokens, salient_entities, shortlist",
+            "Closes the feedback loop between strategic reasoning and action selection: objects the Thinking_Agent names as inspection targets receive grounded-hit bonus points so the corresponding inspect actions rise into the top-8 shortlist.",
+        ),
     }
     _TASK_STOPWORDS = {
         "a",
@@ -4846,6 +4851,15 @@ class GWTAutogenAgent(AutogenAgent):
                 if token not in tokens:
                     tokens.append(token)
 
+        # Thinking_Agent entity hints: entities explicitly named as inspection
+        # targets in the most recent Thinking_Agent message.  Including them here
+        # gives those objects grounded-hit bonus points in the action-scoring step
+        # so that the corresponding inspect actions rise into the top-8 shortlist
+        # and become selectable by Action_Agent.
+        for token in self._get_thinking_agent_entity_hints():
+            if token not in tokens:
+                tokens.append(token)
+
         for token in observation_tokens:
             if token not in target_entities or token in tokens:
                 continue
@@ -4867,6 +4881,35 @@ class GWTAutogenAgent(AutogenAgent):
                 break
 
         return tokens[:12]
+
+    def _get_thinking_agent_entity_hints(self, *, limit: int = 4) -> list[str]:
+        """Return entity tokens extracted from the most recent Thinking_Agent message.
+
+        When the Thinking_Agent identifies specific objects as inspection targets
+        (e.g. "examine the signpost", "read the envelope"), those objects would
+        otherwise score zero grounded hits in the shortlist scorer and never
+        appear in the top-8 shortlist.  Feeding these tokens back into the
+        grounded-token set creates a closed feedback loop: strategic reasoning
+        from Thinking_Agent directly elevates the corresponding inspect actions
+        into the shortlist so Action_Agent can select them.
+        """
+        group_chat = getattr(self, "group_chat", None)
+        if group_chat is None:
+            return []
+        messages = getattr(group_chat, "messages", None) or []
+        thinking_content: str = ""
+        for msg in reversed(messages):
+            if (msg.get("name") or msg.get("role", "")) == "Thinking_Agent":
+                thinking_content = msg.get("content") or ""
+                break
+        if not thinking_content:
+            return []
+        stopwords = self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
+        return self._extract_runtime_tokens(
+            thinking_content,
+            stopwords=stopwords,
+            limit=limit,
+        )
 
     def _is_candidate_search_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
@@ -11079,6 +11122,10 @@ class GWTAutogenAgent(AutogenAgent):
 
         if self._recently_executed_actions:
             snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
+
+        thinking_hints = self._get_thinking_agent_entity_hints()
+        if thinking_hints:
+            snapshots["thinking_agent_entity_hints"] = thinking_hints
 
         return self._limit_runtime_payload(snapshots, list_limit=5)
 
