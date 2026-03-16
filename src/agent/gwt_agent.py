@@ -383,6 +383,11 @@ class GWTAutogenAgent(AutogenAgent):
             "navigation_outcomes, tried_exits, visit_count",
             "Populated from _navigation_outcomes once the agent has tried an exit and recorded where it leads. Exits in this set receive a scoring penalty in exploration tasks, so genuinely unexplored routes consistently outscore backtracking moves.",
         ),
+        "recipe_preparation_warnings": (
+            "Per-ingredient alerts when an entity in the current observation already satisfies all recipe-required transformation adjectives.",
+            "recipe_ingredient_states, task_contract, tool_application",
+            "If 'sliced fried purple potato' is observed and the recipe requires both slice and fry, this warns the agent not to re-cook it. Prevents destroying already-prepared ingredients by applying a second redundant transformation.",
+        ),
     }
     _TASK_STOPWORDS = {
         "a",
@@ -686,6 +691,11 @@ class GWTAutogenAgent(AutogenAgent):
         r"^-\s+(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)\b",
         re.IGNORECASE | re.MULTILINE,
     )
+    _RECIPE_DIRECTION_DETAIL_RE = re.compile(
+        r"^-\s+(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)"
+        r"\s+(?:the\s+|a\s+|an\s+)?(.+?)$",
+        re.IGNORECASE | re.MULTILINE,
+    )
     _RECIPE_INGREDIENTS_RE = re.compile(
         r"^-\s+(?:a\s+|an\s+|the\s+)?(.+?)$",
         re.IGNORECASE | re.MULTILINE,
@@ -694,6 +704,19 @@ class GWTAutogenAgent(AutogenAgent):
         r"ingredients?.*?:(.*?)(?:directions?|steps?).*?:(.*?)(?:\n\n|\Z)",
         re.IGNORECASE | re.DOTALL,
     )
+    _COOKING_VERB_TO_ADJECTIVE: dict[str, str] = {
+        "chop": "chopped",
+        "slice": "sliced",
+        "dice": "diced",
+        "grill": "grilled",
+        "fry": "fried",
+        "roast": "roasted",
+        "bake": "baked",
+        "cook": "cooked",
+        "heat": "heated",
+        "boil": "boiled",
+        "steam": "steamed",
+    }
 
     _TASK_ROLE_PATTERNS = {
         "primary_targets": (
@@ -4640,7 +4663,9 @@ class GWTAutogenAgent(AutogenAgent):
         self, action: str, observation: str
     ) -> None:
         """If a cookbook/recipe was just read, extract ingredients and inject
-        them as discovered primary_targets in the task contract cache."""
+        them as discovered primary_targets in the task contract cache.
+        Also extracts per-ingredient transformation requirements so the agent
+        can detect when an ingredient is already fully prepared."""
         if not re.search(r"\b(?:read|check|examine)\b", action, re.IGNORECASE):
             return
         match = self._RECIPE_SECTION_RE.search(observation)
@@ -4667,6 +4692,61 @@ class GWTAutogenAgent(AutogenAgent):
             "required_families", []
         ):
             contract.setdefault("required_families", []).append("tool_application")
+        # Extract per-ingredient transformation requirements for preparation-state detection
+        ingredient_states: dict[str, list[str]] = contract.get(
+            "recipe_ingredient_states", {}
+        )
+        for dm in self._RECIPE_DIRECTION_DETAIL_RE.finditer(directions_block):
+            verb = dm.group(1).lower()
+            raw_target = re.sub(
+                r"^(?:a|an|the)\s+", "", dm.group(2).strip().lower()
+            )
+            adjective = self._COOKING_VERB_TO_ADJECTIVE.get(verb)
+            if adjective and raw_target:
+                bucket = ingredient_states.setdefault(raw_target, [])
+                if adjective not in bucket:
+                    bucket.append(adjective)
+        if ingredient_states:
+            contract["recipe_ingredient_states"] = ingredient_states
+
+    def _get_recipe_preparation_warnings(self, observation: str) -> list[str]:
+        """Return per-ingredient warnings when an entity in the observation
+        already satisfies all transformation adjectives required by the recipe.
+
+        For example: if the recipe says 'slice the purple potato' and 'fry the
+        purple potato', and the observation contains 'sliced fried purple
+        potato', this returns a warning so the agent does not re-cook it.
+        Uses a sliding window over observation word-tokens (punctuation
+        stripped) to detect local entity phrases that contain both the
+        ingredient base tokens and all required transformation adjectives.
+        """
+        contract = self._get_task_contract()
+        required_states: dict[str, list[str]] = contract.get(
+            "recipe_ingredient_states", {}
+        )
+        if not required_states:
+            return []
+        obs_lower = self._normalize_runtime_text(observation)
+        # Tokenise by pure alphabetic runs so punctuation ("potato,") doesn't
+        # break membership tests.
+        obs_words = re.findall(r"[a-z]+", obs_lower)
+        warnings: list[str] = []
+        for ingredient_base, required_adjectives in required_states.items():
+            if not required_adjectives:
+                continue
+            base_tokens = re.findall(r"[a-z]+", ingredient_base.lower())
+            target_tokens = set(required_adjectives) | set(base_tokens)
+            window_size = len(target_tokens) + 4
+            for i in range(len(obs_words)):
+                window_words = set(obs_words[i : i + window_size])
+                if target_tokens.issubset(window_words):
+                    adj_str = " + ".join(required_adjectives)
+                    warnings.append(
+                        f"{ingredient_base}: already {adj_str}"
+                        f" (recipe requirements met — do not re-cook)"
+                    )
+                    break
+        return warnings
 
     def _extract_candidate_classes(self, task: str) -> list[str]:
         normalized_task = self._normalize_runtime_text(task).replace("a(n)", "an")
@@ -11939,6 +12019,11 @@ class GWTAutogenAgent(AutogenAgent):
         candidate_tracking = self._get_candidate_tracking_snapshot()
         if self._snapshot_has_signal(candidate_tracking):
             self.percept["candidate_tracking"] = candidate_tracking
+        recipe_prep_warnings = self._get_recipe_preparation_warnings(
+            self.adapter.observation
+        )
+        if recipe_prep_warnings:
+            self.percept["recipe_preparation_warnings"] = recipe_prep_warnings
         if self.num_actions_taken > 0:
             if shared_action_context["newly_relevant_actions"]:
                 self.percept["newly_relevant_actions"] = shared_action_context[

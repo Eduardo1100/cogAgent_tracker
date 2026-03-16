@@ -5047,3 +5047,115 @@ def test_revisit_exit_penalty_not_applied_outside_exploration_task(tmp_path):
         f"revisit penalty must not fire outside exploration tasks "
         f"(south={score_south}, down={score_down})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Recipe ingredient preparation-state detection (cogfix-20)
+# ---------------------------------------------------------------------------
+
+_SAMPLE_RECIPE_OBS = """\
+You read the cookbook.
+
+Recipe #1
+
+Ingredients:
+- banana
+- block of cheese
+- purple potato
+
+Directions:
+- dice the banana
+- roast the banana
+- dice the block of cheese
+- fry the block of cheese
+- slice the purple potato
+- fry the purple potato
+"""
+
+
+def test_recipe_observation_populates_ingredient_states(tmp_path):
+    """Reading a cookbook should store per-ingredient transformation requirements
+    in the task contract under 'recipe_ingredient_states'."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    agent._update_task_contract_from_recipe_observation(
+        action="examine cookbook", observation=_SAMPLE_RECIPE_OBS
+    )
+
+    contract = agent._get_task_contract()
+    states = contract.get("recipe_ingredient_states", {})
+    assert "purple potato" in states, f"purple potato missing from states: {states}"
+    assert set(states["purple potato"]) == {"sliced", "fried"}, states["purple potato"]
+    assert "banana" in states
+    assert set(states["banana"]) == {"diced", "roasted"}, states["banana"]
+
+
+def test_recipe_ingredient_states_not_populated_for_non_examine_action(tmp_path):
+    """recipe_ingredient_states should only be extracted when the action is
+    examine/read/check — other actions must not trigger recipe parsing."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    agent._update_task_contract_from_recipe_observation(
+        action="go north", observation=_SAMPLE_RECIPE_OBS
+    )
+
+    contract = agent._get_task_contract()
+    assert "recipe_ingredient_states" not in contract
+
+
+def test_get_recipe_preparation_warnings_detects_fully_prepared_ingredient(tmp_path):
+    """_get_recipe_preparation_warnings should return a warning when an entity
+    in the observation already satisfies all required transformation adjectives."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    # Seed the task contract with recipe requirements
+    agent._update_task_contract_from_recipe_observation(
+        action="examine cookbook", observation=_SAMPLE_RECIPE_OBS
+    )
+
+    obs_with_prepared = (
+        "You are in the kitchen. On the counter you see: a sliced fried purple potato, "
+        "a diced roasted banana, and a raw block of cheese."
+    )
+    warnings = agent._get_recipe_preparation_warnings(obs_with_prepared)
+
+    warning_text = " ".join(warnings)
+    assert "purple potato" in warning_text, f"Expected purple potato warning, got: {warnings}"
+    assert "do not re-cook" in warning_text, f"Expected do-not-re-cook hint, got: {warnings}"
+    assert "banana" in warning_text, f"Expected banana warning, got: {warnings}"
+
+
+def test_get_recipe_preparation_warnings_no_false_positive_for_partial_prep(tmp_path):
+    """No warning should fire when only some (not all) required adjectives are
+    present for an ingredient in the observation."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    agent._update_task_contract_from_recipe_observation(
+        action="examine cookbook", observation=_SAMPLE_RECIPE_OBS
+    )
+
+    # purple potato is only sliced, NOT fried yet
+    obs_partial = (
+        "You are in the kitchen. On the counter you see: a sliced purple potato."
+    )
+    warnings = agent._get_recipe_preparation_warnings(obs_partial)
+
+    # purple potato requires BOTH sliced AND fried — partial prep must not warn
+    for w in warnings:
+        assert "purple potato" not in w, (
+            f"False positive: partial-prep purple potato triggered warning: {w}"
+        )
+
+
+def test_get_recipe_preparation_warnings_empty_when_no_recipe_parsed(tmp_path):
+    """With no recipe in the task contract, the method must return an empty list."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal."
+
+    obs = "You see a fried sliced purple potato."
+    warnings = agent._get_recipe_preparation_warnings(obs)
+    assert warnings == []
