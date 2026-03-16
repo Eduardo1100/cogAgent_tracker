@@ -7604,6 +7604,7 @@ class GWTAutogenAgent(AutogenAgent):
             entry["confidence"] = min(1.0, entry["confidence"] + 0.1)
         elif outcome == "evidence":
             entry["evidence_attempts"] += 1
+            entry["confidence"] = min(1.0, entry["confidence"] + 0.05)
         elif outcome == "stalled":
             entry["stalled_attempts"] += 1
             entry["confidence"] = max(0.0, entry["confidence"] - 0.15)
