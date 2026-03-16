@@ -1254,6 +1254,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._episode_target_entity_list: list[str] = []
         self._action_embedding_cache: dict[str, "np.ndarray"] = {}
         self._empty_admissible_streak: int = 0
+        self._recently_failed_actions: list[str] = []
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -10841,6 +10842,8 @@ class GWTAutogenAgent(AutogenAgent):
             snapshots["remote_room_signal"] = remote_room_signal
         if self.percept.get("referent_resolution"):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
+        if self._recently_failed_actions:
+            snapshots["recently_failed_actions"] = list(self._recently_failed_actions)
         return snapshots
 
     def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
@@ -12294,6 +12297,9 @@ class GWTAutogenAgent(AutogenAgent):
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
                 )
                 # Inadmissible actions don't consume the action budget
+                self._recently_failed_actions = (
+                    self._recently_failed_actions + [suggested_action]
+                )[-3:]
             else:
                 executed_action = action
                 self.adapter.step(action)
