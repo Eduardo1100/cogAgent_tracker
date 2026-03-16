@@ -151,6 +151,7 @@ def test_render_iteration_prompt_replaces_template_fields(tmp_path):
         current_branch="agent-iter-11-property-aware-measurement",
         next_iteration=12,
         repo_root=tmp_path,
+        latest_run_dir="/tmp/runs/2026-01-01 00:00:00",
     )
 
     assert "Experiment 82" in prompt
@@ -176,16 +177,16 @@ def test_build_codex_command_includes_dangerous_flag_when_requested():
 
 
 def test_load_prompt_template_supports_iteration_and_ablation_modes():
-    iterate_template = load_prompt_template("iterate")
-    ablate_template = load_prompt_template("ablate")
+    iterate_template = load_prompt_template("iterate", "claudecode")
+    ablate_template = load_prompt_template("ablate", "claudecode")
 
     assert "continuing the cognitive-agent iteration workflow" in iterate_template
     assert "update the analyst trace structure" in iterate_template
-    assert "CI-equivalent checks pass" in iterate_template
+    assert "uv run pytest tests/" in iterate_template
     assert "continuing the cognitive-agent consolidation workflow" in ablate_template
-    assert "update the analyst trace format" in ablate_template
-    assert "CI-equivalent checks pass" in ablate_template
-    assert "agent-iter-{next_iteration}-consolidate-<topic>" in ablate_template
+    assert "analyst trace format" in ablate_template
+    assert "uv run pytest tests/" in ablate_template
+    assert "cogfix-{next_iteration}-consolidate-<topic>" in ablate_template
 
 
 def test_build_parser_accepts_ablation_mode():
