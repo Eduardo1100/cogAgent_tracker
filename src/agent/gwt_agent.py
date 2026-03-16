@@ -63,6 +63,13 @@ class GWTAutogenAgent(AutogenAgent):
         ),
     }
     _ANALYST_TERM_GLOSSARY = {
+        "forced_deliberation": (
+            "Periodic override that invokes Thinking_Agent after N actions "
+            "without any deliberation, even if the belief state shows no uncertainty.",
+            "_FORCED_DELIBERATION_INTERVAL, _actions_since_last_thinking, Thinking_Agent",
+            "Prevents long stretches of unreflective action cycling where the agent "
+            "confidently repeats unproductive actions without strategic correction.",
+        ),
         "task_contract": (
             "Runtime decomposition of the task into goals, roles, and control signals.",
             "required_families, support_families, primary_targets, supporting_targets",
@@ -1211,6 +1218,9 @@ class GWTAutogenAgent(AutogenAgent):
         "manipulation": 2,
         "other": -3,  # matches the explicit value in most phases; no behavioral change
     }
+    # Force Thinking_Agent every N actions even when Belief_State_Agent shows
+    # no uncertainty.  Prevents long stretches of unreflective action cycling.
+    _FORCED_DELIBERATION_INTERVAL = 5
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
@@ -1380,6 +1390,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._empty_admissible_streak: int = 0
         self._recently_failed_actions: list[str] = []
         self._recently_executed_actions: list[str] = []
+        self._actions_since_last_thinking: int = 0
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -12076,6 +12087,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._last_seen_actions_taken = -1
         self._last_belief_content = ""
         self._consecutive_thinking_count = 0
+        self._actions_since_last_thinking = 0
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         # Reset echo agent relay state so stale_count from the previous game
@@ -13215,6 +13227,7 @@ class GWTAutogenAgent(AutogenAgent):
             else:
                 self._stale_action_count = 0
                 self._last_seen_actions_taken = self.num_actions_taken
+                self._actions_since_last_thinking += 1
             if self._stale_action_count >= 8:
                 # +1: the AutoGen termination check (i == max_round - 1) runs
                 # BEFORE select_speaker, so we target the NEXT iteration.
@@ -13236,7 +13249,11 @@ class GWTAutogenAgent(AutogenAgent):
                 s for s in possible_speakers if s is not self.learning_agent
             ]
 
-        # Gate Thinking_Agent: only invoke when Belief_State_Agent signals uncertainty.
+        # Gate Thinking_Agent: invoke when Belief_State_Agent signals uncertainty
+        # OR when the agent has acted N times without any deliberation (forced
+        # periodic deliberation).  The latter prevents long stretches of
+        # unreflective action cycling — e.g. aimless movement loops where the
+        # belief state stays "confident" but no real progress is made.
         # Also skip if the belief state content is identical to the previous round —
         # repeating Thinking_Agent on an unchanged belief wastes tokens with no gain.
         if (
@@ -13252,10 +13269,20 @@ class GWTAutogenAgent(AutogenAgent):
                 current_content = repaired
                 self._last_belief_content = ""
                 self._consecutive_thinking_count = 0
-            if (
+
+            # Determine whether deliberation is warranted: either by
+            # uncertainty signals or by exceeding the forced-deliberation
+            # interval without any Thinking_Agent invocation.
+            has_uncertainty = (
                 self._UNCERTAINTY_RE.search(current_content.lower())
                 or "no observation" in current_content.lower()
-            ):
+            )
+            needs_forced_deliberation = (
+                self._actions_since_last_thinking
+                >= self._FORCED_DELIBERATION_INTERVAL
+            )
+
+            if has_uncertainty or needs_forced_deliberation:
                 if (
                     current_content == self._last_belief_content
                     and self._consecutive_thinking_count >= 1
@@ -13266,6 +13293,7 @@ class GWTAutogenAgent(AutogenAgent):
                     return self.action_agent
                 self._last_belief_content = current_content
                 self._consecutive_thinking_count += 1
+                self._actions_since_last_thinking = 0
                 return self.thinking_agent
             self._last_belief_content = ""
             self._consecutive_thinking_count = 0
