@@ -1225,6 +1225,8 @@ class GWTAutogenAgent(AutogenAgent):
     # Force Thinking_Agent every N actions even when Belief_State_Agent shows
     # no uncertainty.  Prevents long stretches of unreflective action cycling.
     _FORCED_DELIBERATION_INTERVAL = 5
+    _LOW_RISK_FAMILIES: frozenset[str] = frozenset({"inspect", "idle", "relocation", "focus"})
+    _MAX_BURST_SIZE: int = 3
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
@@ -1395,6 +1397,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._recently_failed_actions: list[str] = []
         self._recently_executed_actions: list[str] = []
         self._actions_since_last_thinking: int = 0
+        self._last_burst_size: int = 1
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -7429,6 +7432,16 @@ class GWTAutogenAgent(AutogenAgent):
                 return family
         return "other"
 
+    def _observation_changed_significantly(self, prev_obs: str, curr_obs: str) -> bool:
+        """Return True when the observation token set has changed by more than 30%."""
+        prev_tokens = set(self._extract_runtime_tokens(prev_obs))
+        curr_tokens = set(self._extract_runtime_tokens(curr_obs))
+        diff = prev_tokens.symmetric_difference(curr_tokens)
+        union_size = len(prev_tokens | curr_tokens)
+        if union_size == 0:
+            return False
+        return len(diff) / union_size > 0.3
+
     def _canonicalize_suggested_action(
         self, suggested_action: str, admissible_commands: list[str]
     ) -> str:
@@ -12110,6 +12123,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._last_belief_content = ""
         self._consecutive_thinking_count = 0
         self._actions_since_last_thinking = 0
+        self._last_burst_size = 1
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         # Reset echo agent relay state so stale_count from the previous game
@@ -12731,6 +12745,95 @@ class GWTAutogenAgent(AutogenAgent):
                 content = src.read()
                 dst.write(content)
 
+    def _apply_post_action_pipeline(
+        self,
+        *,
+        executed_action: str | None,
+        canonical_suggested_action: str,
+        suggested_action: str,
+        previous_observation: str,
+    ) -> str:
+        """Run full post-action state update. Returns reflection string (empty if task ongoing)."""
+        reflection = ""
+        self.task_status = (
+            "COMPLETED"
+            if self.success
+            else "FAILED"
+            if self.num_actions_taken >= self.max_actions
+            else "INCOMPLETE"
+        )
+        if self.task_status == "COMPLETED":
+            self.task_success = True
+            self.rounds_left -= 1
+            reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Identify what went right and what good decisions led to success. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
+        elif self.task_status == "FAILED":
+            self.task_failed = True
+            self.rounds_left -= 1
+            reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
+
+        reasoning_action = executed_action or canonical_suggested_action
+        ambiguity_resolution = None
+        if reasoning_action:
+            reasoning_action, ambiguity_resolution = self._resolve_reasoning_action(
+                reasoning_action, previous_observation
+            )
+
+        if reasoning_action:
+            self._update_lifecycle_stage_state(
+                action=reasoning_action, observation=self.adapter.observation
+            )
+            self._update_ordered_target_progress(
+                executed_action=reasoning_action,
+                observation=self.adapter.observation,
+            )
+            self._update_candidate_tracking(
+                executed_action=reasoning_action,
+                observation=self.adapter.observation,
+                previous_observation=previous_observation,
+            )
+
+        attempted_action = (
+            canonical_suggested_action if executed_action else suggested_action
+        )
+        self.update_percept(attempted_action, executed=executed_action is not None)
+        if canonical_suggested_action != suggested_action:
+            self.percept["requested_action"] = suggested_action
+            self.percept["canonicalized_action"] = canonical_suggested_action
+            referent_resolution = self._record_referent_resolution(
+                suggested_action=suggested_action,
+                canonical_action=canonical_suggested_action,
+            )
+            if referent_resolution is not None:
+                self.percept["referent_resolution"] = referent_resolution
+        if ambiguity_resolution is not None:
+            self.percept["ambiguity_resolution"] = ambiguity_resolution
+            self.percept["resolved_action"] = reasoning_action
+        self._update_episode_hypothesis_ledger(
+            suggested_action=reasoning_action or suggested_action,
+            executed_action=reasoning_action
+            if executed_action is not None
+            else None,
+            previous_observation=previous_observation,
+        )
+        hypothesis_snapshot = self._get_episode_hypothesis_snapshot(
+            max_families=3, max_recent_tests=2
+        )
+        if hypothesis_snapshot["mechanisms"] or hypothesis_snapshot["recent_tests"]:
+            self.percept["episode_hypothesis_ledger"] = hypothesis_snapshot
+        ordered_progress = self._get_ordered_target_snapshot()
+        if self._snapshot_has_signal(ordered_progress):
+            self.percept["ordered_target_progress"] = ordered_progress
+        self._refresh_action_agent_runtime_context()
+
+        with open(self.log_paths["admissible_commands_path"], "a+") as f:
+            f.write(f"{self.admissible_actions}\n")
+        with open(self.log_paths["history_path"], "a+") as f:
+            f.write(
+                f"action: '{suggested_action}'. observation: '{self.adapter.observation}'\n"
+            )
+
+        return reflection
+
     def register_functions(self):
 
         def execute_action1(suggested_action: str) -> str:
@@ -12805,83 +12908,13 @@ class GWTAutogenAgent(AutogenAgent):
                     self._recently_executed_actions + [action]
                 )[-5:]
 
-            reflection = ""
-            self.task_status = (
-                "COMPLETED"
-                if self.success
-                else "FAILED"
-                if self.num_actions_taken >= self.max_actions
-                else "INCOMPLETE"
-            )
-            if self.task_status == "COMPLETED":
-                self.task_success = True
-                self.rounds_left -= 1
-                reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Identify what went right and what good decisions led to success. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
-            elif self.task_status == "FAILED":
-                self.task_failed = True
-                self.rounds_left -= 1
-                reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
-
-            reasoning_action = executed_action or canonical_suggested_action
-            ambiguity_resolution = None
-            if reasoning_action:
-                reasoning_action, ambiguity_resolution = self._resolve_reasoning_action(
-                    reasoning_action, previous_observation
-                )
-
-            if reasoning_action:
-                self._update_lifecycle_stage_state(
-                    action=reasoning_action, observation=self.adapter.observation
-                )
-                self._update_ordered_target_progress(
-                    executed_action=reasoning_action,
-                    observation=self.adapter.observation,
-                )
-                self._update_candidate_tracking(
-                    executed_action=reasoning_action,
-                    observation=self.adapter.observation,
-                    previous_observation=previous_observation,
-                )
-
-            attempted_action = (
-                canonical_suggested_action if executed_action else suggested_action
-            )
-            self.update_percept(attempted_action, executed=executed_action is not None)
-            if canonical_suggested_action != suggested_action:
-                self.percept["requested_action"] = suggested_action
-                self.percept["canonicalized_action"] = canonical_suggested_action
-                referent_resolution = self._record_referent_resolution(
-                    suggested_action=suggested_action,
-                    canonical_action=canonical_suggested_action,
-                )
-                if referent_resolution is not None:
-                    self.percept["referent_resolution"] = referent_resolution
-            if ambiguity_resolution is not None:
-                self.percept["ambiguity_resolution"] = ambiguity_resolution
-                self.percept["resolved_action"] = reasoning_action
-            self._update_episode_hypothesis_ledger(
-                suggested_action=reasoning_action or suggested_action,
-                executed_action=reasoning_action
-                if executed_action is not None
-                else None,
+            self._last_burst_size = 1
+            reflection = self._apply_post_action_pipeline(
+                executed_action=executed_action,
+                canonical_suggested_action=canonical_suggested_action,
+                suggested_action=suggested_action,
                 previous_observation=previous_observation,
             )
-            hypothesis_snapshot = self._get_episode_hypothesis_snapshot(
-                max_families=3, max_recent_tests=2
-            )
-            if hypothesis_snapshot["mechanisms"] or hypothesis_snapshot["recent_tests"]:
-                self.percept["episode_hypothesis_ledger"] = hypothesis_snapshot
-            ordered_progress = self._get_ordered_target_snapshot()
-            if self._snapshot_has_signal(ordered_progress):
-                self.percept["ordered_target_progress"] = ordered_progress
-            self._refresh_action_agent_runtime_context()
-
-            with open(self.log_paths["admissible_commands_path"], "a+") as f:
-                f.write(f"{self.admissible_actions}\n")
-            with open(self.log_paths["history_path"], "a+") as f:
-                f.write(
-                    f"action: '{suggested_action}'. observation: '{self.adapter.observation}'\n"
-                )
 
             return json.dumps(self._get_agent_facing_percept_snapshot()) + reflection
 
@@ -12894,6 +12927,150 @@ class GWTAutogenAgent(AutogenAgent):
             executor=self.external_perception_agent,
             name="execute_action",
             description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
+        )
+
+        def execute_action_sequence(actions: str) -> str:
+            # Terminal state pre-checks (same as execute_action1)
+            if self.task_success:
+                self.result_dict[self.game_no] = "SUCCESS"
+                with open(self.log_paths["result_path"], "w") as f:
+                    f.write(f"Success: {self.success}\n")
+                return "STRAWBERRY"
+
+            if self.task_failed and self.rounds_left == 0:
+                self.result_dict[self.game_no] = "FAILURE"
+                with open(self.log_paths["result_path"], "w") as f:
+                    f.write(f"Success: {self.success}\n")
+                return "FLEECE"
+
+            if self.task_failed:
+                self.max_actions += self.max_round_actions
+                self.task_failed = False
+                return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
+
+            # Parse JSON array (fallback: comma-split)
+            try:
+                action_list = json.loads(actions)
+                if not isinstance(action_list, list):
+                    action_list = [str(action_list)]
+            except (json.JSONDecodeError, TypeError):
+                action_list = [a.strip() for a in actions.split(",") if a.strip()]
+
+            if not action_list:
+                return "NO ACTION EXECUTED. " + focus()
+
+            # Truncate to burst cap
+            action_list = action_list[: self._MAX_BURST_SIZE]
+
+            burst_log: list[dict[str, str]] = []
+            remaining_actions: list[str] | None = None
+            stop_reason = "sequence_complete"
+
+            for i, suggested_action in enumerate(action_list):
+                if not suggested_action or suggested_action == "do nothing":
+                    continue
+
+                # Family gate
+                family = self._classify_action_family(suggested_action)
+                if family not in self._LOW_RISK_FAMILIES:
+                    remaining_actions = action_list[i:]
+                    stop_reason = "high_risk_family"
+                    break
+
+                # Admissible validation
+                admissible_commands = self.adapter.admissible_actions
+                if not admissible_commands:
+                    try:
+                        self.adapter.step("look")
+                        admissible_commands = self.adapter.admissible_actions
+                    except Exception:
+                        pass
+                if not admissible_commands:
+                    self._empty_admissible_streak += 1
+                    remaining_actions = action_list[i:]
+                    stop_reason = "inadmissible"
+                    break
+                self._empty_admissible_streak = 0
+
+                previous_observation = self.percept.get("resulting_observation", "")
+                canonical_suggested_action = self._canonicalize_suggested_action(
+                    suggested_action, admissible_commands
+                )
+                action, action_score = get_best_candidate(
+                    canonical_suggested_action, admissible_commands
+                )
+
+                if action_score < 0.98:
+                    self._recently_failed_actions = (
+                        self._recently_failed_actions + [suggested_action]
+                    )[-3:]
+                    remaining_actions = action_list[i:]
+                    stop_reason = "inadmissible"
+                    break
+
+                # Execute
+                self.adapter.step(action)
+                self.success = self.adapter.has_won
+                self.num_actions_taken += 1
+                self._recently_executed_actions = (
+                    self._recently_executed_actions + [action]
+                )[-5:]
+
+                # State pipeline
+                reflection = self._apply_post_action_pipeline(
+                    executed_action=action,
+                    canonical_suggested_action=canonical_suggested_action,
+                    suggested_action=suggested_action,
+                    previous_observation=previous_observation,
+                )
+
+                burst_log.append({
+                    "action": action,
+                    "observation": self.adapter.observation,
+                    "family": family,
+                })
+
+                # Task outcome check
+                if self.task_status == "COMPLETED":
+                    stop_reason = "task_completed"
+                    break
+                if self.task_status == "FAILED":
+                    stop_reason = "task_failed"
+                    break
+
+                # Observation change check
+                if self._observation_changed_significantly(
+                    previous_observation, self.adapter.observation
+                ):
+                    remaining_actions = action_list[i + 1 :] or None
+                    stop_reason = "observation_changed"
+                    break
+            else:
+                # Loop completed without break — check if we hit burst cap
+                if len(action_list) >= self._MAX_BURST_SIZE:
+                    stop_reason = "burst_cap"
+
+            self._last_burst_size = max(len(burst_log), 1)
+
+            result = {
+                "burst_log": burst_log,
+                "burst_stopped_reason": stop_reason,
+                "actions_executed": len(burst_log),
+                "remaining_actions": remaining_actions,
+                "percept": self._get_agent_facing_percept_snapshot(),
+            }
+            return json.dumps(result)
+
+        register_function(
+            execute_action_sequence,
+            caller=self.action_agent,
+            executor=self.external_perception_agent,
+            name="execute_action_sequence",
+            description=(
+                "Execute a short sequence of low-risk actions (inspect, idle, "
+                "relocation, focus) in one turn. Input: JSON array of action strings. "
+                "Stops early on inadmissible, high-risk, or observation-changing actions."
+            ),
         )
 
         def record_long_term_memory(concept: str) -> str:
@@ -13249,7 +13426,8 @@ class GWTAutogenAgent(AutogenAgent):
             else:
                 self._stale_action_count = 0
                 self._last_seen_actions_taken = self.num_actions_taken
-                self._actions_since_last_thinking += 1
+                self._actions_since_last_thinking += self._last_burst_size
+                self._last_burst_size = 1  # reset after consumption
             if self._stale_action_count >= 8:
                 # +1: the AutoGen termination check (i == max_round - 1) runs
                 # BEFORE select_speaker, so we target the NEXT iteration.

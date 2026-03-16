@@ -51,11 +51,17 @@ action_agent: |
   19a. If comparison_tracking is present, do not focus a comparison target until the winner is resolved from grounded evidence.
   20. If relation_frontier is present, restrict relation and device-control choices to that local mechanism unless a new observation directly forces expansion.
   21. If the task names a specific primary target and it is still not grounded, prefer search and route-enabling actions that reveal or reach that target before exploring unrelated rooms or devices.
-  22. Never output plain text. Your only valid response is an execute_action() tool call.
-  23. As a last resort only, call execute_action() with an empty string.
+  Tool choice — execute_action vs execute_action_sequence:
+  22. Use execute_action_sequence only for a short chain (2-3) of low-risk
+      actions from families inspect, idle, relocation, or focus where
+      intermediate deliberation adds no value. Pass a JSON array of exact
+      admissible strings. The burst stops early on inadmissible, non-low-risk,
+      or observation-changing actions. Use execute_action for everything else.
+  23. Never output plain text. Your only valid response is an execute_action() or execute_action_sequence() tool call.
+  24. As a last resort only, call execute_action() with an empty string.
 
-  IMPORTANT: You must output exactly one execute_action() call — nothing else.
-  If you see a [SYSTEM ERROR] in the conversation, do NOT respond with plain text — your only valid response is still an execute_action() tool call.
+  IMPORTANT: You must output exactly one tool call (execute_action or execute_action_sequence) — nothing else.
+  If you see a [SYSTEM ERROR] in the conversation, do NOT respond with plain text — your only valid response is still a tool call.
 
 thinking_agent: |
   You are Thinking_Agent. Generate original, useful ideas — strategies, plans, hypotheses, theories, creative tactics or literally anything — to drive task progression and improve performance.
