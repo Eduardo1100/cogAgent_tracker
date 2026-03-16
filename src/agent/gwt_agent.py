@@ -10469,6 +10469,33 @@ class GWTAutogenAgent(AutogenAgent):
                     score -= 12
                 if support_referent:
                     score -= 10
+
+            # During the initial discovery phase (target room unknown, primary
+            # target not yet visible), untried navigation exits deserve a pull
+            # strong enough to beat inspect actions with grounded-but-task-
+            # irrelevant targets (e.g. "look under stairs" in a stairwell).
+            # Inspect actions can accumulate up to 33 points through:
+            #   family_priority(8) + grounded*6(6) + required_family(7)
+            #   + required_family_grounded(4) + inspect_grounded(5)
+            #   + candidate_inspect(3)
+            # while untried navigation without grounded hits reaches only ~20.
+            # An extra +15 here ensures unexplored exits score higher (~35)
+            # and keeps the agent moving through transit areas instead of
+            # lingering on incidental inspections that cost scarce action budget.
+            #
+            # Guard: skip when candidate_identification_pending, because
+            # in focus-first tasks (e.g. ScienceWorld "find X, focus on X")
+            # the agent must confirm the candidate before navigating away.
+            _nav_boost_cond = (
+                not self._snapshot_has_signal(remote_room_signal, key="room")
+                and not primary_target_grounded
+                and not primary_target_focused
+                and not candidate_identification_pending
+                and self._is_agent_navigation_action(action, family=family)
+                and action not in tried_exits
+            )
+            if _nav_boost_cond:
+                score += 15
         elif growth_task and not conditional_branch_task:
             score += self._score_growth_action(
                 action=action,

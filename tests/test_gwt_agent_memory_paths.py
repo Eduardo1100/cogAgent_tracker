@@ -2157,6 +2157,56 @@ def test_shortlist_requires_focus_before_relocating_new_candidate(tmp_path):
     assert "move bowl to red box" not in shortlist[:2]
 
 
+def test_shortlist_boosts_frontier_navigation_over_transit_area_inspection(tmp_path):
+    # Regression for cogfix-29: in exploration+search tasks the scorer was
+    # letting inspect actions with grounded-but-task-irrelevant targets (e.g.
+    # "look under stairs" in a stairwell) outscore bare navigation actions
+    # (e.g. "up") by ~6 points, causing the agent to linger in transit areas
+    # and waste scarce action budget.
+    #
+    # The fix adds +8 to untried navigation in candidate_search_task when no
+    # target room is known yet and focus-first confirmation is not pending.
+    # Combined with the existing exploration-task navigation bonus (+6), this
+    # yields a total of +14 for "up", beating "look under stairs" at ~19.
+    agent, _ = _build_agent(tmp_path, env_type="tales")
+    # Task must trigger both exploration_task (contains "explore the") and
+    # search_mode (contains "find") — matching the library game scenario.
+    agent.task = (
+        "explore the library and find a comprehensive book on Graham Nelson, "
+        "then check it out"
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+
+    # Ground Floor Stairwell: transit area with "stairs" visible but no
+    # task-relevant objects.  "up" leads to the unvisited second floor.
+    agent.percept = {
+        "resulting_observation": (
+            "Ground Floor Stairwell\n"
+            "Grungy stairs lead upwards, to the second level. "
+            "A damaged picture hangs on the wall. "
+            "The door to the ground floor shelving area is to the south."
+        )
+    }
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "up",
+            "south",
+            "look under stairs",
+            "examine picture",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    # "up" (frontier navigation toward unexplored second floor) must rank
+    # above "look under stairs" (inspect of transit-area furnishing).
+    assert shortlist.index("up") < shortlist.index("look under stairs"), (
+        f"Expected 'up' before 'look under stairs', got shortlist={shortlist}"
+    )
+
+
 def test_candidate_tracking_preserves_room_and_aliases_across_referent_shift(
     tmp_path,
 ):
