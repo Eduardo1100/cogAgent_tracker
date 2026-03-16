@@ -2815,7 +2815,7 @@ class GWTAutogenAgent(AutogenAgent):
             room_state["local_exploration"] += 1
 
     def _update_exploration_search_tracking(
-        self, *, action: str | None, observation: str
+        self, *, action: str | None, observation: str, previous_observation: str = ""
     ) -> None:
         contract = self._get_task_contract()
         if not contract.get("exploration_task"):
@@ -2832,6 +2832,11 @@ class GWTAutogenAgent(AutogenAgent):
             return
         if self._is_agent_navigation_action(action):
             room_state.setdefault("tried_exits", set()).add(action)
+            # Track exits that didn't move the agent (location unchanged after navigation)
+            if previous_observation:
+                prev_room = self._get_current_location_signature(previous_observation)
+                if prev_room and prev_room == room_signature:
+                    room_state.setdefault("failed_exits", set()).add(action)
 
     def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
         if not self._grounded_artifacts:
@@ -9756,6 +9761,7 @@ class GWTAutogenAgent(AutogenAgent):
         exploration_room_search_stalled = scoring_context.get(
             "exploration_room_search_stalled", False
         )
+        failed_exit_count = scoring_context.get("failed_exit_count", 0)
         tried_exits = scoring_context.get("room_state", {}).get("tried_exits", set())
         stage_labels = (
             self._get_focus_stage_labels(action, "")
@@ -10290,6 +10296,14 @@ class GWTAutogenAgent(AutogenAgent):
             if exploration_room_search_stalled:
                 score += 4
 
+        # When multiple navigation attempts have failed without moving the agent,
+        # deprioritize further relocation and encourage inspect instead.
+        if failed_exit_count >= 3:
+            if self._is_agent_navigation_action(action, family=family):
+                score -= 5
+            elif family == "inspect":
+                score += 4
+
         if (
             primary_target_focused
             and family == "relation"
@@ -10463,6 +10477,11 @@ class GWTAutogenAgent(AutogenAgent):
             if comparison_task
             else False,
             "exploration_task": task_contract.get("exploration_task", False),
+            "failed_exit_count": len(
+                self._search_location_states.get(current_room, {}).get(
+                    "failed_exits", set()
+                )
+            ),
             "exploration_room_search_stalled": self._exploration_room_search_stalled(
                 current_room=current_room,
                 visible_doors=visible_doors,
@@ -11814,6 +11833,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._update_exploration_search_tracking(
             action=action,
             observation=self.adapter.observation,
+            previous_observation=previous_observation,
         )
         self._update_remote_room_signal(
             action=action,
