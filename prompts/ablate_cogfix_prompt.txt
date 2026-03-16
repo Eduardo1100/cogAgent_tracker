@@ -7,15 +7,41 @@ Suggested next cogfix number: {next_iteration}
 Experiment summary JSON:
 {experiment_summary_json}
 
+Run artifacts for this experiment (transcripts, analyst traces, transition
+logs): {latest_run_dir}
+
 Workflow:
-1. Analyze experiment {experiment_id} using local run artifacts and DB metadata when available.
-2. Identify one recent heuristic cluster, prompt/context expansion, or scoring path that is overlapping, brittle, or unnecessarily expensive.
+1. Analyze experiment {experiment_id} using the run artifacts above and DB
+   metadata when available. Read the analyst trace and episode transcripts to
+   understand where the agent is spending unnecessary tokens or applying
+   overlapping logic.
+2. Identify one recent heuristic cluster, prompt/context expansion, or scoring
+   path that is overlapping, brittle, or unnecessarily expensive.
 3. Plan the best simplification or ablation before editing code.
-4. Implement only the best simplification, with token-efficiency, task generalization, and environment agnosticism as top priorities.
-5. Prefer deleting redundant logic, merging overlapping runtime structures, or shrinking model-facing context over adding a new heuristic.
-6. If your simplification changes runtime state or transcript structure, update the analyst trace format too so it remains readable, intuitive, and interpretable for human debugging. The analyst trace should remain text-file readable and, at minimum, preserve the full execute-action observation/percept plus the timestep-local belief state and other agent outputs in a structured multiline format. Maintain the Rich-based glossary and architecture explanation whenever new runtime terms or control structures appear.
-7. Update AGENTS.md if the new consolidation changes the documented workflow or stack expectations.
-8. Run the relevant tests for the files you touched and make sure CI-equivalent checks pass before you finish. Use `uv run pytest tests/ -x -q` for the test suite.
-9. If the simplification is worthwhile and belongs in the stack, create a new stacked branch named `cogfix-{next_iteration}-consolidate-<topic>` from `{current_branch}` using `gt create cogfix-{next_iteration}-consolidate-<topic>`, commit the work with `gt commit`, push and open a PR with `gt submit --no-edit`, targeting `{current_branch}`.
-10. If the best conclusion is that the recent logic should stay as-is, stop after explaining that clearly and do not open a PR.
+4. Implement only the best simplification, with token-efficiency, task
+   generalization, and environment agnosticism as top priorities.
+5. Prefer deleting redundant logic, merging overlapping runtime structures, or
+   shrinking model-facing context over adding a new heuristic.
+6. If your simplification changes runtime state or transcript structure, update
+   the analyst trace format too so it remains readable, intuitive, and
+   interpretable for human debugging. The analyst trace should remain
+   text-file readable and, at minimum, preserve the full execute-action
+   observation/percept plus the timestep-local belief state and other agent
+   outputs in a structured multiline format. Maintain the Rich-based glossary
+   and architecture explanation whenever new runtime terms or control structures
+   appear.
+7. Update AGENTS.md if the new consolidation changes the documented workflow or
+   stack expectations.
+8. Run the relevant tests for the files you touched and make sure CI-equivalent
+   checks pass before you finish. Use `uv run pytest tests/ -x -q` for the
+   test suite.
+9. If the simplification is worthwhile and belongs in the stack, create a new
+   stacked branch from `{current_branch}`:
+     gt create cogfix-{next_iteration}-consolidate-<topic>
+   Commit with a descriptive message:
+     gt commit -m "cogfix-{next_iteration}: consolidate <short description>"
+   Push and open a PR targeting `{current_branch}`:
+     gt submit --no-edit
+10. If the best conclusion is that the recent logic should stay as-is, stop
+    after explaining that clearly and do not open a PR.
 11. Do not touch unrelated local changes already present in the worktree.
