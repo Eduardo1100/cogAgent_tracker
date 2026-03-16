@@ -181,7 +181,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC' AS started_at FROM experiment_runs WHERE id = ${experiment_id}",
+          "rawSql": "SELECT TO_CHAR(start_time AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD HH24:MI:SS') || ' PST' AS started_at FROM experiment_runs WHERE id = ${experiment_id}",
           "format": "table",
           "refId": "A"
         }
