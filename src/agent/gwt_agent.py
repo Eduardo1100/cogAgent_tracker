@@ -400,6 +400,13 @@ class GWTAutogenAgent(AutogenAgent):
         "as",
         "at",
         "be",
+        # Spatial prepositions: never object names in task descriptions; filtering
+        # them here prevents words like "under" in "look at X under the Y" from
+        # being extracted as target entities and corrupting salient_entities /
+        # shortlist scoring.
+        "behind",
+        "beneath",
+        "beside",
         "by",
         "called",
         "cause",
@@ -422,10 +429,14 @@ class GWTAutogenAgent(AutogenAgent):
         "matter",
         "me",
         "my",
+        "near",
+        "next",
         "no",
         "of",
         "on",
+        "onto",
         "or",
+        "over",
         "place",
         "so",
         "state",
@@ -436,6 +447,7 @@ class GWTAutogenAgent(AutogenAgent):
         "the",
         "then",
         "to",
+        "under",
         "up",
         "us",
         "using",
@@ -503,7 +515,14 @@ class GWTAutogenAgent(AutogenAgent):
         "using",
         "valid",
         "visible",
+        "welcome",
         "with",
+        # TextWorld / ALFRED game-banner boilerplate that appears at the start
+        # of every observation ("-= Welcome to TextWorld, ALFRED! =-") and
+        # should never be treated as interactive object tokens.
+        "alfred",
+        "quickly",
+        "textworld",
     }
     _ACTION_COMMAND_STOPWORDS = {
         "activate",

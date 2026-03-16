@@ -858,6 +858,29 @@ def test_task_contract_drops_stopwords_and_plural_duplicates(tmp_path):
     assert contract["ordering_cues"] == ["ordered_sequence"]
 
 
+def test_task_contract_filters_spatial_prepositions_from_target_entities(tmp_path):
+    # Spatial prepositions like "under" in "look at alarmclock under the desklamp"
+    # must not appear as target entities — they are locative relations, not objects.
+    agent, _ = _build_agent(tmp_path, env_type="tales")
+    agent.task = "look at alarmclock under the desklamp"
+
+    contract = agent._get_task_contract()
+
+    assert "alarmclock" in contract["target_entities"]
+    assert "desklamp" in contract["target_entities"]
+    assert "under" not in contract["target_entities"], (
+        f"'under' is a spatial preposition and must not be a target entity, "
+        f"got target_entities={contract['target_entities']}"
+    )
+    # Other spatial prepositions must also be suppressed
+    for prep in ("beside", "behind", "near", "next", "over", "onto", "beneath"):
+        agent.task = f"look at clock {prep} the lamp"
+        contract = agent._get_task_contract()
+        assert prep not in contract["target_entities"], (
+            f"'{prep}' is a spatial preposition and must not appear in target_entities"
+        )
+
+
 def test_task_contract_extracts_short_abbreviation_object_from_quantity_phrase(tmp_path):
     # "put two cd in safe" — "two" is a quantity word, "cd" is a 2-char abbreviation.
     # Both must survive: quantity word stripped from primary_targets, 2-char token kept.
