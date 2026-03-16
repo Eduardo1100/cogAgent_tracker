@@ -1570,6 +1570,7 @@ def run_tales_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 )
 
                 persist_experiment_usage_snapshot(db, experiment, total_run_usage)
+                agent.task = env_name
                 persist_episode_run(
                     db,
                     experiment=experiment,

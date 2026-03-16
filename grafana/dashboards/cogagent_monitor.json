@@ -563,7 +563,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT game_number, ROUND(COALESCE(episode_cost, 0)::numeric, 4) AS episode_cost FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "rawSql": "SELECT COALESCE(NULLIF(task, ''), '#' || game_number::text) AS game_label, ROUND(COALESCE(episode_cost, 0)::numeric, 4) AS episode_cost FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
           "format": "table",
           "refId": "A"
         }
@@ -1047,7 +1047,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT game_number, CAST(success AS INT) as success, actions_taken FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "rawSql": "SELECT COALESCE(NULLIF(task, ''), '#' || game_number::text) AS game_label, CAST(success AS INT) as success, actions_taken FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
           "format": "table",
           "refId": "A"
         }
@@ -1091,7 +1091,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT game_number, inadmissible_action_count FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "rawSql": "SELECT COALESCE(NULLIF(task, ''), '#' || game_number::text) AS game_label, inadmissible_action_count FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
           "format": "table",
           "refId": "A"
         }
@@ -1233,7 +1233,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT game_number, prompt_tokens, completion_tokens FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
+          "rawSql": "SELECT COALESCE(NULLIF(task, ''), '#' || game_number::text) AS game_label, prompt_tokens, completion_tokens FROM episode_runs WHERE experiment_id = ${experiment_id} ORDER BY game_number",
           "format": "table",
           "refId": "A"
         }
