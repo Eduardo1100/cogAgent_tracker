@@ -400,6 +400,7 @@ class GWTAutogenAgent(AutogenAgent):
         "as",
         "at",
         "be",
+        "by",
         "called",
         "cause",
         "change",
@@ -409,6 +410,8 @@ class GWTAutogenAgent(AutogenAgent):
         "first",
         "for",
         "from",
+        "go",
+        "he",
         "if",
         "in",
         "into",
@@ -417,10 +420,14 @@ class GWTAutogenAgent(AutogenAgent):
         "its",
         "located",
         "matter",
+        "me",
+        "my",
+        "no",
         "of",
         "on",
         "or",
         "place",
+        "so",
         "state",
         "substance",
         "take",
@@ -429,7 +436,10 @@ class GWTAutogenAgent(AutogenAgent):
         "the",
         "then",
         "to",
+        "up",
+        "us",
         "using",
+        "we",
         "whether",
         "with",
         "you",
@@ -844,6 +854,21 @@ class GWTAutogenAgent(AutogenAgent):
         "create",
         "creating",
         "earliest",
+        # English cardinal number words used as quantity prefixes in tasks like
+        # "put two cd in safe".  They describe object counts, not object names,
+        # so they must be stripped before building the primary_targets list.
+        "eight",
+        "eleven",
+        "five",
+        "four",
+        "nine",
+        "one",
+        "seven",
+        "six",
+        "ten",
+        "three",
+        "twelve",
+        "two",
         "identify",
         "latest",
         "life",
@@ -1895,7 +1920,7 @@ class GWTAutogenAgent(AutogenAgent):
         active_stopwords = stopwords or self._RUNTIME_TOKEN_STOPWORDS
         tokens = []
         for token in re.findall(r"[a-z0-9]+", (text or "").lower()):
-            if (len(token) < 3 and not token.isdigit()) or token in active_stopwords:
+            if (len(token) < 2 and not token.isdigit()) or token in active_stopwords:
                 continue
             if token not in tokens:
                 tokens.append(token)

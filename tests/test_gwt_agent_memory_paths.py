@@ -858,6 +858,23 @@ def test_task_contract_drops_stopwords_and_plural_duplicates(tmp_path):
     assert contract["ordering_cues"] == ["ordered_sequence"]
 
 
+def test_task_contract_extracts_short_abbreviation_object_from_quantity_phrase(tmp_path):
+    # "put two cd in safe" — "two" is a quantity word, "cd" is a 2-char abbreviation.
+    # Both must survive: quantity word stripped from primary_targets, 2-char token kept.
+    agent, _ = _build_agent(tmp_path, env_type="tales")
+    agent.task = "put two cd in safe"
+
+    contract = agent._get_task_contract()
+
+    assert "cd" in contract["primary_targets"], (
+        f"primary_targets should contain 'cd', got {contract['primary_targets']}"
+    )
+    assert "two" not in contract["primary_targets"], (
+        f"quantity word 'two' should not be a primary target, got {contract['primary_targets']}"
+    )
+    assert "safe" in contract["destination_container"]
+
+
 def test_canonicalize_suggested_action_snaps_to_exact_admissible_command(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
 
