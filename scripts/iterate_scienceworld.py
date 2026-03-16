@@ -223,7 +223,7 @@ def build_codex_command(*, dangerous: bool) -> list[str]:
 
 
 def build_claude_code_command(*, dangerous: bool) -> list[str]:
-    command = ["claude", "--print"]
+    command = ["claude", "--print", "--output-format", "stream-json", "--verbose"]
     if dangerous:
         command.append("--dangerously-skip-permissions")
     return command
@@ -333,6 +333,11 @@ def main() -> int:
         print(prompt)
         return 0
 
+    print(
+        f"Invoking {args.agent} agent on experiment {summary.experiment_id} "
+        f"(branch: {current_branch}, next: {next_iteration})...",
+        file=sys.stderr,
+    )
     env = os.environ.copy()
     if args.agent == "claudecode":
         env.pop("ANTHROPIC_API_KEY", None)
