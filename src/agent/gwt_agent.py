@@ -725,6 +725,13 @@ class GWTAutogenAgent(AutogenAgent):
         r"\s+(?:the\s+|a\s+|an\s+)?(.+?)$",
         re.IGNORECASE | re.MULTILINE,
     )
+    # Matches terminal recipe directives that complete the task rather than transform
+    # an ingredient (e.g. "prepare meal").  These are the last step in a TextWorld
+    # cooking recipe and must be executed once all ingredient transformations are done.
+    _RECIPE_TERMINAL_STEP_RE = re.compile(
+        r"^(?:-\s+|\s+)(prepare)\s+(.+?)$",
+        re.IGNORECASE | re.MULTILINE,
+    )
     _RECIPE_INGREDIENTS_RE = re.compile(
         r"^(?:-\s+|\s+)(?:a\s+|an\s+|the\s+)?(.+?)$",
         re.IGNORECASE | re.MULTILINE,
@@ -4860,6 +4867,15 @@ class GWTAutogenAgent(AutogenAgent):
                         bucket.append(adjective)
             if ingredient_states:
                 contract["recipe_ingredient_states"] = ingredient_states
+            # Detect terminal recipe steps (e.g. "prepare meal") and store them
+            # so the shortlist scorer can give them a strong priority boost once
+            # all ingredient transformations are satisfied.
+            for tm in self._RECIPE_TERMINAL_STEP_RE.finditer(directions_block):
+                verb = tm.group(1).lower()
+                target = tm.group(2).strip().lower()
+                if verb and target:
+                    contract["recipe_terminal_action"] = f"{verb} {target}"
+                    break  # only store the first (and typically only) terminal step
 
     def _get_recipe_preparation_warnings(self, observation: str) -> list[str]:
         """Return per-ingredient warnings when an entity in the observation
@@ -9936,6 +9952,7 @@ class GWTAutogenAgent(AutogenAgent):
         visible_nonlocation_targets = scoring_context["visible_nonlocation_targets"]
         ordered_sequence = scoring_context["ordered_sequence"]
         referent_signature = self._get_action_referent_signature(action, family=family)
+        recipe_terminal_action = scoring_context.get("recipe_terminal_action", "")
         candidate_search_task = scoring_context["candidate_search_task"]
         candidate_target = self._get_candidate_action_target(
             action, family=family, task_contract=task_contract
@@ -10169,6 +10186,15 @@ class GWTAutogenAgent(AutogenAgent):
         # surface the ingredient-collection actions that actually advance the task.
         if self._action_targets_read_recipe_doc(action, family=family):
             score -= 65
+
+        # Strongly boost the terminal recipe completion action (e.g. "prepare meal").
+        # This action is the last step listed in the recipe directions and completes
+        # the task, but it gets classified as "other" family with low priority because
+        # "prepare" is not a transformation verb.  Give it a large fixed bonus so it
+        # reliably wins over exploratory and ingredient-manipulation actions once it
+        # appears in the admissible set.
+        if recipe_terminal_action and normalized == recipe_terminal_action:
+            score += 30
 
         if lifecycle_task:
             if not lifecycle_targets_visible:
@@ -10693,6 +10719,7 @@ class GWTAutogenAgent(AutogenAgent):
             "required_families": set(task_contract.get("required_families", [])),
             "support_families": set(task_contract.get("support_families", [])),
             "target_entity_set": target_entity_set,
+            "recipe_terminal_action": task_contract.get("recipe_terminal_action", ""),
             "current_observation": current_observation,
             "current_location_tokens": current_location_tokens,
             "current_room": current_room,
