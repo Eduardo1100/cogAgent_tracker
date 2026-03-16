@@ -2,6 +2,7 @@ from __future__ import annotations
 # ruff: noqa: E402, I001
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -324,12 +325,16 @@ def main() -> int:
         print(prompt)
         return 0
 
+    env = os.environ.copy()
+    if args.agent == "claudecode":
+        env.pop("ANTHROPIC_API_KEY", None)
     return subprocess.run(
         build_agent_command(args.agent, dangerous=args.dangerous),
         cwd=REPO_ROOT,
         text=True,
         input=prompt,
         check=False,
+        env=env,
     ).returncode
 
 
