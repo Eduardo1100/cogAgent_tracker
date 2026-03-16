@@ -26,7 +26,7 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; exec env PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
 
-debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS.
+debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS. MAX_ACTIONS=N MAX_CHATROUNDS=N.
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; \
 	$(if $(filter scienceworld tales nethack,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) \
@@ -38,9 +38,11 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack.
 	$(if $(filter nethack,$(ENV)), \
 	  src/agent/configs/nethack.yaml --env-type nethack --num_games 1 $(if $(NH_VARIANT),--nethack-variant $(NH_VARIANT),) $(if $(NH_SEEDS),--nethack-seeds $(NH_SEEDS),) $(if $(RENDER),--render,), \
 	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))))) \
+	$(if $(MAX_ACTIONS),--max_actions $(MAX_ACTIONS),) \
+	$(if $(MAX_CHATROUNDS),--max_chat_rounds $(MAX_CHATROUNDS),) \
 	--gwt'
 
-iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1 MAX_ACTIONS=N MAX_CHATROUNDS=N
 	uv run python scripts/iterate_agent.py \
 	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
@@ -48,9 +50,11 @@ iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (d
 	  $(if $(SKIP_DEBUG),--skip-debug,) \
 	  $(if $(ALLOW_DIRTY),--allow-dirty,) \
 	  $(if $(PROMPT_ONLY),--prompt-only,) \
-	  $(if $(DANGEROUS),--dangerous,)
+	  $(if $(DANGEROUS),--dangerous,) \
+	  $(if $(MAX_ACTIONS),--max-actions $(MAX_ACTIONS),) \
+	  $(if $(MAX_CHATROUNDS),--max-chatrounds $(MAX_CHATROUNDS),)
 
-ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1 MAX_ACTIONS=N MAX_CHATROUNDS=N
 	uv run python scripts/iterate_agent.py --mode ablate \
 	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
@@ -58,7 +62,9 @@ ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. 
 	  $(if $(RUN_DEBUG),,--skip-debug) \
 	  $(if $(ALLOW_DIRTY),--allow-dirty,) \
 	  $(if $(PROMPT_ONLY),--prompt-only,) \
-	  $(if $(DANGEROUS),--dangerous,)
+	  $(if $(DANGEROUS),--dangerous,) \
+	  $(if $(MAX_ACTIONS),--max-actions $(MAX_ACTIONS),) \
+	  $(if $(MAX_CHATROUNDS),--max-chatrounds $(MAX_CHATROUNDS),)
 
 test: ## Run tests with pytest
 	uv run pytest tests/

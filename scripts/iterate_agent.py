@@ -200,6 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Invoke the agent with its bypass-approvals/sandbox flag.",
     )
     parser.add_argument(
+        "--max-actions",
+        type=int,
+        default=None,
+        help="Override max environment actions per game (passed as MAX_ACTIONS to make debug).",
+    )
+    parser.add_argument(
+        "--max-chatrounds",
+        type=int,
+        default=None,
+        help="Override max chat rounds per game (passed as MAX_CHATROUNDS to make debug).",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=120,
@@ -279,6 +291,10 @@ def main() -> int:
         debug_cmd = ["make", "debug", f"ENV={args.env}"]
         if args.games is not None:
             debug_cmd.append(f"GAMES={args.games}")
+        if args.max_actions is not None:
+            debug_cmd.append(f"MAX_ACTIONS={args.max_actions}")
+        if args.max_chatrounds is not None:
+            debug_cmd.append(f"MAX_CHATROUNDS={args.max_chatrounds}")
         debug_result = subprocess.run(
             debug_cmd,
             cwd=REPO_ROOT,
