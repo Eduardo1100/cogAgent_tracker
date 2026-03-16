@@ -1039,6 +1039,8 @@ class GWTAutogenAgent(AutogenAgent):
                 "go to ",
                 "go ",
                 "enter ",
+                "get in ",
+                "get on ",
                 "pick up ",
                 "take ",
                 "grab ",
@@ -5200,6 +5202,8 @@ class GWTAutogenAgent(AutogenAgent):
         if normalized.startswith(("go ", "move ")):
             prefix_len = 3 if normalized.startswith("go ") else 5
             return normalized[prefix_len:] in self._BARE_DIRECTION_WORDS
+        if normalized.startswith(("get in ", "get on ")):
+            return normalized[7:] in self._BARE_DIRECTION_WORDS
         return False
 
     def _is_exploration_disposal_action(self, action: str) -> bool:

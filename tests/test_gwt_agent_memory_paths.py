@@ -4857,6 +4857,57 @@ def test_novel_exit_bonus_with_stall(tmp_path):
     assert score_west - score_north >= 10
 
 
+def test_get_in_on_direction_classified_as_relocation_and_navigation(tmp_path):
+    # cogfix-16: "get in <dir>" and "get on <dir>" are Inform 7 navigation verbs
+    # and must be recognised as relocation / agent-navigation actions so they
+    # receive the novel-exit bonus in exploration tasks.
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+
+    # Classification
+    assert agent._classify_action_family("get in northeast") == "relocation"
+    assert agent._classify_action_family("get on north") == "relocation"
+    # Non-directional "get in/on" should still be relocation (entering a container)
+    assert agent._classify_action_family("get in box") == "relocation"
+
+    # Navigation detection — only direction-suffix forms are "navigation"
+    assert agent._is_agent_navigation_action("get in northeast") is True
+    assert agent._is_agent_navigation_action("get on north") is True
+    assert agent._is_agent_navigation_action("get in northwest") is True
+    # Object referents are relocation but NOT agent-navigation
+    assert agent._is_agent_navigation_action("get in box") is False
+    assert agent._is_agent_navigation_action("get on horse") is False
+
+
+def test_get_in_direction_novel_exit_bonus(tmp_path):
+    # cogfix-16: "get in northeast" that hasn't been tried yet must outscore
+    # "enter north" that has already been tried, matching the novel-exit rule.
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent.admissible_actions = ["enter north", "get in northeast"]
+
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    # Mark "enter north" as a tried exit; "get in northeast" is untried.
+    scoring_context["room_state"]["tried_exits"] = {"enter north"}
+
+    _kw = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="search",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+    score_ne, _, _ = agent._score_action_for_shortlist(action="get in northeast", **_kw)
+    score_n, _, _ = agent._score_action_for_shortlist(action="enter north", **_kw)
+    assert score_ne - score_n >= 6, (
+        f"untried 'get in northeast' ({score_ne}) should outscore tried 'enter north' "
+        f"({score_n}) by at least 6"
+    )
+
+
 def test_empty_admissible_actions_abort(tmp_path):
     """Streak guard: first empty returns diagnostic; second empty returns FLEECE."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
