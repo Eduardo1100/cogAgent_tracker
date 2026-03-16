@@ -156,8 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--env",
-        default="tales",
-        help="Environment type to use for make debug and experiment lookup.",
+        default=None,
+        help="Environment type to use for make debug and experiment lookup. "
+        "When omitted, --skip-debug finds the latest experiment across all env types; "
+        "otherwise a random env is chosen for the debug run.",
     )
     parser.add_argument(
         "--games",
@@ -248,11 +250,24 @@ def main() -> int:
 
     current_branch = get_current_branch()
 
+    # Resolve env: if the user didn't specify --env and we need to run debug,
+    # pick a random env.  If skipping debug, leave env_type=None so we find
+    # the latest experiment across all env types.
+    env_explicit = args.env is not None
+    if args.env is None and not args.skip_debug:
+        import random as _rng
+
+        args.env = _rng.choice(["tales", "nethack"])
+        env_explicit = True  # we chose one, so filter by it
+
+    # env_type for DB queries: None means "any env type"
+    env_filter = args.env if env_explicit else None
+
     try:
         with SessionLocal() as db:
             previous = get_latest_experiment(
                 db,
-                env_type=args.env,
+                env_type=env_filter,
                 git_branch=current_branch,
             )
             previous_id = previous.id if previous is not None else None
@@ -288,14 +303,18 @@ def main() -> int:
             if experiment_id is None:
                 experiment = get_latest_experiment(
                     db,
-                    env_type=args.env,
+                    env_type=env_filter,
                     git_branch=current_branch,
                 )
             else:
                 experiment = db.get(ExperimentRun, experiment_id)
-                if experiment is not None and experiment.eval_env_type != args.env:
+                if (
+                    experiment is not None
+                    and env_filter is not None
+                    and experiment.eval_env_type != env_filter
+                ):
                     raise IterationWorkflowError(
-                        f"Experiment {experiment_id} is {experiment.eval_env_type}, not {args.env}."
+                        f"Experiment {experiment_id} is {experiment.eval_env_type}, not {env_filter}."
                     )
                 if experiment is not None and experiment.git_branch not in {
                     None,
@@ -306,8 +325,9 @@ def main() -> int:
                         f"{experiment.git_branch!r}, not {current_branch!r}."
                     )
             if experiment is None:
+                env_label = env_filter or "any"
                 raise IterationWorkflowError(
-                    f"No {args.env} experiment found for branch {current_branch!r}."
+                    f"No {env_label} experiment found for branch {current_branch!r}."
                 )
             summary = summarize_experiment(db, experiment, runs_root=RUNS_ROOT)
     except SQLAlchemyError as exc:

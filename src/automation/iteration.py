@@ -89,11 +89,13 @@ def latest_run_dir(runs_root: Path) -> Path | None:
 def get_latest_experiment(
     session: Session,
     *,
-    env_type: str,
+    env_type: str | None = None,
     git_branch: str | None = None,
     after_id: int | None = None,
 ) -> ExperimentRun | None:
-    stmt = select(ExperimentRun).where(ExperimentRun.eval_env_type == env_type)
+    stmt = select(ExperimentRun)
+    if env_type is not None:
+        stmt = stmt.where(ExperimentRun.eval_env_type == env_type)
     if git_branch:
         stmt = stmt.where(ExperimentRun.git_branch == git_branch)
     if after_id is not None:

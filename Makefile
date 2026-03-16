@@ -40,9 +40,9 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack.
 	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))))) \
 	--gwt'
 
-iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (default: random). GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
 	uv run python scripts/iterate_agent.py \
-	  --env $(or $(ENV),$(shell python3 -c "import random; print(random.choice(['tales','nethack']))")) \
+	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
 	  $(if $(AGENT),--agent $(AGENT),) \
 	  $(if $(SKIP_DEBUG),--skip-debug,) \
@@ -50,9 +50,9 @@ iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (d
 	  $(if $(PROMPT_ONLY),--prompt-only,) \
 	  $(if $(DANGEROUS),--dangerous,)
 
-ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. ENV=tales|nethack (default: random). GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
+ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex RUN_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1
 	uv run python scripts/iterate_agent.py --mode ablate \
-	  --env $(or $(ENV),$(shell python3 -c "import random; print(random.choice(['tales','nethack']))")) \
+	  $(if $(ENV),--env $(ENV),) \
 	  $(if $(GAMES),--games $(GAMES),) \
 	  $(if $(AGENT),--agent $(AGENT),) \
 	  $(if $(RUN_DEBUG),,--skip-debug) \
