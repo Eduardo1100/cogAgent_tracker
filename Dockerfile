@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     libpq-dev \
     default-jre \
+    bison \
+    flex \
+    libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -56,6 +59,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     libpq5 \
     default-jre \
+    bison \
+    flex \
+    libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

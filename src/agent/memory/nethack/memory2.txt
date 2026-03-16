@@ -1,0 +1,3 @@
+Cluster 1; Confidence Score = 3; Concept: PRAYER: Praying to your god can heal, cure status effects, or provide other aid, but has a cooldown. Praying on a cross-aligned altar is dangerous.
+Cluster 2; Confidence Score = 8; Concept: NetHack is a dungeon-crawling roguelike where the player descends through procedurally generated levels of the Mazes of Menace to retrieve the Amulet of Yendor and ascend.
+Cluster 3; Confidence Score = 3; Concept: ITEMS: Items include weapons, armor, scrolls, potions, wands, rings, amulets, food, and tools. Many items start unidentified and must be identified through use, scrolls of identify, or price-identification at shops.

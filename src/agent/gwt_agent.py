@@ -18,7 +18,7 @@ from rich.text import Text
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
-from src.agent.env_adapter import ALFWorldAdapter, ScienceWorldAdapter
+from src.agent.env_adapter import ALFWorldAdapter, NetHackAdapter, ScienceWorldAdapter
 from src.agent.helpers import (
     ConvertOrphanedToolMessages,
     FlattenToolMessages,
@@ -1141,6 +1141,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "read ",
                 "inventory",
                 "task",
+                "search",
             ),
             "inspect",
         ),
@@ -1159,6 +1160,10 @@ class GWTAutogenAgent(AutogenAgent):
                 "grab ",
                 "put down ",
                 "drop ",
+                "wear ",
+                "wield ",
+                "take off",
+                "put on",
             ),
             "relocation",
         ),
@@ -1177,15 +1182,15 @@ class GWTAutogenAgent(AutogenAgent):
             ),
             "device_control",
         ),
-        (("use ", "heat ", "cool ", "boil ", "cook "), "tool_application"),
-        (("eat ",), "consumption"),
+        (("use ", "heat ", "cool ", "boil ", "cook ", "zap ", "apply ", "cast "), "tool_application"),
+        (("eat ", "quaff "), "consumption"),
         (("wait",), "idle"),
         (
-            ("give ", "ask ", "tell ", "show ", "talk ", "say ", "pay "),
+            ("give ", "ask ", "tell ", "show ", "talk ", "say ", "pay ", "pray"),
             "interaction",
         ),
         (
-            ("hit ", "knock ", "push ", "pull ", "throw ", "attack "),
+            ("hit ", "knock ", "push ", "pull ", "throw ", "attack ", "fire ", "kick "),
             "manipulation",
         ),
     )
@@ -1318,6 +1323,8 @@ class GWTAutogenAgent(AutogenAgent):
             return "scienceworld"
         if isinstance(getattr(self, "adapter", None), ALFWorldAdapter):
             return "alfworld"
+        if isinstance(getattr(self, "adapter", None), NetHackAdapter):
+            return "nethack"
 
         env_type = getattr(getattr(self, "args", None), "env_type", None)
         if env_type:

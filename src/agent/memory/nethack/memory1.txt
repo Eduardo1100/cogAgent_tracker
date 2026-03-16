@@ -1,0 +1,27 @@
+NetHack is a dungeon-crawling roguelike where the player descends through procedurally generated levels of the Mazes of Menace to retrieve the Amulet of Yendor and ascend.
+
+Key domain concepts:
+
+DUNGEON STRUCTURE: The dungeon has multiple branches. The main dungeon descends from level 1 to the Castle. Below the Castle are Gehennom and the Sanctum. Special branches include the Gnomish Mines, Sokoban, Fort Ludios, and the quest branch. Staircases (< up, > down) connect levels.
+
+COMBAT: The player fights monsters in melee (adjacent tiles) or at range (thrown weapons, wands, spells). Each monster has different speed, attacks, resistances, and special abilities. Some monsters can be tamed as pets.
+
+ITEMS: Items include weapons, armor, scrolls, potions, wands, rings, amulets, food, and tools. Many items start unidentified and must be identified through use, scrolls of identify, or price-identification at shops.
+
+HUNGER: The player has a hunger clock. Eating corpses or food rations prevents starvation. Some corpses grant intrinsics (e.g., poison resistance from a killer bee).
+
+ELBERETH: Writing "Elbereth" on the ground deters most monsters from attacking. This is a critical survival mechanic.
+
+ALTARS: Altars allow the player to sacrifice corpses for favor, identify BUC (blessed/uncursed/cursed) status of items, and convert alignment.
+
+PRAYER: Praying to your god can heal, cure status effects, or provide other aid, but has a cooldown. Praying on a cross-aligned altar is dangerous.
+
+RESISTANCES: The player can gain resistances to fire, cold, poison, shock, sleep, and disintegration through eating corpses, wearing equipment, or leveling up. These are critical for surviving Gehennom.
+
+SHOPS: Shopkeepers sell and buy items. Stealing from shops angers the shopkeeper.
+
+DEATH: NetHack has permadeath. When the player dies, the game ends. Common causes of death include starvation, monster attacks, traps, and self-inflicted damage from unidentified items.
+
+SCORE: Points are earned by killing monsters, collecting gold, identifying items, and progressing through the dungeon. The final score depends on how far the player progressed and what they accomplished.
+
+MOVEMENT: Cardinal directions (N/S/E/W) and diagonals (NE/NW/SE/SW). The player can also go up (<) or down (>) staircases, kick doors, search for hidden passages, and open/close doors.

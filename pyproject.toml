@@ -29,6 +29,7 @@ dependencies = [
     "umap-learn>=0.5.11",
     "uvicorn>=0.41.0",
     "wandb>=0.25.0",
+    "nle>=0.9.0",
 ]
 
 [tool.ruff]

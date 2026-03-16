@@ -8,6 +8,14 @@ try:
 except ImportError:
     _TALES_ENV2TASK = {}
 
+try:
+    from nethack import ACTIONS as _NLE_ACTIONS
+
+    _HAS_NLE = True
+except ImportError:
+    _NLE_ACTIONS = ()
+    _HAS_NLE = False
+
 
 @runtime_checkable
 class EnvironmentAdapter(Protocol):
@@ -266,6 +274,216 @@ class TalesAdapter:
 
     def set_observation(self, msg: str) -> None:
         self._obs = msg
+
+    def infer_task_type(self) -> int | None:
+        return None
+
+    def count_inadmissible_actions(self, log_path: str) -> int:
+        try:
+            with open(log_path) as f:
+                return sum(
+                    1
+                    for line in f
+                    if "not in the list of admissible actions" in line
+                    or "is not admissible" in line
+                )
+        except Exception:
+            return 0
+
+
+# ── NetHack action label helpers ──────────────────────────────────────────────
+
+# Human-readable labels for NLE Command enums.
+# Keys are the enum member *name* (e.g. "NORTH"); values are what the agent sees.
+_NETHACK_LABEL_OVERRIDES: dict[str, str] = {
+    "NORTH": "move north",
+    "SOUTH": "move south",
+    "EAST": "move east",
+    "WEST": "move west",
+    "NE": "move northeast",
+    "NW": "move northwest",
+    "SE": "move southeast",
+    "SW": "move southwest",
+    "UP": "go up",
+    "DOWN": "go down",
+    "WAIT": "wait",
+    "MORE": "more",
+    "APPLY": "apply",
+    "CAST": "cast",
+    "CLOSE": "close door",
+    "DROP": "drop",
+    "DROPTYPE": "drop item type",
+    "EAT": "eat",
+    "ESC": "cancel",
+    "FIRE": "fire",
+    "INVENTORY": "inventory",
+    "KICK": "kick",
+    "LOOK": "look",
+    "LOOT": "loot",
+    "OPEN": "open door",
+    "PAY": "pay",
+    "PICKUP": "pick up",
+    "PRAY": "pray",
+    "PUTON": "put on",
+    "QUAFF": "quaff",
+    "READ": "read",
+    "REMOVE": "take off",
+    "RIDE": "ride",
+    "RUB": "rub",
+    "SEARCH": "search",
+    "SWAP": "swap weapons",
+    "TAKEOFF": "take off armor",
+    "TELEPORT": "teleport",
+    "THROW": "throw",
+    "TIP": "tip",
+    "TURN": "turn undead",
+    "TWOWEAPON": "two weapon combat",
+    "WEAR": "wear",
+    "WIELD": "wield",
+    "ZAP": "zap",
+}
+
+
+def _build_action_labels(env) -> tuple[list[str], dict[str, int]]:
+    """Build index-aligned label list and label->index mapping for an NLE env."""
+    action_space = env.unwrapped.actions if hasattr(env, "unwrapped") else env.actions
+    labels: list[str] = []
+    label_to_idx: dict[str, int] = {}
+    for idx, action in enumerate(action_space):
+        name = action.name if hasattr(action, "name") else str(action)
+        label = _NETHACK_LABEL_OVERRIDES.get(name, name.lower().replace("_", " "))
+        # Deduplicate if needed (shouldn't happen, but be safe)
+        if label in label_to_idx:
+            label = f"{label} ({idx})"
+        labels.append(label)
+        label_to_idx[label] = idx
+    return labels, label_to_idx
+
+
+# ── NetHackAdapter ────────────────────────────────────────────────────────────
+
+_VARIANT_TASKS: dict[str, str] = {
+    "NetHackScore-v0": (
+        "Maximize your score by exploring the dungeon, fighting monsters, "
+        "and collecting treasure."
+    ),
+    "NetHackChallenge-v0": (
+        "Descend the dungeon, retrieve the Amulet of Yendor, and ascend to win."
+    ),
+    "NetHackStaircase-v0": (
+        "Find and descend the staircase to reach the next dungeon level."
+    ),
+}
+
+_ASCENSION_RE = re.compile(r"\b(ascended|escaped the Planes)\b", re.IGNORECASE)
+
+
+class NetHackAdapter:
+    """EnvironmentAdapter for the NetHack Learning Environment (NLE)."""
+
+    def __init__(
+        self,
+        env,
+        obs: dict,
+        info: dict,
+        variant: str = "NetHackScore-v0",
+        render: bool = False,
+    ):
+        self._env = env
+        self._obs = obs
+        self._info = info
+        self._variant = variant
+        self._terminated = False
+        self._cumulative_reward = 0.0
+        self._obs_override: str | None = None
+        self._render = render
+
+        self._action_labels, self._label_to_idx = _build_action_labels(env)
+        self._initial_obs_str = self._render_tty(obs)
+        if self._render:
+            self._print_tty(self._initial_obs_str)
+
+    # ── rendering ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _render_tty(obs: dict) -> str:
+        """Decode the 24x80 TTY character grid into a human-readable string."""
+        tty = obs["tty_chars"]  # shape (24, 80), dtype int
+        lines: list[str] = []
+        for row in tty:
+            line = bytes(row).decode("latin-1").rstrip()
+            lines.append(line)
+        # strip trailing empty lines
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
+
+    @staticmethod
+    def _print_tty(screen: str) -> None:
+        """Print the TTY screen to stdout with a clear-screen escape."""
+        print("\033[2J\033[H" + screen, flush=True)
+
+    # ── protocol properties ───────────────────────────────────────────────
+
+    @property
+    def observation(self) -> str:
+        if self._obs_override is not None:
+            return self._obs_override
+        return self._render_tty(self._obs)
+
+    @property
+    def initial_observation(self) -> str:
+        return self._initial_obs_str
+
+    @property
+    def admissible_actions(self) -> list[str]:
+        return list(self._action_labels)
+
+    @property
+    def has_won(self) -> bool:
+        msg = self._obs.get("message", None)
+        if msg is not None:
+            try:
+                msg_str = bytes(msg).decode("latin-1").strip()
+            except Exception:
+                msg_str = ""
+            if _ASCENSION_RE.search(msg_str):
+                return True
+        return False
+
+    @property
+    def task(self) -> str:
+        return _VARIANT_TASKS.get(self._variant, _VARIANT_TASKS["NetHackScore-v0"])
+
+    @property
+    def cumulative_reward(self) -> float:
+        return self._cumulative_reward
+
+    # ── actions ───────────────────────────────────────────────────────────
+
+    def step(self, action: str) -> str:
+        self._obs_override = None
+        action_key = action.lower().strip()
+        idx = self._label_to_idx.get(action_key)
+        if idx is None:
+            # Fuzzy-match via sentence-transformer similarity
+            from src.agent.helpers import get_best_candidate
+
+            best = get_best_candidate(action_key, self._action_labels)
+            idx = self._label_to_idx.get(best, 0)
+
+        obs, reward, terminated, truncated, info = self._env.step(idx)
+        self._obs = obs
+        self._info = info
+        self._terminated = terminated or truncated
+        self._cumulative_reward += float(reward)
+        result = self.observation
+        if self._render:
+            self._print_tty(result)
+        return result
+
+    def set_observation(self, msg: str) -> None:
+        self._obs_override = msg
 
     def infer_task_type(self) -> int | None:
         return None
