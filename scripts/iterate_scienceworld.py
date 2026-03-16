@@ -326,6 +326,7 @@ def main() -> int:
         current_branch=current_branch,
         next_iteration=next_iteration,
         repo_root=REPO_ROOT,
+        latest_run_dir=summary.latest_run_dir,
     )
 
     if args.prompt_only:

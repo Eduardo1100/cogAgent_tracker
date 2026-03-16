@@ -7,9 +7,8 @@ Suggested next cogfix number: {next_iteration}
 Experiment summary JSON:
 {experiment_summary_json}
 
-Run artifacts (transcripts, analyst traces, transition logs) are in the most
-recent subdirectory of {repo_root}/runs/. The summary JSON includes
-latest_run_dir if one was recorded.
+Run artifacts for this experiment (transcripts, analyst traces, transition
+logs): {latest_run_dir}
 
 Workflow:
 1. Analyze experiment {experiment_id} using the run artifacts above and DB

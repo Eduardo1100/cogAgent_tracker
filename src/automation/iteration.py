@@ -157,6 +157,7 @@ def render_iteration_prompt(
     current_branch: str,
     next_iteration: int,
     repo_root: Path,
+    latest_run_dir: str | None,
 ) -> str:
     return template_text.format(
         experiment_id=experiment_id,
@@ -164,4 +165,5 @@ def render_iteration_prompt(
         current_branch=current_branch,
         next_iteration=f"{next_iteration:02d}",
         repo_root=str(repo_root),
+        latest_run_dir=latest_run_dir or "(no run directory recorded)",
     )
