@@ -5226,3 +5226,144 @@ def test_recipe_space_indented_format_triggers_already_prepared_warning(tmp_path
     warning_text = " ".join(warnings)
     assert "block of cheese" in warning_text, f"Expected warning, got: {warnings}"
     assert "fried" in warning_text, f"Expected 'fried' in warning, got: {warnings}"
+
+
+# ---------------------------------------------------------------------------
+# cogfix-25: recipe doc label tracking and shortlist penalty
+# ---------------------------------------------------------------------------
+
+_SIMPLE_RECIPE_OBS = (
+    "The recipe reads:\n"
+    "To make sugar water, you need to mix sugar, water."
+)
+
+
+def test_simple_recipe_mix_format_records_doc_label(tmp_path):
+    """Reading a simple 'mix X, Y' recipe must record the doc label in
+    _read_recipe_doc_labels so the shortlist scorer can penalise it."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'sugar water'."
+    )
+
+    assert len(agent._read_recipe_doc_labels) == 0
+
+    agent._update_task_contract_from_recipe_observation(
+        action="read instructions to make sugar water",
+        observation=_SIMPLE_RECIPE_OBS,
+    )
+
+    assert len(agent._read_recipe_doc_labels) == 1
+
+
+def test_simple_recipe_mix_format_extracts_ingredients(tmp_path):
+    """Simple 'mix X, Y' recipe format must inject ingredients as primary_targets."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'sugar water'."
+    )
+
+    agent._update_task_contract_from_recipe_observation(
+        action="read instructions to make sugar water",
+        observation=_SIMPLE_RECIPE_OBS,
+    )
+
+    contract = agent._get_task_contract()
+    targets = contract.get("primary_targets", [])
+    assert "sugar" in targets, f"sugar missing from primary_targets: {targets}"
+    assert "water" in targets, f"water missing from primary_targets: {targets}"
+
+
+def test_action_targets_read_recipe_doc_true_for_consumed(tmp_path):
+    """_action_targets_read_recipe_doc must return True for any action that
+    re-targets a recipe document already consumed this episode."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'sugar water'."
+    )
+
+    agent._update_task_contract_from_recipe_observation(
+        action="read instructions to make sugar water",
+        observation=_SIMPLE_RECIPE_OBS,
+    )
+
+    for action in [
+        "focus on instructions to make sugar water",
+        "read instructions to make sugar water",
+        "look at instructions to make sugar water",
+        "mix instructions to make sugar water",
+    ]:
+        assert agent._action_targets_read_recipe_doc(action), (
+            f"Expected True for consumed recipe doc action: {action!r}"
+        )
+
+
+def test_action_targets_read_recipe_doc_false_for_unrelated(tmp_path):
+    """_action_targets_read_recipe_doc must NOT fire for actions that do not
+    target the recipe document itself (e.g. focus on the final artifact)."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'sugar water'."
+    )
+
+    agent._update_task_contract_from_recipe_observation(
+        action="read instructions to make sugar water",
+        observation=_SIMPLE_RECIPE_OBS,
+    )
+
+    for action in [
+        "focus on sugar water",
+        "pick up sugar",
+        "move sugar to cup",
+        "mix cup",
+        "pour cup into toilet",
+    ]:
+        assert not agent._action_targets_read_recipe_doc(action), (
+            f"Expected False for non-recipe action: {action!r}"
+        )
+
+
+def test_recipe_doc_shortlist_penalty_applied(tmp_path):
+    """After reading a recipe the shortlist scorer must penalise actions that
+    re-target the recipe document, keeping them out of the top results."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to use chemistry to create the substance 'sugar water'."
+    )
+
+    agent._update_task_contract_from_recipe_observation(
+        action="read instructions to make sugar water",
+        observation=_SIMPLE_RECIPE_OBS,
+    )
+
+    # Build a candidate pool: recipe doc action vs a useful ingredient action.
+    actions = [
+        "focus on instructions to make sugar water",
+        "pick up sugar",
+        "move sugar to cup containing nothing in inventory",
+    ]
+
+    scored = []
+    ctx = agent._build_shortlist_scoring_context(
+        current_phase="combine_or_transform",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=list(agent._get_observation_grounded_tokens()),
+    )
+    for a in actions:
+        score, _, _ = agent._score_action_for_shortlist(
+            a,
+            available_actions=actions,
+            current_phase="combine_or_transform",
+            task_keywords=agent._extract_task_keywords(),
+            grounded_tokens=list(agent._get_observation_grounded_tokens()),
+            scoring_context=ctx,
+        )
+        scored.append((score, a))
+
+    recipe_doc_score = next(s for s, a in scored if "instructions" in a)
+    pick_up_score = next(s for s, a in scored if "pick up" in a)
+
+    assert pick_up_score > recipe_doc_score, (
+        f"pick up sugar ({pick_up_score}) should outscore recipe doc "
+        f"({recipe_doc_score}) after the recipe is consumed"
+    )

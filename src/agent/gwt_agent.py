@@ -714,6 +714,12 @@ class GWTAutogenAgent(AutogenAgent):
         r"ingredients?.*?:(.*?)(?:directions?|steps?).*?:(.*?)(?:\n\n|\Z)",
         re.IGNORECASE | re.DOTALL,
     )
+    # Matches simple sentence-format recipes like "you need to mix sugar, water."
+    # Group 1 captures the comma/and-separated ingredient list after the verb.
+    _SIMPLE_RECIPE_MIX_RE = re.compile(
+        r"\b(?:mix|combine|blend|stir)\s+([a-z0-9][a-z0-9\s,]+?)(?=\s*[.;]|\s*$)",
+        re.IGNORECASE | re.MULTILINE,
+    )
     _COOKING_VERB_TO_ADJECTIVE: dict[str, str] = {
         "chop": "chopped",
         "slice": "sliced",
@@ -1311,6 +1317,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._rejected_candidates: list[str] = []
         self._action_observation_signatures: dict[tuple[str, str, str], int] = {}
         self._grounded_artifacts: dict[str, dict] = {}
+        self._read_recipe_doc_labels: set[frozenset[str]] = set()
         self._grounded_substances: dict[str, dict] = {}
         self._exhausted_container_targets: list[str] = []
         self._measurement_observations: list[dict] = []
@@ -2835,6 +2842,32 @@ class GWTAutogenAgent(AutogenAgent):
         """
         first_token = label.split()[0] if label else ""
         return first_token in self._RECIPE_DOCUMENT_NOUN_PREFIXES
+
+    def _action_targets_read_recipe_doc(
+        self, action: str, family: str | None = None
+    ) -> bool:
+        """Return True when the action's object is a recipe document that has
+        already been read this episode.
+
+        After a recipe is consumed its document label is stored in
+        ``_read_recipe_doc_labels`` as a frozenset of content tokens.  Any
+        shortlist action whose content token set is a superset of one of those
+        frozensets *and* whose first content token is a recipe-document noun
+        (e.g. "instructions", "recipe", "note") is considered a re-targeting of
+        the consumed document and should be penalised.
+        """
+        if not self._read_recipe_doc_labels:
+            return False
+        content_tokens = self._extract_action_content_tokens(action, family=family)
+        if not content_tokens:
+            return False
+        if content_tokens[0] not in self._RECIPE_DOCUMENT_NOUN_PREFIXES:
+            return False
+        content_token_set = frozenset(content_tokens)
+        return any(
+            label_tokens.issubset(content_token_set)
+            for label_tokens in self._read_recipe_doc_labels
+        )
 
     def _record_grounded_artifact_labels(self, labels: list[str]) -> None:
         if not self._is_artifact_creation_task():
@@ -4729,18 +4762,56 @@ class GWTAutogenAgent(AutogenAgent):
         can detect when an ingredient is already fully prepared."""
         if not re.search(r"\b(?:read|check|examine)\b", action, re.IGNORECASE):
             return
+        ingredients: list[str] = []
+        verbs_found = False
+        directions_block = ""
+
         match = self._RECIPE_SECTION_RE.search(observation)
-        if not match:
+        if match:
+            ingredients_block, directions_block = match.group(1), match.group(2)
+            ingredients = [
+                self._normalize_task_phrase(m.group(1), role="primary_targets")
+                for m in self._RECIPE_INGREDIENTS_RE.finditer(ingredients_block)
+                if m.group(1).strip()
+            ]
+            verbs_found = bool(self._RECIPE_DIRECTIONS_RE.search(directions_block))
+        else:
+            # Fallback: simple sentence format, e.g. "you need to mix sugar, water."
+            for m in self._SIMPLE_RECIPE_MIX_RE.finditer(observation):
+                for part in re.split(r",\s*|\s+and\s+", m.group(1)):
+                    part = part.strip().rstrip(".")
+                    if part:
+                        normalized = self._normalize_task_phrase(
+                            part, role="primary_targets"
+                        )
+                        if normalized and normalized not in ingredients:
+                            ingredients.append(normalized)
+
+        # If neither format yielded content but the observation has a recipe indicator,
+        # treat it as a consumed doc with no new targets to inject.
+        has_recipe_content = bool(
+            ingredients
+            or verbs_found
+            or re.search(r"\brecipe\b", observation, re.IGNORECASE)
+        )
+        if not has_recipe_content:
             return
-        ingredients_block, directions_block = match.group(1), match.group(2)
-        ingredients = [
-            self._normalize_task_phrase(m.group(1), role="primary_targets")
-            for m in self._RECIPE_INGREDIENTS_RE.finditer(ingredients_block)
-            if m.group(1).strip()
-        ]
-        verbs_found = bool(self._RECIPE_DIRECTIONS_RE.search(directions_block))
+
+        # Record the recipe document label so the shortlist scorer can penalize
+        # further actions targeting this now-consumed document.
+        doc_name = re.sub(
+            r"^\s*(?:read|check|examine)\s+", "", action, flags=re.IGNORECASE
+        ).strip()
+        if doc_name:
+            doc_tokens = frozenset(
+                self._extract_action_content_tokens("read " + doc_name)
+            )
+            if doc_tokens:
+                self._read_recipe_doc_labels.add(doc_tokens)
+
         if not ingredients and not verbs_found:
             return
+
         contract = self._get_task_contract()
         existing = set(contract.get("primary_targets", []))
         new_targets = [t for t in ingredients if t and t not in existing]
@@ -4754,21 +4825,22 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             contract.setdefault("required_families", []).append("tool_application")
         # Extract per-ingredient transformation requirements for preparation-state detection
-        ingredient_states: dict[str, list[str]] = contract.get(
-            "recipe_ingredient_states", {}
-        )
-        for dm in self._RECIPE_DIRECTION_DETAIL_RE.finditer(directions_block):
-            verb = dm.group(1).lower()
-            raw_target = re.sub(
-                r"^(?:a|an|the)\s+", "", dm.group(2).strip().lower()
+        if directions_block:
+            ingredient_states: dict[str, list[str]] = contract.get(
+                "recipe_ingredient_states", {}
             )
-            adjective = self._COOKING_VERB_TO_ADJECTIVE.get(verb)
-            if adjective and raw_target:
-                bucket = ingredient_states.setdefault(raw_target, [])
-                if adjective not in bucket:
-                    bucket.append(adjective)
-        if ingredient_states:
-            contract["recipe_ingredient_states"] = ingredient_states
+            for dm in self._RECIPE_DIRECTION_DETAIL_RE.finditer(directions_block):
+                verb = dm.group(1).lower()
+                raw_target = re.sub(
+                    r"^(?:a|an|the)\s+", "", dm.group(2).strip().lower()
+                )
+                adjective = self._COOKING_VERB_TO_ADJECTIVE.get(verb)
+                if adjective and raw_target:
+                    bucket = ingredient_states.setdefault(raw_target, [])
+                    if adjective not in bucket:
+                        bucket.append(adjective)
+            if ingredient_states:
+                contract["recipe_ingredient_states"] = ingredient_states
 
     def _get_recipe_preparation_warnings(self, observation: str) -> list[str]:
         """Return per-ingredient warnings when an entity in the observation
@@ -10069,6 +10141,15 @@ class GWTAutogenAgent(AutogenAgent):
             score -= 8
         elif recent_repeat_count >= 1 and family == "relocation":
             score -= 4
+
+        # Penalise actions that re-target an already-consumed recipe document.
+        # Once a recipe has been read its document artificially scores very high
+        # because its title tokens overlap with the artifact target (e.g.
+        # "instructions to make sugar water" contains "sugar" and "water").
+        # A strong penalty knocks these out of the shortlist so the scorer can
+        # surface the ingredient-collection actions that actually advance the task.
+        if self._action_targets_read_recipe_doc(action, family=family):
+            score -= 65
 
         if lifecycle_task:
             if not lifecycle_targets_visible:
