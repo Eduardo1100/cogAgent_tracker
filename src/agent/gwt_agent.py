@@ -378,6 +378,11 @@ class GWTAutogenAgent(AutogenAgent):
             "grounded_tokens, salient_entities, shortlist",
             "Closes the feedback loop between strategic reasoning and action selection: objects the Thinking_Agent names as inspection targets receive grounded-hit bonus points so the corresponding inspect actions rise into the top-8 shortlist.",
         ),
+        "known_revisit_exits": (
+            "Navigation actions from the current room whose observed destination is a room already visited at least once.",
+            "navigation_outcomes, tried_exits, visit_count",
+            "Populated from _navigation_outcomes once the agent has tried an exit and recorded where it leads. Exits in this set receive a scoring penalty in exploration tasks, so genuinely unexplored routes consistently outscore backtracking moves.",
+        ),
     }
     _TASK_STOPWORDS = {
         "a",
@@ -1251,6 +1256,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._relation_frontier_referents: list[str] = []
         self._remote_room_signals: dict[str, dict] = {}
         self._search_location_states: dict[str, dict] = {}
+        self._navigation_outcomes: dict[tuple[str, str], str] = {}
         self._target_status_by_referent: dict[str, str] = {}
         self._admissible_summary_cache: dict[tuple[tuple[str, ...], int], dict] = {}
         self._analyst_trace_entries: list[dict] = []
@@ -2837,6 +2843,30 @@ class GWTAutogenAgent(AutogenAgent):
                 prev_room = self._get_current_location_signature(previous_observation)
                 if prev_room and prev_room == room_signature:
                     room_state.setdefault("failed_exits", set()).add(action)
+                elif prev_room and prev_room != room_signature:
+                    # Record successful navigation outcome so the scorer can
+                    # identify which exits lead back to already-visited rooms.
+                    self._navigation_outcomes[(prev_room, action)] = room_signature
+
+    def _get_known_revisit_exits(self, current_room: str) -> set[str]:
+        """Return nav actions from current_room whose known destination was already visited.
+
+        Uses _navigation_outcomes (populated as the agent explores) to identify exits
+        that lead to rooms with visit_count >= 1.  These exits receive a scoring
+        penalty in exploration tasks so that genuinely unexplored routes consistently
+        outscore backtracking moves.
+        """
+        if not self._navigation_outcomes:
+            return set()
+        result: set[str] = set()
+        for (src, action), dest in self._navigation_outcomes.items():
+            if src == current_room:
+                dest_visit_count = self._search_location_states.get(dest, {}).get(
+                    "visit_count", 0
+                )
+                if dest_visit_count >= 1:
+                    result.add(action)
+        return result
 
     def _get_grounded_artifact_labels(self, *, limit: int = 4) -> list[str]:
         if not self._grounded_artifacts:
@@ -9763,6 +9793,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
         failed_exit_count = scoring_context.get("failed_exit_count", 0)
         tried_exits = scoring_context.get("room_state", {}).get("tried_exits", set())
+        known_revisit_exits = scoring_context.get("known_revisit_exits", set())
         stage_labels = (
             self._get_focus_stage_labels(action, "")
             if lifecycle_task and family == "focus"
@@ -10304,6 +10335,17 @@ class GWTAutogenAgent(AutogenAgent):
             elif family == "inspect":
                 score += 4
 
+        # In exploration tasks, penalise navigation actions whose observed
+        # destination is a room already visited at least once.  This prevents
+        # the agent from backtracking to explored territory when unexplored
+        # exits remain available.
+        if (
+            exploration_task
+            and self._is_agent_navigation_action(action, family=family)
+            and action in known_revisit_exits
+        ):
+            score -= 4
+
         if (
             primary_target_focused
             and family == "relation"
@@ -10489,6 +10531,9 @@ class GWTAutogenAgent(AutogenAgent):
             )
             if task_contract.get("exploration_task")
             else False,
+            "known_revisit_exits": self._get_known_revisit_exits(current_room)
+            if task_contract.get("exploration_task")
+            else set(),
             "next_expected_stage": self._get_next_expected_stage_label()
             if lifecycle_task
             else None,

@@ -4926,3 +4926,124 @@ def test_empty_admissible_actions_abort(tmp_path):
     # Verify streak resets on episode reinit
     agent._reset_episode_reasoning_state()
     assert agent._empty_admissible_streak == 0
+
+
+# ---------------------------------------------------------------------------
+# cogfix-19: Exp-182 — penalise navigation exits to already-visited rooms
+# ---------------------------------------------------------------------------
+
+
+def test_navigation_outcomes_recorded_on_room_change(tmp_path):
+    """_update_exploration_search_tracking records (prev_room, action) → dest_room
+    when a nav action successfully moves the agent to a different room."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+
+    prev_obs = "Cobwebby Corridor\nA winding corridor filled with cobwebs.\n"
+    curr_obs = "Lava Tube\nYou are in a tight chimney of solidified lava.\n"
+
+    agent._update_exploration_search_tracking(
+        action="enter crack",
+        observation=curr_obs,
+        previous_observation=prev_obs,
+    )
+
+    cobwebby_sig = agent._get_current_location_signature(prev_obs)
+    lava_sig = agent._get_current_location_signature(curr_obs)
+    assert cobwebby_sig and lava_sig, "location signatures must be extractable"
+    assert agent._navigation_outcomes.get((cobwebby_sig, "enter crack")) == lava_sig
+
+
+def test_known_revisit_exits_identifies_visited_destination(tmp_path):
+    """_get_known_revisit_exits returns actions whose known destination has been
+    visited at least once."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+
+    cobwebby_sig = "cobwebby_corridor"
+    lava_sig = "lava_tube"
+
+    # Simulate: we know "enter crack" from cobwebby leads to lava_tube
+    agent._navigation_outcomes[(cobwebby_sig, "enter crack")] = lava_sig
+    # Lava Tube has been visited once
+    agent._search_location_states[lava_sig] = {"visit_count": 1}
+
+    revisit = agent._get_known_revisit_exits(cobwebby_sig)
+    assert "enter crack" in revisit
+
+
+def test_known_revisit_exits_empty_for_unvisited_destination(tmp_path):
+    """_get_known_revisit_exits does NOT penalise exits whose destination has
+    visit_count == 0 (never visited via the tracker)."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+
+    agent._navigation_outcomes[("room_a", "north")] = "room_b"
+    agent._search_location_states["room_b"] = {"visit_count": 0}
+
+    revisit = agent._get_known_revisit_exits("room_a")
+    assert "north" not in revisit
+
+
+def test_revisit_exit_penalty_applied_in_exploration_task(tmp_path):
+    """In an exploration task a nav action to a known-visited room must score
+    at least 4 points lower than an identically-typed nav action to an
+    unknown destination."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Explore the world and collect treasures."
+    agent.admissible_actions = ["south", "down"]
+
+    # Set up scoring context for an exploration task
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="locate_primary_target",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    # Inject: "south" from this room leads to a visited room; "down" is unknown
+    scoring_context["known_revisit_exits"] = {"south"}
+
+    _kw = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="locate_primary_target",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+    score_south, _, _ = agent._score_action_for_shortlist(action="south", **_kw)
+    score_down, _, _ = agent._score_action_for_shortlist(action="down", **_kw)
+    assert score_down - score_south >= 4, (
+        f"unexplored 'down' ({score_down}) should outscore revisit 'south' "
+        f"({score_south}) by at least 4"
+    )
+
+
+def test_revisit_exit_penalty_not_applied_outside_exploration_task(tmp_path):
+    """The revisit penalty must NOT fire for non-exploration tasks even when
+    known_revisit_exits is populated."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Put the apple in the fridge."
+    agent.admissible_actions = ["south", "down"]
+
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="locate_primary_target",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    # Manually override exploration flag to off (non-exploration task)
+    scoring_context["exploration_task"] = False
+    scoring_context["known_revisit_exits"] = {"south"}
+
+    _kw = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="locate_primary_target",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+    score_south, _, _ = agent._score_action_for_shortlist(action="south", **_kw)
+    score_down, _, _ = agent._score_action_for_shortlist(action="down", **_kw)
+    # Both directions score identically (no revisit penalty), difference < 4
+    assert abs(score_south - score_down) < 4, (
+        f"revisit penalty must not fire outside exploration tasks "
+        f"(south={score_south}, down={score_down})"
+    )
