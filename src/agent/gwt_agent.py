@@ -5193,6 +5193,10 @@ class GWTAutogenAgent(AutogenAgent):
         grounded-token set creates a closed feedback loop: strategic reasoning
         from Thinking_Agent directly elevates the corresponding inspect actions
         into the shortlist so Action_Agent can select them.
+
+        To prevent meta-reasoning language (e.g. "idea", "initial", "suggests")
+        from leaking into grounded tokens and corrupting action scoring, only
+        tokens that also appear in the current observation are returned.
         """
         group_chat = getattr(self, "group_chat", None)
         if group_chat is None:
@@ -5205,12 +5209,23 @@ class GWTAutogenAgent(AutogenAgent):
                 break
         if not thinking_content:
             return []
+
+        # Build the set of tokens actually present in the current observation
+        # so we can filter out Thinking_Agent meta-reasoning language.
+        percept = getattr(self, "percept", {}) or {}
+        observation = percept.get("resulting_observation", "")
+        observation_token_set = set(
+            self._extract_runtime_tokens(observation, limit=60)
+        )
+
         stopwords = self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
-        return self._extract_runtime_tokens(
+        thinking_tokens = self._extract_runtime_tokens(
             thinking_content,
             stopwords=stopwords,
-            limit=limit,
+            limit=limit * 3,  # extract more candidates before filtering
         )
+        # Only keep tokens grounded in the actual observation.
+        return [t for t in thinking_tokens if t in observation_token_set][:limit]
 
     def _is_candidate_search_task(self, task_contract: dict | None = None) -> bool:
         contract = task_contract or self._get_task_contract()
