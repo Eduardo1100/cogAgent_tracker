@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from src.storage.models import EpisodeRun, ExperimentRun
 
 _AGENT_ITERATION_RE = re.compile(r"(^|/|:)agent-iter-(\d+)-")
+_COGFIX_RE = re.compile(r"(^|/|:)cogfix-(\d+)")
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,22 @@ def next_agent_iteration_number(branch_names: Iterable[str]) -> int:
     max_seen = 0
     for branch_name in branch_names:
         parsed = parse_agent_iteration_number(branch_name)
+        if parsed is not None:
+            max_seen = max(max_seen, parsed)
+    return max_seen + 1
+
+
+def parse_cogfix_number(branch_name: str) -> int | None:
+    match = _COGFIX_RE.search(branch_name or "")
+    if not match:
+        return None
+    return int(match.group(2))
+
+
+def next_cogfix_number(branch_names: Iterable[str]) -> int:
+    max_seen = 0
+    for branch_name in branch_names:
+        parsed = parse_cogfix_number(branch_name)
         if parsed is not None:
             max_seen = max(max_seen, parsed)
     return max_seen + 1

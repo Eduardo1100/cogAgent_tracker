@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.automation.iteration import (
     get_latest_experiment,
     next_agent_iteration_number,
+    next_cogfix_number,
     render_iteration_prompt,
     summarize_experiment,
 )
@@ -26,8 +27,10 @@ from src.storage.models import ExperimentRun
 
 RUNS_ROOT = REPO_ROOT / "runs"
 PROMPT_TEMPLATE_PATHS = {
-    "iterate": REPO_ROOT / "prompts" / "iterate_scienceworld_prompt.txt",
-    "ablate": REPO_ROOT / "prompts" / "ablate_scienceworld_prompt.txt",
+    ("iterate", "claudecode"): REPO_ROOT / "prompts" / "iterate_cogfix_prompt.txt",
+    ("ablate", "claudecode"): REPO_ROOT / "prompts" / "ablate_cogfix_prompt.txt",
+    ("iterate", "codex"): REPO_ROOT / "prompts" / "iterate_scienceworld_prompt.txt",
+    ("ablate", "codex"): REPO_ROOT / "prompts" / "ablate_scienceworld_prompt.txt",
 }
 CODEX_MODEL = "gpt-5.4"
 CODEX_REASONING_EFFORT = "xhigh"
@@ -100,8 +103,8 @@ def get_dirty_paths() -> list[str]:
     return paths
 
 
-def load_prompt_template(mode: str) -> str:
-    template_path = PROMPT_TEMPLATE_PATHS[mode]
+def load_prompt_template(mode: str, agent: str) -> str:
+    template_path = PROMPT_TEMPLATE_PATHS[(mode, agent)]
     if not template_path.exists():
         raise FileNotFoundError(f"Prompt template not found: {template_path}")
     return template_path.read_text()
@@ -310,8 +313,12 @@ def main() -> int:
     except SQLAlchemyError as exc:
         raise db_unavailable_error() from exc
 
-    next_iteration = next_agent_iteration_number(get_branch_names())
-    template_text = load_prompt_template(args.mode)
+    branch_names = get_branch_names()
+    if args.agent == "claudecode":
+        next_iteration = next_cogfix_number(branch_names)
+    else:
+        next_iteration = next_agent_iteration_number(branch_names)
+    template_text = load_prompt_template(args.mode, args.agent)
     prompt = render_iteration_prompt(
         template_text,
         experiment_id=summary.experiment_id,
