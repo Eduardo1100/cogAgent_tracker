@@ -5089,6 +5089,23 @@ Directions:
 - fry the purple potato
 """
 
+# Same recipe but using space-indented format (as seen in some TextWorld games)
+_SAMPLE_RECIPE_OBS_SPACE_INDENT = """\
+You open the copy of "Cooking: A Modern Approach (3rd Ed.)" and start reading:
+
+Recipe #1
+---------
+Gather all following ingredients and follow the directions to prepare this tasty meal.
+
+Ingredients:
+  block of cheese
+
+Directions:
+  fry the block of cheese
+  prepare meal
+
+"""
+
 
 def test_recipe_observation_populates_ingredient_states(tmp_path):
     """Reading a cookbook should store per-ingredient transformation requirements
@@ -5176,3 +5193,36 @@ def test_get_recipe_preparation_warnings_empty_when_no_recipe_parsed(tmp_path):
     obs = "You see a fried sliced purple potato."
     warnings = agent._get_recipe_preparation_warnings(obs)
     assert warnings == []
+
+
+def test_recipe_space_indented_format_populates_ingredient_states(tmp_path):
+    """Space-indented recipe format (no leading dash) must populate
+    recipe_ingredient_states the same way as the dash-prefixed format."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    agent._update_task_contract_from_recipe_observation(
+        action="examine cookbook", observation=_SAMPLE_RECIPE_OBS_SPACE_INDENT
+    )
+
+    contract = agent._get_task_contract()
+    states = contract.get("recipe_ingredient_states", {})
+    assert "block of cheese" in states, f"block of cheese missing: {states}"
+    assert set(states["block of cheese"]) == {"fried"}, states["block of cheese"]
+
+
+def test_recipe_space_indented_format_triggers_already_prepared_warning(tmp_path):
+    """When a recipe uses space-indented directions and the observation contains
+    a fully-prepared ingredient, the warning must fire and prevent re-cooking."""
+    agent, _ = _build_agent(tmp_path, env_type="textworld")
+    agent.task = "Cook a meal following the cookbook."
+
+    agent._update_task_contract_from_recipe_observation(
+        action="examine cookbook", observation=_SAMPLE_RECIPE_OBS_SPACE_INDENT
+    )
+
+    obs = "You take the block of cheese from the fridge. You have: a fried block of cheese."
+    warnings = agent._get_recipe_preparation_warnings(obs)
+    warning_text = " ".join(warnings)
+    assert "block of cheese" in warning_text, f"Expected warning, got: {warnings}"
+    assert "fried" in warning_text, f"Expected 'fried' in warning, got: {warnings}"

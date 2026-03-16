@@ -698,16 +698,16 @@ class GWTAutogenAgent(AutogenAgent):
         "blossom",
     }
     _RECIPE_DIRECTIONS_RE = re.compile(
-        r"^-\s+(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)\b",
+        r"^(?:-\s+|\s+)(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)\b",
         re.IGNORECASE | re.MULTILINE,
     )
     _RECIPE_DIRECTION_DETAIL_RE = re.compile(
-        r"^-\s+(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)"
+        r"^(?:-\s+|\s+)(chop|slice|dice|grill|fry|roast|bake|cook|heat|boil|steam)"
         r"\s+(?:the\s+|a\s+|an\s+)?(.+?)$",
         re.IGNORECASE | re.MULTILINE,
     )
     _RECIPE_INGREDIENTS_RE = re.compile(
-        r"^-\s+(?:a\s+|an\s+|the\s+)?(.+?)$",
+        r"^(?:-\s+|\s+)(?:a\s+|an\s+|the\s+)?(.+?)$",
         re.IGNORECASE | re.MULTILINE,
     )
     _RECIPE_SECTION_RE = re.compile(
