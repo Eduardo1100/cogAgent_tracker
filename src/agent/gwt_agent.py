@@ -12690,6 +12690,15 @@ class GWTAutogenAgent(AutogenAgent):
 
             admissible_commands = self.adapter.admissible_actions
             if not admissible_commands:
+                # Attempt a passive "look" nudge to unstick a stale or
+                # not-yet-initialised environment.  "look" is state-preserving
+                # and does not count against the action budget.
+                try:
+                    self.adapter.step("look")
+                    admissible_commands = self.adapter.admissible_actions
+                except Exception:
+                    pass
+            if not admissible_commands:
                 self._empty_admissible_streak += 1
                 if self._empty_admissible_streak >= 2:
                     self.result_dict[self.game_no] = "FAILURE"
