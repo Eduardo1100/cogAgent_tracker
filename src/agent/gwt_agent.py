@@ -1255,6 +1255,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._action_embedding_cache: dict[str, "np.ndarray"] = {}
         self._empty_admissible_streak: int = 0
         self._recently_failed_actions: list[str] = []
+        self._recently_executed_actions: list[str] = []
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -10844,6 +10845,8 @@ class GWTAutogenAgent(AutogenAgent):
             snapshots["referent_resolution"] = self.percept["referent_resolution"]
         if self._recently_failed_actions:
             snapshots["recently_failed_actions"] = list(self._recently_failed_actions)
+        if self._recently_executed_actions:
+            snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
         return snapshots
 
     def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
@@ -11047,7 +11050,10 @@ class GWTAutogenAgent(AutogenAgent):
                 ],
             }
 
-        return self._limit_runtime_payload(snapshots, list_limit=3)
+        if self._recently_executed_actions:
+            snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
+
+        return self._limit_runtime_payload(snapshots, list_limit=5)
 
     @staticmethod
     def _render_analyst_value(value) -> str:
@@ -12305,6 +12311,9 @@ class GWTAutogenAgent(AutogenAgent):
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
+                self._recently_executed_actions = (
+                    self._recently_executed_actions + [action]
+                )[-5:]
 
             reflection = ""
             self.task_status = (
