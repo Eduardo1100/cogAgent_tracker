@@ -631,11 +631,15 @@ class GWTAutogenAgent(AutogenAgent):
     _EXPLORATION_TASK_HINTS = (
         "explore the world",
         "explore the",
+        "exploring the",
+        "exploring",
         "collect treasures",
+        "collecting treasure",
         "collect all",
         "find all",
         "gather all",
         "navigate the",
+        "navigating the",
     )
     _TASK_ARTIFACT_CREATION_HINTS = (
         "create",
@@ -7810,10 +7814,13 @@ class GWTAutogenAgent(AutogenAgent):
             entry["stalled_attempts"] += 1
             entry["confidence"] = max(0.0, entry["confidence"] - 0.15)
 
-        required_families = set(self._get_task_contract().get("required_families", []))
+        task_contract = self._get_task_contract()
+        required_families = set(task_contract.get("required_families", []))
+        exploration_task = bool(task_contract.get("exploration_task"))
         if (
             family in self._DEPRIORITIZE_ELIGIBLE_FAMILIES
             and family not in required_families
+            and not (exploration_task and family == "relocation")
             and entry["observable_change_attempts"] == 0
             and (entry["invalid_attempts"] >= 2 or entry["stalled_attempts"] >= 2)
         ):
