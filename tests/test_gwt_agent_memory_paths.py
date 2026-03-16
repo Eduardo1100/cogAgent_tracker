@@ -1408,6 +1408,71 @@ def test_shortlist_prefers_primary_target_and_relation_actions_after_focus(tmp_p
     assert "look at blue light bulb" not in shortlist
 
 
+def test_task_contract_activates_relation_mechanism_without_explicit_supporting_targets(
+    tmp_path,
+):
+    """Circuit tasks that name required_relations but not a supporting_targets phrase
+    (no 'using X' or 'with X') must still activate relation_mechanism_task so the
+    frontier/candidate-inference machinery can discover the power source."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to turn on the electric motor. "
+        "First, focus on the electric motor. "
+        "Then, create an electrical circuit that powers it on."
+    )
+
+    contract = agent._get_task_contract()
+
+    assert contract["relation_mechanism_task"] is True
+    assert contract["primary_targets"] == ["electric motor"]
+    assert contract["supporting_targets"] == []
+    assert contract["required_relations"] == ["electrical circuit"]
+    assert contract["inferred_search_mode"] is True
+
+
+def test_shortlist_surfaces_battery_for_implicit_circuit_task(tmp_path):
+    """When supporting_targets is empty but required_relations implies an electrical
+    circuit, the shortlist must include battery-related actions as support candidates."""
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = (
+        "Your task is to turn on the electric motor. "
+        "First, focus on the electric motor. "
+        "Then, create an electrical circuit that powers it on."
+    )
+    agent.task_status = "INCOMPLETE"
+    agent._reset_episode_reasoning_state()
+    observation = (
+        "You are in the workshop. You see an electric motor, which is off. "
+        "On the table is: a battery, a red wire, a switch, which is off."
+    )
+    agent.percept = {"resulting_observation": observation}
+    agent._update_ordered_target_progress(
+        executed_action="focus on electric motor",
+        observation="You focus on the electric motor.",
+    )
+    agent._update_relation_task_tracking(
+        action="look at electric motor",
+        observation=observation,
+    )
+
+    summary = agent._summarize_admissible_actions(
+        [
+            "look at battery",
+            "look at red wire",
+            "pick up battery",
+            "connect battery terminal 1 to red wire",
+            "look at electric motor",
+            "open freezer",
+        ],
+        shortlist_limit=4,
+    )
+
+    shortlist = summary["task_relevant_action_shortlist"]
+    # Battery must appear: it's the power source the circuit needs
+    battery_actions = [a for a in shortlist if "battery" in a]
+    assert battery_actions, f"Expected battery action in shortlist, got: {shortlist}"
+
+
 def test_relation_shortlist_commits_after_primary_component_inspection(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = (

@@ -1524,10 +1524,21 @@ class GWTAutogenAgent(AutogenAgent):
             and destination_room not in role_phrases["supporting_targets"]
         ):
             role_phrases["supporting_targets"].append(destination_room)
+        _required_relation_tokens = {
+            token.lower()
+            for phrase in role_phrases["required_relations"]
+            for token in phrase.split()
+        }
+        _relations_imply_abstract_support = bool(
+            _required_relation_tokens & self._ABSTRACT_SUPPORT_ROLE_HINTS
+        )
         relation_mechanism_task = bool(
             role_phrases["required_relations"]
             and role_phrases["primary_targets"]
-            and role_phrases["supporting_targets"]
+            and (
+                role_phrases["supporting_targets"]
+                or _relations_imply_abstract_support
+            )
             and not candidate_classes
             and not lifecycle_sequence
             and not state_change_task
@@ -4985,10 +4996,19 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             return False
         role_token_sets = self._get_task_role_token_sets(contract)
-        return any(
+        if any(
             token_set and bool(token_set & self._ABSTRACT_SUPPORT_ROLE_HINTS)
             for token_set in role_token_sets["supporting_targets"]
-        )
+        ):
+            return True
+        # Also infer when required_relations themselves name an abstract support
+        # mechanism (e.g. "electrical circuit") without an explicit supporting target.
+        required_relation_tokens = {
+            token
+            for token_set in role_token_sets["required_relations"]
+            for token in token_set
+        }
+        return bool(required_relation_tokens & self._ABSTRACT_SUPPORT_ROLE_HINTS)
 
     def _score_relation_support_candidate_signature(
         self,
@@ -5110,7 +5130,10 @@ class GWTAutogenAgent(AutogenAgent):
     ) -> list[str]:
         contract = task_contract or self._get_task_contract()
         if not contract.get("supporting_targets"):
-            return []
+            if not self._relation_support_role_uses_candidate_inference(
+                task_contract=contract
+            ):
+                return []
 
         role_token_sets = self._get_task_role_token_sets(contract)
         candidate_profiles: dict[str, dict[str, int]] = {}
