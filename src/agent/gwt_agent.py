@@ -13121,7 +13121,11 @@ class GWTAutogenAgent(AutogenAgent):
             burst_log: list[dict[str, str]] = []
             remaining_actions: list[str] | None = None
             stop_reason = "sequence_complete"
-            _NAV_STEPS = 3
+            # Inject ONE navigation step at a time toward the stair tile.
+            # Re-checked each iteration so the agent stops exactly on the tile
+            # without overshooting it (3 injected steps caused the agent to
+            # move past the staircase and then fail "go up" from the wrong tile).
+            _NAV_STEPS = 1
 
             i = 0
             while i < len(action_list):
