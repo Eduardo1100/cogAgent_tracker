@@ -1226,6 +1226,23 @@ class GWTAutogenAgent(AutogenAgent):
     # no uncertainty.  Prevents long stretches of unreflective action cycling.
     _FORCED_DELIBERATION_INTERVAL = 5
     _LOW_RISK_FAMILIES: frozenset[str] = frozenset({"inspect", "idle", "relocation", "focus"})
+    # NetHack vi-key shortcuts the LLM may emit instead of full "move X" labels.
+    # Normalized before family classification and admissible matching in bursts.
+    _VI_KEY_TO_MOVE: dict[str, str] = {
+        "n": "move north",
+        "s": "move south",
+        "e": "move east",
+        "w": "move west",
+        "y": "move northwest",
+        "u": "move northeast",
+        "b": "move southwest",
+        "k": "move north",
+        "j": "move south",
+        "h": "move west",
+        "l": "move east",
+        ">": "go down",
+        "<": "go up",
+    }
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
@@ -13134,6 +13151,13 @@ class GWTAutogenAgent(AutogenAgent):
                 if not suggested_action or suggested_action == "do nothing":
                     i += 1
                     continue
+
+                # Normalize NetHack vi-key shortcuts to full "move X" form so
+                # they pass family classification and admissible matching.
+                _normalized_vi = self._VI_KEY_TO_MOVE.get(suggested_action.strip())
+                if _normalized_vi:
+                    suggested_action = _normalized_vi
+                    action_list[i] = _normalized_vi
 
                 # Dynamic stair navigation injection — uses the CURRENT
                 # observation (fresh after each executed action) so the
