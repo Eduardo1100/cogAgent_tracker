@@ -296,6 +296,7 @@ class TalesAdapter:
 # Human-readable labels for NLE Command enums.
 # Keys are the enum member *name* (e.g. "NORTH"); values are what the agent sees.
 _NETHACK_LABEL_OVERRIDES: dict[str, str] = {
+    # Cardinal/diagonal movement — named enum variants (arrow keys etc.)
     "NORTH": "move north",
     "SOUTH": "move south",
     "EAST": "move east",
@@ -304,6 +305,21 @@ _NETHACK_LABEL_OVERRIDES: dict[str, str] = {
     "NW": "move northwest",
     "SE": "move southeast",
     "SW": "move southwest",
+    # Single-letter enum variants (vi-key style or letter shortcuts).
+    # Map to the same "move X" labels so they receive "relocation" family
+    # classification and are readable in the LLM's admissible list.
+    "n": "move north",
+    "s": "move south",
+    "e": "move east",
+    "w": "move west",
+    "y": "move northwest",
+    "u": "move northeast",
+    "b": "move southwest",
+    # Note: vi-key "n" typically means southeast in classic NetHack, but NLE
+    # exposes it as a northward shortcut in some builds.  The override unifies
+    # whichever cardinal "n" resolves to so the family classifier sees "move ".
+    # Duplicate detection in _build_action_labels will skip any later entry
+    # that collides with an already-registered label.
     "UP": "go up",
     "DOWN": "go down",
     "WAIT": "wait",
@@ -352,9 +368,11 @@ def _build_action_labels(env) -> tuple[list[str], dict[str, int]]:
     for idx, action in enumerate(action_space):
         name = action.name if hasattr(action, "name") else str(action)
         label = _NETHACK_LABEL_OVERRIDES.get(name, name.lower().replace("_", " "))
-        # Deduplicate if needed (shouldn't happen, but be safe)
+        # Skip duplicate labels — two NLE enum values can map to the same
+        # human-readable string (e.g. two "move southeast" entries). The first
+        # one is sufficient; the duplicate would only confuse the scorer.
         if label in label_to_idx:
-            label = f"{label} ({idx})"
+            continue
         labels.append(label)
         label_to_idx[label] = idx
     return labels, label_to_idx

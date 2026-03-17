@@ -1226,7 +1226,6 @@ class GWTAutogenAgent(AutogenAgent):
     # no uncertainty.  Prevents long stretches of unreflective action cycling.
     _FORCED_DELIBERATION_INTERVAL = 5
     _LOW_RISK_FAMILIES: frozenset[str] = frozenset({"inspect", "idle", "relocation", "focus"})
-    _MAX_BURST_SIZE: int = 3
     _UNCERTAINTY_RE = re.compile(
         r"\b(uncertain|unclear|unsure|unknown|conflicting|"
         r"contradictory|ambiguous|stalled|not\s+(?:sure|certain|confirmed|clear|visible|found)"
@@ -1254,6 +1253,13 @@ class GWTAutogenAgent(AutogenAgent):
         r"(no effect|unchanged|still at|remains? |still |did not|does not|"
         r"no longer changes)",
         re.IGNORECASE,
+    )
+    # Parse NetHack [Surroundings] passable/blocked lines injected by the adapter.
+    _NH_PASSABLE_RE = re.compile(r"\bpassable:\s*([^\n]+)", re.IGNORECASE)
+    _NH_BLOCKED_RE = re.compile(r"\bblocked:\s*([^\n]+)", re.IGNORECASE)
+    # Extract directions that have a staircase ("  northwest: upstairs").
+    _NH_STAIR_DIR_RE = re.compile(
+        r"^\s*(\w+):\s*(?:upstairs|downstairs)", re.MULTILINE | re.IGNORECASE
     )
 
     def __init__(
@@ -1398,6 +1404,18 @@ class GWTAutogenAgent(AutogenAgent):
         self._recently_executed_actions: list[str] = []
         self._actions_since_last_thinking: int = 0
         self._last_burst_size: int = 1
+        # Stop reason of the most recent burst — used by the speaker selector to
+        # decide whether to self-loop Action_Agent or force a belief update.
+        self._last_burst_stop_reason: str = ""
+        # Number of consecutive Action_Agent self-loops taken without an
+        # intervening Belief_State update.  Capped at _MAX_ACTION_SELFLOOPS.
+        self._consecutive_action_selfloops: int = 0
+        # Actions unexecuted from the last burst (stopped early) — passed to the
+        # next action agent call so it can continue or adapt the sequence.
+        self._pending_sequence: list[str] = []
+        # Intersection of admissible sets seen so far this episode.  Actions that
+        # remain in this set are unconditionally valid at any sequence position.
+        self._persistent_admissible: set[str] | None = None
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -5549,6 +5567,21 @@ class GWTAutogenAgent(AutogenAgent):
     def _get_current_location_signature(self, observation: str) -> str:
         return " ".join(self._extract_current_location_tokens(observation)[:4])
 
+    def _parse_nh_surroundings(
+        self, observation: str
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Extract passable, blocked, and stair direction sets from a NetHack [Surroundings] block."""
+        passable: set[str] = set()
+        blocked: set[str] = set()
+        m = self._NH_PASSABLE_RE.search(observation)
+        if m:
+            passable = {d.strip() for d in m.group(1).split(",") if d.strip()}
+        m = self._NH_BLOCKED_RE.search(observation)
+        if m:
+            blocked = {d.strip() for d in m.group(1).split(",") if d.strip()}
+        stair_dirs = set(self._NH_STAIR_DIR_RE.findall(observation))
+        return passable, blocked, stair_dirs
+
     def _count_visible_doors(self, observation: str) -> int:
         return len(
             re.findall(r"\bdoor to\b|\bdoor \(that is\b|\bdoor\b", observation.lower())
@@ -7415,6 +7448,7 @@ class GWTAutogenAgent(AutogenAgent):
             "southwest",
         }
     )
+    _BARE_INSPECT_WORDS: frozenset[str] = frozenset({"look", "i", "inventory"})
 
     def _classify_action_family(self, action: str) -> str:
         normalized = self._normalize_runtime_text(action)
@@ -7426,6 +7460,11 @@ class GWTAutogenAgent(AutogenAgent):
         # like "update", "download", "northeast" (a separate direction).
         if normalized in self._BARE_DIRECTION_WORDS:
             return "relocation"
+
+        # Bare inspect words (e.g. "look", "i") don't have a trailing space so
+        # they would fall through to "other" without this explicit check.
+        if normalized in self._BARE_INSPECT_WORDS:
+            return "inspect"
 
         for prefixes, family in self._ACTION_FAMILY_PREFIXES:
             if normalized.startswith(prefixes):
@@ -7813,6 +7852,15 @@ class GWTAutogenAgent(AutogenAgent):
             entry["invalid_attempts"] += 1
             entry["confidence"] = max(0.0, entry["confidence"] - 0.2)
             self._record_invalid_exact_action(executed_action or suggested_action)
+            # Stair actions ("go up" / "go down") fail when the agent isn't standing
+            # on the staircase yet. Hard-excluding them prevents a retry after the
+            # agent navigates to the correct tile, so they are exempt here.
+            # The _invalid_exact_actions score penalty still discourages blind retries.
+            action_str = (executed_action or suggested_action or "").strip().lower()
+            if action_str not in {"go up", "go down"}:
+                self._recently_failed_actions = (
+                    self._recently_failed_actions + [executed_action or suggested_action]
+                )[-3:]
             self._record_invalid_referent_attempt(
                 family=family,
                 action=executed_action or suggested_action,
@@ -7839,6 +7887,13 @@ class GWTAutogenAgent(AutogenAgent):
         ):
             entry["status"] = "deprioritized"
             entry["retired"] = True
+        elif (
+            exploration_task
+            and family == "relocation"
+            and entry["evidence_attempts"] >= 2
+        ):
+            entry["status"] = "promising"
+            entry["retired"] = False
         elif entry["observable_change_attempts"] > 0:
             entry["status"] = "promising"
             entry["retired"] = False
@@ -9704,6 +9759,11 @@ class GWTAutogenAgent(AutogenAgent):
 
     def _get_current_phase(self) -> str:
         task_contract = self._get_task_contract()
+        if task_contract.get("exploration_task"):
+            relocation_entry = self.episode_hypothesis_ledger.get("relocation", {})
+            if relocation_entry.get("evidence_attempts", 0) >= 2:
+                return "act"
+            return "gather_evidence"
         if self._is_candidate_search_task(task_contract) and self._rejected_candidates:
             return "gather_evidence"
         if self._is_growth_conditional_branch_task(task_contract):
@@ -10227,9 +10287,60 @@ class GWTAutogenAgent(AutogenAgent):
         elif recent_repeat_count >= 1 and family in {"focus", "inspect"}:
             score -= 4
         if recent_repeat_count >= 2 and family == "relocation":
-            score -= 8
+            score -= 14
         elif recent_repeat_count >= 1 and family == "relocation":
-            score -= 4
+            score -= 6
+        # Detect A→B→A→B oscillation in recently-executed relocation actions and
+        # apply a strong penalty to break the cycle before it consumes more budget.
+        if family == "relocation" and len(self._recently_executed_actions) >= 4:
+            ra = self._recently_executed_actions
+            if (
+                self._normalize_runtime_text(ra[-4]) == self._normalize_runtime_text(ra[-2])
+                and self._normalize_runtime_text(ra[-3]) == self._normalize_runtime_text(ra[-1])
+            ):
+                oscillating = {
+                    self._normalize_runtime_text(ra[-1]),
+                    self._normalize_runtime_text(ra[-2]),
+                }
+                if normalized in oscillating:
+                    score -= 20
+
+        # NetHack terrain: reward passable directions, heavily penalise blocked ones.
+        # Direction names appear in observation tokens so they otherwise score equally;
+        # this ensures the scorer surfaces the directions the agent can actually walk.
+        if family == "relocation":
+            passable_directions = scoring_context.get("passable_directions", set())
+            blocked_directions = scoring_context.get("blocked_directions", set())
+            if passable_directions or blocked_directions:
+                direction_words = [
+                    w for w in normalized.split() if w in self._BARE_DIRECTION_WORDS
+                ]
+                direction = direction_words[-1] if direction_words else ""
+                if direction in blocked_directions:
+                    score -= 25
+                elif direction in passable_directions:
+                    score += 8
+            # For exploration tasks, strongly boost stair actions when stairs are
+            # visible — changing dungeon levels is the primary scoring mechanism.
+            # "upstairs"/"downstairs" appear in the surroundings block when adjacent;
+            # "staircase" appears in the message line when standing ON the stairs.
+            if scoring_context.get("task_contract", {}).get("exploration_task"):
+                obs = scoring_context.get("current_observation", "")
+                stair_directions = scoring_context.get("stair_directions", set())
+                if normalized in {"go up", "go down"}:
+                    if "upstairs" in obs or "downstairs" in obs or "staircase" in obs:
+                        score += 15
+                # When a stair command has previously failed (agent wasn't on the tile),
+                # boost movement TOWARD the stair tile so the agent navigates there first.
+                go_up_failed = self._invalid_exact_actions.get("go up", 0) > 0
+                go_down_failed = self._invalid_exact_actions.get("go down", 0) > 0
+                if stair_directions and (go_up_failed or go_down_failed):
+                    direction_words = [
+                        w for w in normalized.split() if w in self._BARE_DIRECTION_WORDS
+                    ]
+                    direction = direction_words[-1] if direction_words else ""
+                    if direction in stair_directions:
+                        score += 18
 
         # Penalise actions that re-target an already-consumed recipe document.
         # Once a recipe has been read its document artificially scores very high
@@ -10765,6 +10876,7 @@ class GWTAutogenAgent(AutogenAgent):
         task_keyword_set = set(task_keywords)
         target_entity_set = set(task_contract.get("target_entities", []))
         current_observation = (self.percept or {}).get("resulting_observation", "")
+        nh_passable, nh_blocked, nh_stair_dirs = self._parse_nh_surroundings(current_observation)
         current_location_tokens = set(
             self._extract_current_location_tokens(current_observation)
         )
@@ -10819,6 +10931,9 @@ class GWTAutogenAgent(AutogenAgent):
             "measurement_task": measurement_task,
             "comparison_task": comparison_task,
             "conditional_branch_task": conditional_branch_task,
+            "passable_directions": nh_passable,
+            "blocked_directions": nh_blocked,
+            "stair_directions": nh_stair_dirs,
             "lifecycle_task": lifecycle_task,
             "lifecycle_targets_visible": bool(visible_nonlocation_targets)
             or bool(self._get_visible_lifecycle_stage_labels(current_observation)),
@@ -11162,12 +11277,24 @@ class GWTAutogenAgent(AutogenAgent):
         comparison_tracking = self._get_comparison_tracking_snapshot()
         conditional_branch_tracking = self._get_conditional_branch_tracking_snapshot()
 
+        # Build the full admissible action list grouped by family (sorted by
+        # descending score within each family, blocked actions excluded).
+        # This lets the Action_Agent pick exact valid strings for sequences
+        # without having to guess off-shortlist.
+        admissible_by_family: dict[str, list[str]] = {}
+        for item in scored_actions:
+            if item["action"] in blocked_actions:
+                continue
+            fam = item["family"]
+            admissible_by_family.setdefault(fam, []).append(item["action"])
+
         return {
             "total_actions": len(actions),
             "current_phase": current_phase,
             "family_counts": family_counts,
             "salient_entities": grounded_tokens[:8],
             "task_relevant_action_shortlist": shortlist,
+            "admissible_actions_by_family": admissible_by_family,
             "deprioritized_families": deprioritized_families,
             "candidate_tracking": self._get_candidate_tracking_snapshot(),
             "task_contract": task_contract,
@@ -11330,6 +11457,20 @@ class GWTAutogenAgent(AutogenAgent):
             snapshots["recently_failed_actions"] = list(self._recently_failed_actions)
         if self._recently_executed_actions:
             snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
+        if self.percept.get("admissible_actions_unchanged"):
+            snapshots["admissible_actions_unchanged"] = True
+        if self._pending_sequence:
+            snapshots["pending_sequence"] = list(self._pending_sequence)
+        if self._persistent_admissible is not None:
+            # Intersect the ever-seen union with the CURRENT admissible set so
+            # we only expose actions that (a) have appeared before in this
+            # episode and (b) are valid right now.  Only surface when it's a
+            # strict subset — otherwise it equals the full admissible set
+            # (e.g. fixed-action-space envs like NetHack) and adds no signal.
+            curr_set = set(self.admissible_actions)
+            persistent_now = self._persistent_admissible & curr_set
+            if persistent_now < curr_set:
+                snapshots["persistent_admissible_actions"] = sorted(persistent_now)
         return snapshots
 
     def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
@@ -11906,15 +12047,15 @@ class GWTAutogenAgent(AutogenAgent):
             self._action_agent_base_prompt
             + "\n\n--- PRIVATE RUNTIME CONTEXT ---\n"
             + f"Current phase: {summary['current_phase']}\n"
-            + f"Current exact task-relevant admissible shortlist: {json.dumps(summary['task_relevant_action_shortlist'])}\n"
+            + f"Shortlist (top-scored admissible actions, prefer these): {json.dumps(summary['task_relevant_action_shortlist'])}\n"
+            + f"All admissible actions by family (complete valid choice space — only use strings from this list or the shortlist): {json.dumps(summary['admissible_actions_by_family'])}\n"
             + f"Salient grounded entities from the latest percept: {json.dumps(summary['salient_entities'])}\n"
             + f"Task contract: {json.dumps(compact_task_contract)}\n"
             + f"Episode runtime snapshots: {json.dumps(runtime_snapshots)}\n"
             + f"Deprioritized mechanism families this episode: {json.dumps(summary['deprioritized_families'])}\n"
             + f"Recent invalid exact commands to avoid repeating: {json.dumps(recent_invalid_actions)}\n"
-            + "Choose an exact shortlist string whenever possible. "
-            + "If you go off-shortlist, stay lexically close to grounded entities and known admissible verb families instead of inventing a fresh command template. "
-            + "The executor will only execute the action if it actually matches the environment's admissible commands.\n",
+            + "Only use action strings that appear in the shortlist or admissible_actions_by_family above — never invent a command template. "
+            + "The executor will only execute the action if it exactly matches the environment's admissible commands.\n",
         )
 
     @staticmethod
@@ -12174,6 +12315,15 @@ class GWTAutogenAgent(AutogenAgent):
         no_longer = sorted(set(self.admissible_actions) - set(curr_admissible))
         newly_added = sorted(set(curr_admissible) - set(self.admissible_actions))
         self.admissible_actions = curr_admissible
+        # Track which actions have been admissible at every observed state this
+        # episode — these are safe to place at any position in a long sequence.
+        # Use a union that grows but is filtered to current admissible at read
+        # time, so temporarily-absent actions are not permanently dropped.
+        curr_set = set(curr_admissible)
+        if self._persistent_admissible is None:
+            self._persistent_admissible = curr_set
+        else:
+            self._persistent_admissible |= curr_set
 
         self.percept = {
             "timestep": self.num_actions_taken,
@@ -12510,7 +12660,9 @@ class GWTAutogenAgent(AutogenAgent):
             self.action_agent: [self.external_perception_agent],
             # Route through Echo_Agent to broadcast tool results as plain text.
             self.external_perception_agent: [self.echo_agent],
-            self.echo_agent: [self.belief_state_agent],
+            # echo_agent normally routes to belief_state_agent; the speaker
+            # selector can short-circuit to action_agent after a clean burst.
+            self.echo_agent: [self.belief_state_agent, self.action_agent],
             self.belief_state_agent: [
                 self.action_agent,
                 self.retrieve_memory_agent,
@@ -12854,6 +13006,11 @@ class GWTAutogenAgent(AutogenAgent):
             if not suggested_action or suggested_action == "do nothing":
                 return "NO ACTION EXECUTED. " + focus()
 
+            # Single-action path: clear any stale sequence state so the
+            # speaker selector doesn't self-loop based on a previous burst.
+            self._pending_sequence = []
+            self._last_burst_stop_reason = ""
+
             if self.task_failed:
                 self.max_actions += self.max_round_actions
                 self.task_failed = False
@@ -12929,7 +13086,7 @@ class GWTAutogenAgent(AutogenAgent):
             description="Execute an action in the ALFWorld environment and return a structured percept JSON.",
         )
 
-        def execute_action_sequence(actions: str) -> str:
+        def execute_action_sequence(actions: str | list) -> str:
             # Terminal state pre-checks (same as execute_action1)
             if self.task_success:
                 self.result_dict[self.game_no] = "SUCCESS"
@@ -12948,27 +13105,62 @@ class GWTAutogenAgent(AutogenAgent):
                 self.task_failed = False
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
 
-            # Parse JSON array (fallback: comma-split)
-            try:
-                action_list = json.loads(actions)
-                if not isinstance(action_list, list):
-                    action_list = [str(action_list)]
-            except (json.JSONDecodeError, TypeError):
-                action_list = [a.strip() for a in actions.split(",") if a.strip()]
+            # Normalize: accept list directly, JSON string, or comma-separated string
+            if isinstance(actions, list):
+                action_list = [str(a) for a in actions]
+            else:
+                try:
+                    parsed = json.loads(actions)
+                    action_list = parsed if isinstance(parsed, list) else [str(parsed)]
+                except (json.JSONDecodeError, TypeError):
+                    action_list = [a.strip() for a in actions.split(",") if a.strip()]
 
             if not action_list:
                 return "NO ACTION EXECUTED. " + focus()
 
-            # Truncate to burst cap
-            action_list = action_list[: self._MAX_BURST_SIZE]
-
             burst_log: list[dict[str, str]] = []
             remaining_actions: list[str] | None = None
             stop_reason = "sequence_complete"
+            _NAV_STEPS = 3
 
-            for i, suggested_action in enumerate(action_list):
+            i = 0
+            while i < len(action_list):
+                suggested_action = action_list[i]
+
                 if not suggested_action or suggested_action == "do nothing":
+                    i += 1
                     continue
+
+                # Dynamic stair navigation injection — uses the CURRENT
+                # observation (fresh after each executed action) so the
+                # direction is always up-to-date, even if earlier actions
+                # in this burst moved the agent.
+                _act_low = suggested_action.lower().strip()
+                if _act_low in {"go up", "go down"}:
+                    _fresh_obs = self.percept.get("resulting_observation", "")
+                    if "staircase" not in _fresh_obs.lower():
+                        _stair_kw = "upstairs" if _act_low == "go up" else "downstairs"
+                        _dir_re = re.compile(
+                            r"^\s*(\w+):\s*" + _stair_kw, re.MULTILINE | re.IGNORECASE
+                        )
+                        _m = _dir_re.search(_fresh_obs)
+                        if _m:
+                            _nav = f"move {_m.group(1)}"
+                            # Count the unbroken run of this exact nav move
+                            # already inserted immediately before position i.
+                            _tail_run = 0
+                            for _p in reversed(action_list[:i]):
+                                if _p.lower() == _nav.lower():
+                                    _tail_run += 1
+                                else:
+                                    break
+                            _steps = max(0, _NAV_STEPS - _tail_run)
+                            for _ in range(_steps):
+                                action_list.insert(i, _nav)
+                            # i now points to the first inserted nav move;
+                            # re-process from here (don't advance i).
+                            if _steps > 0:
+                                continue
 
                 # Family gate
                 family = self._classify_action_family(suggested_action)
@@ -13001,14 +13193,20 @@ class GWTAutogenAgent(AutogenAgent):
                 )
 
                 if action_score < 0.98:
+                    # Action not found in admissible set — the whole sequence is
+                    # now suspect.  Discard remaining actions and force a belief
+                    # state update so the agent replans from current observation.
                     self._recently_failed_actions = (
                         self._recently_failed_actions + [suggested_action]
                     )[-3:]
-                    remaining_actions = action_list[i:]
-                    stop_reason = "inadmissible"
+                    stop_reason = "action_failed"
                     break
 
-                # Execute
+                # Execute — snapshot invalid-action count before pipeline so we
+                # can detect a game-level rejection (e.g. "It's a wall") below.
+                _invalid_before = self._invalid_exact_actions.get(
+                    self._normalize_runtime_text(action), 0
+                )
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
@@ -13038,19 +13236,34 @@ class GWTAutogenAgent(AutogenAgent):
                     stop_reason = "task_failed"
                     break
 
-                # Observation change check
-                if self._observation_changed_significantly(
+                # Game-level failure: the action executed but the environment
+                # rejected it (outcome classified as "invalid" by the pipeline).
+                # Discard the remaining sequence and force a belief update.
+                _invalid_after = self._invalid_exact_actions.get(
+                    self._normalize_runtime_text(action), 0
+                )
+                if _invalid_after > _invalid_before:
+                    stop_reason = "action_failed"
+                    break
+
+                # Observation change check — relocation actions always change the
+                # map view so we exempt them; other families stop for deliberation.
+                if family != "relocation" and self._observation_changed_significantly(
                     previous_observation, self.adapter.observation
                 ):
                     remaining_actions = action_list[i + 1 :] or None
                     stop_reason = "observation_changed"
                     break
+
+                i += 1
             else:
-                # Loop completed without break — check if we hit burst cap
-                if len(action_list) >= self._MAX_BURST_SIZE:
-                    stop_reason = "burst_cap"
+                stop_reason = "sequence_complete"
 
             self._last_burst_size = max(len(burst_log), 1)
+            self._last_burst_stop_reason = stop_reason
+            # Carry unexecuted actions forward so the next action agent call can
+            # continue or adapt the plan without re-deriving it from scratch.
+            self._pending_sequence = list(remaining_actions) if remaining_actions else []
 
             result = {
                 "burst_log": burst_log,
@@ -13067,9 +13280,10 @@ class GWTAutogenAgent(AutogenAgent):
             executor=self.external_perception_agent,
             name="execute_action_sequence",
             description=(
-                "Execute a short sequence of low-risk actions (inspect, idle, "
-                "relocation, focus) in one turn. Input: JSON array of action strings. "
-                "Stops early on inadmissible, high-risk, or observation-changing actions."
+                "Execute a sequence of low-risk actions (inspect, idle, relocation, focus) "
+                "in one turn. Choose as many actions as appropriate — the burst stops "
+                "automatically on any high-risk, inadmissible, or observation-changing action. "
+                "Input: a list of action strings, e.g. [\"go north\", \"look\", \"examine door\"]."
             ),
         )
 
@@ -13420,6 +13634,8 @@ class GWTAutogenAgent(AutogenAgent):
         # at all (Action_Agent output plain text instead of calling execute_action).
         # That guard fires first in a full stall; this counter covers the separate
         # (unlikely) case where execute_action IS called but num_actions_taken stalls.
+        _MAX_ACTION_SELFLOOPS = 11
+
         if last_speaker is self.echo_agent:
             if self.num_actions_taken == self._last_seen_actions_taken:
                 self._stale_action_count += 1
@@ -13435,6 +13651,29 @@ class GWTAutogenAgent(AutogenAgent):
                 new_cap = len(messages) + 1
                 if self.group_chat.max_round > new_cap:
                     self.group_chat.max_round = new_cap
+
+            # Self-loop: after a fully successful burst (all queued actions
+            # executed, no early stop), route directly back to Action_Agent
+            # without a Belief_State + Thinking round.  Action_Agent's system
+            # message is already refreshed by _refresh_action_agent_runtime_context
+            # after every step in the burst, so its context is current.
+            # Stop self-looping when:
+            #  - the burst stopped early for any reason (must update belief state)
+            #  - the task is done
+            #  - we've self-looped _MAX_ACTION_SELFLOOPS times in a row
+            #    (force a belief update to avoid context drift on long sequences)
+            if (
+                self._last_burst_stop_reason == "sequence_complete"
+                and not self.task_success
+                and not self.task_failed
+                and self._stale_action_count == 0
+                and self._consecutive_action_selfloops < _MAX_ACTION_SELFLOOPS
+            ):
+                self._consecutive_action_selfloops += 1
+                return self.action_agent
+            self._consecutive_action_selfloops = 0
+            # Normal path: belief update required.
+            return self.belief_state_agent
 
         # Standard Graph Transitions
         possible_speakers = self.allowed_transitions.get(last_speaker, [])

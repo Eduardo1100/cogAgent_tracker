@@ -51,16 +51,39 @@ action_agent: |
   19a. If comparison_tracking is present, do not focus a comparison target until the winner is resolved from grounded evidence.
   20. If relation_frontier is present, restrict relation and device-control choices to that local mechanism unless a new observation directly forces expansion.
   21. If the task names a specific primary target and it is still not grounded, prefer search and route-enabling actions that reveal or reach that target before exploring unrelated rooms or devices.
+  21a. For open-ended exploration tasks (e.g. NetHack dungeon), if the shortlist contains "go up" or "go down" and the current observation mentions stairs (upstairs/downstairs), choose the stair action immediately — changing dungeon levels is the primary score-earning mechanism and should take priority over any lateral movement.
+  21b. You can simply include "go up" or "go down" in a sequence — the system will automatically prepend a navigation move if you are not yet on the stair tile (e.g. ["go up"] becomes ["move northwest", "go up"] internally). You may also explicitly write ["move northwest", "go up"] — duplicates are suppressed automatically.
   Tool choice — execute_action vs execute_action_sequence:
-  22. Use execute_action_sequence only for a short chain (2-3) of low-risk
-      actions from families inspect, idle, relocation, or focus where
-      intermediate deliberation adds no value. Pass a JSON array of exact
-      admissible strings. The burst stops early on inadmissible, non-low-risk,
-      or observation-changing actions. Use execute_action for everything else.
-  23. Never output plain text. Your only valid response is an execute_action() or execute_action_sequence() tool call.
-  24. As a last resort only, call execute_action() with an empty string.
+  22. Default: use execute_action_sequence with as many low-risk actions as you
+      judge appropriate. Pass them as a Python list of strings.
+      Low-risk families are: inspect, idle, relocation, focus. The burst stops
+      automatically on any high-risk, inadmissible, or observation-changing action,
+      so over-queuing is always safe — err on the side of more actions.
+      For open-ended exploration (e.g. NetHack), queue 5-10 movement actions at a
+      time: e.g. ["move northwest", "go up", "move northeast", "move east", "search"].
+  22a. Use execute_action with a single action ONLY when the best next action
+       belongs to a high-risk family that requires deliberation after seeing its
+       result — specifically: relation, tool_application, transfer_or_transform,
+       device_control, or any irreversible state-changing action (use, put, take,
+       open, close, drop, etc.). When in doubt, prefer the sequence default.
+  22b. Building reliable long sequences (positions 4+):
+       - Positions 1-3: any action from the shortlist or admissible_actions_by_family
+         is appropriate — the current state is known.
+       - Positions 4 and beyond: prefer actions from `persistent_admissible_actions`
+         (if present in runtime context) — these have been valid at every observed
+         state this episode and are safe regardless of intermediate state changes.
+         If persistent_admissible_actions is absent, fill later positions with
+         inspect/idle family actions (e.g. "search", "look", "wait") which are
+         almost always valid and provide useful observations.
+       - Avoid placing state-dependent relocation actions (e.g. "move northeast")
+         at position 4+ unless you are confident the path will remain clear.
+  22c. Sequence continuation — if the runtime context contains `pending_sequence`,
+       those are actions from the previous burst that stopped early. Re-queue them
+       at the start of your next sequence (adapting only if the new observation
+       shows the world has changed significantly). This lets long plans span
+       multiple agent calls without losing progress.
 
-  IMPORTANT: You must output exactly one tool call (execute_action or execute_action_sequence) — nothing else.
+  IMPORTANT: You must output exactly one tool call — either execute_action(action) or execute_action_sequence(actions) — nothing else.
   If you see a [SYSTEM ERROR] in the conversation, do NOT respond with plain text — your only valid response is still a tool call.
 
 thinking_agent: |
