@@ -296,11 +296,16 @@ class TalesAdapter:
 # Human-readable labels for NLE Command enums.
 # Keys are the enum member *name* (e.g. "NORTH"); values are what the agent sees.
 _NETHACK_LABEL_OVERRIDES: dict[str, str] = {
-    # Cardinal/diagonal movement — named enum variants (arrow keys etc.)
-    "NORTH": "move north",
-    "SOUTH": "move south",
-    "EAST": "move east",
-    "WEST": "move west",
+    # Cardinal/diagonal movement.
+    # NLE enum *names* for the vi-key direction actions are single uppercase
+    # letters ("N","S","E","W") and two-letter pairs ("NE","NW","SE","SW").
+    # The longer "NORTH"/"SOUTH"/... names do NOT exist in the NLE enum space;
+    # they were wrong keys that caused cardinal directions to fall through to
+    # the lowercase fallback ("n","e","s","w") instead of "move north" etc.
+    "N": "move north",
+    "S": "move south",
+    "E": "move east",
+    "W": "move west",
     "NE": "move northeast",
     "NW": "move northwest",
     "SE": "move southeast",

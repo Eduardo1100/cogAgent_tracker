@@ -1226,20 +1226,29 @@ class GWTAutogenAgent(AutogenAgent):
     # no uncertainty.  Prevents long stretches of unreflective action cycling.
     _FORCED_DELIBERATION_INTERVAL = 5
     _LOW_RISK_FAMILIES: frozenset[str] = frozenset({"inspect", "idle", "relocation", "focus"})
-    # NetHack vi-key shortcuts the LLM may emit instead of full "move X" labels.
-    # Normalized before family classification and admissible matching in bursts.
+    # NetHack vi-key shortcuts or old short labels the LLM may emit.
+    # Normalized to full "move X" form before family classification and
+    # admissible matching in execute_action_sequence.
+    #
+    # "n","e","s","w" were the admissible labels before the _NETHACK_LABEL_OVERRIDES
+    # fix (NLE enum names "N","S","E","W" now correctly map to "move north" etc.).
+    # They are kept here as a compatibility shim.
+    # Classic NetHack vi-keys (k=north, j=south, l=east, h=west, etc.) are also
+    # included so direct vi-char outputs from the LLM are handled correctly.
     _VI_KEY_TO_MOVE: dict[str, str] = {
+        # Old short admissible labels (pre-fix compatibility)
         "n": "move north",
         "s": "move south",
         "e": "move east",
         "w": "move west",
+        # Classic NetHack vi-key characters
+        "k": "move north",
+        "j": "move south",
+        "l": "move east",
+        "h": "move west",
         "y": "move northwest",
         "u": "move northeast",
         "b": "move southwest",
-        "k": "move north",
-        "j": "move south",
-        "h": "move west",
-        "l": "move east",
         ">": "go down",
         "<": "go up",
     }
