@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug iterate-agent ablate-agent test lint clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
+.PHONY: help setup dev train eval debug iterate-agent ablate-agent format lint test ci clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -66,12 +66,18 @@ ablate-agent: ## Reuse the latest experiment for a consolidation/ablation pass. 
 	  $(if $(MAX_ACTIONS),--max-actions $(MAX_ACTIONS),) \
 	  $(if $(MAX_CHATROUNDS),--max-chatrounds $(MAX_CHATROUNDS),)
 
-test: ## Run tests with pytest
-	uv run pytest tests/
+format: ## Auto-fix and format code locally
+	uvx ruff==0.15.4 check . --fix
+	uvx ruff==0.15.4 format .
 
-lint: ## Fix and lint code with Ruff
-	uvx ruff check . --fix
-	uvx ruff format .
+lint: ## Check formatting and lint without modifying files
+	uvx ruff==0.15.4 format . --check
+	uvx ruff==0.15.4 check .
+
+test: ## Run tests (CI-style, fail fast)
+	uv run pytest tests/ -x -q
+
+ci: lint test ## Run CI-equivalent local checks
 
 clean: ## Wipe the environment and caches (The nuclear option)
 	@echo "🧹 Cleaning up..."
