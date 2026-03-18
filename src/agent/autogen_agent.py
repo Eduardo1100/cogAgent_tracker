@@ -84,6 +84,7 @@ class AutogenAgent:
     def _log_chat_exception(self, exc: Exception) -> None:
         """Write a non-recoverable chat exception to error_message.txt."""
         import traceback
+
         error_path = (getattr(self, "log_paths", {}) or {}).get("error_message_path")
         if not error_path:
             return

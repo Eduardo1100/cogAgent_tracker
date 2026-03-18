@@ -404,20 +404,37 @@ _ASCENSION_RE = re.compile(r"\b(ascended|escaped the Planes)\b", re.IGNORECASE)
 
 _NH_GLYPH: dict[str, str] = {
     # Walls & rock
-    "|": "wall", "-": "wall", " ": "rock",
+    "|": "wall",
+    "-": "wall",
+    " ": "rock",
     # Floor & corridors
-    ".": "floor", "#": "corridor",
+    ".": "floor",
+    "#": "corridor",
     # Doors
-    "+": "closed door", "'": "open door",
+    "+": "closed door",
+    "'": "open door",
     # Stairs
-    "<": "upstairs", ">": "downstairs",
+    "<": "upstairs",
+    ">": "downstairs",
     # Water / lava / air
-    "}": "water/pool", "{": "fountain", "\\": "throne",
-    "^": "trap", "_": "altar",
+    "}": "water/pool",
+    "{": "fountain",
+    "\\": "throne",
+    "^": "trap",
+    "_": "altar",
     # Items (broad categories)
-    ")": "weapon", "[": "armor", "!": "potion", "?": "scroll",
-    "/": "wand", "=": "ring", '"': "amulet", "$": "gold",
-    "*": "gem/rock", "%": "corpse/food", "(": "tool", "`": "statue/boulder",
+    ")": "weapon",
+    "[": "armor",
+    "!": "potion",
+    "?": "scroll",
+    "/": "wand",
+    "=": "ring",
+    '"': "amulet",
+    "$": "gold",
+    "*": "gem/rock",
+    "%": "corpse/food",
+    "(": "tool",
+    "`": "statue/boulder",
 }
 
 # Characters that are walkable (floor-like)
@@ -496,6 +513,7 @@ def _parse_surroundings(tty_chars) -> str | None:
 
     return "\n".join(lines)
 
+
 # Patterns for interactive prompts that the agent cannot answer through the
 # normal action space.  Auto-confirming prevents the cognitive loop from
 # burning its entire action budget on an unanswerable prompt.
@@ -535,7 +553,9 @@ class NetHackAdapter:
     @staticmethod
     def _find_char_action_idx(env, char_ord: int) -> int | None:
         """Return the action-space index whose enum value equals *char_ord*, or None."""
-        action_space = env.unwrapped.actions if hasattr(env, "unwrapped") else env.actions
+        action_space = (
+            env.unwrapped.actions if hasattr(env, "unwrapped") else env.actions
+        )
         for idx, action in enumerate(action_space):
             val = getattr(action, "value", None)
             if val is not None and int(val) == char_ord:

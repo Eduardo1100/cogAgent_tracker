@@ -5,7 +5,9 @@ import numpy as np
 from src.agent.env_adapter import _parse_surroundings
 
 
-def _make_tty(lines: list[str], player_row: int = 5, player_col: int = 40) -> np.ndarray:
+def _make_tty(
+    lines: list[str], player_row: int = 5, player_col: int = 40
+) -> np.ndarray:
     """Build a 24x80 TTY character grid from human-readable lines.
 
     *lines* are placed starting at row ``player_row - len(lines)//2`` so the
@@ -83,7 +85,13 @@ class TestParseSurroundings:
         result = _parse_surroundings(grid)
         assert result is not None
         for direction in [
-            "north", "south", "east", "west",
-            "northeast", "northwest", "southeast", "southwest",
+            "north",
+            "south",
+            "east",
+            "west",
+            "northeast",
+            "northwest",
+            "southeast",
+            "southwest",
         ]:
             assert direction in result

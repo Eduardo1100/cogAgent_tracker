@@ -737,7 +737,9 @@ def test_put_jericho_word_order_classified_as_transfer(tmp_path):
     # Jericho word order: put X down / put X in Y -> transfer_or_transform
     assert agent._classify_action_family("put notepad down") == "transfer_or_transform"
     assert agent._classify_action_family("put all in curb") == "transfer_or_transform"
-    assert agent._classify_action_family("put newspaper in car") == "transfer_or_transform"
+    assert (
+        agent._classify_action_family("put newspaper in car") == "transfer_or_transform"
+    )
     # ScienceWorld word order: put down X -> relocation (backward compat)
     assert agent._classify_action_family("put down notepad") == "relocation"
 
@@ -746,7 +748,10 @@ def test_manipulation_default_quota_and_exploration_shortlist(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     # Default quota via _FAMILY_DEFAULT_QUOTA (no explicit per-phase entry needed)
     assert agent._get_shortlist_family_quotas("act").get("manipulation") == 1
-    assert agent._get_shortlist_family_quotas("locate_primary_target").get("manipulation") == 1
+    assert (
+        agent._get_shortlist_family_quotas("locate_primary_target").get("manipulation")
+        == 1
+    )
     # Default priority via _FAMILY_DEFAULT_PRIORITY
     assert agent._get_family_priority("locate_primary_target", "manipulation") == 2
     assert agent._get_family_priority("act", "manipulation") == 2
@@ -881,7 +886,9 @@ def test_task_contract_filters_spatial_prepositions_from_target_entities(tmp_pat
         )
 
 
-def test_task_contract_extracts_short_abbreviation_object_from_quantity_phrase(tmp_path):
+def test_task_contract_extracts_short_abbreviation_object_from_quantity_phrase(
+    tmp_path,
+):
     # "put two cd in safe" — "two" is a quantity word, "cd" is a 2-char abbreviation.
     # Both must survive: quantity word stripped from primary_targets, 2-char token kept.
     agent, _ = _build_agent(tmp_path, env_type="tales")
@@ -5230,8 +5237,12 @@ def test_get_recipe_preparation_warnings_detects_fully_prepared_ingredient(tmp_p
     warnings = agent._get_recipe_preparation_warnings(obs_with_prepared)
 
     warning_text = " ".join(warnings)
-    assert "purple potato" in warning_text, f"Expected purple potato warning, got: {warnings}"
-    assert "do not re-cook" in warning_text, f"Expected do-not-re-cook hint, got: {warnings}"
+    assert "purple potato" in warning_text, (
+        f"Expected purple potato warning, got: {warnings}"
+    )
+    assert "do not re-cook" in warning_text, (
+        f"Expected do-not-re-cook hint, got: {warnings}"
+    )
     assert "banana" in warning_text, f"Expected banana warning, got: {warnings}"
 
 
@@ -5306,8 +5317,7 @@ def test_recipe_space_indented_format_triggers_already_prepared_warning(tmp_path
 # ---------------------------------------------------------------------------
 
 _SIMPLE_RECIPE_OBS = (
-    "The recipe reads:\n"
-    "To make sugar water, you need to mix sugar, water."
+    "The recipe reads:\nTo make sugar water, you need to mix sugar, water."
 )
 
 
@@ -5315,9 +5325,7 @@ def test_simple_recipe_mix_format_records_doc_label(tmp_path):
     """Reading a simple 'mix X, Y' recipe must record the doc label in
     _read_recipe_doc_labels so the shortlist scorer can penalise it."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = (
-        "Your task is to use chemistry to create the substance 'sugar water'."
-    )
+    agent.task = "Your task is to use chemistry to create the substance 'sugar water'."
 
     assert len(agent._read_recipe_doc_labels) == 0
 
@@ -5332,9 +5340,7 @@ def test_simple_recipe_mix_format_records_doc_label(tmp_path):
 def test_simple_recipe_mix_format_extracts_ingredients(tmp_path):
     """Simple 'mix X, Y' recipe format must inject ingredients as primary_targets."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = (
-        "Your task is to use chemistry to create the substance 'sugar water'."
-    )
+    agent.task = "Your task is to use chemistry to create the substance 'sugar water'."
 
     agent._update_task_contract_from_recipe_observation(
         action="read instructions to make sugar water",
@@ -5351,9 +5357,7 @@ def test_action_targets_read_recipe_doc_true_for_consumed(tmp_path):
     """_action_targets_read_recipe_doc must return True for any action that
     re-targets a recipe document already consumed this episode."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = (
-        "Your task is to use chemistry to create the substance 'sugar water'."
-    )
+    agent.task = "Your task is to use chemistry to create the substance 'sugar water'."
 
     agent._update_task_contract_from_recipe_observation(
         action="read instructions to make sugar water",
@@ -5375,9 +5379,7 @@ def test_action_targets_read_recipe_doc_false_for_unrelated(tmp_path):
     """_action_targets_read_recipe_doc must NOT fire for actions that do not
     target the recipe document itself (e.g. focus on the final artifact)."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = (
-        "Your task is to use chemistry to create the substance 'sugar water'."
-    )
+    agent.task = "Your task is to use chemistry to create the substance 'sugar water'."
 
     agent._update_task_contract_from_recipe_observation(
         action="read instructions to make sugar water",
@@ -5400,9 +5402,7 @@ def test_recipe_doc_shortlist_penalty_applied(tmp_path):
     """After reading a recipe the shortlist scorer must penalise actions that
     re-target the recipe document, keeping them out of the top results."""
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
-    agent.task = (
-        "Your task is to use chemistry to create the substance 'sugar water'."
-    )
+    agent.task = "Your task is to use chemistry to create the substance 'sugar water'."
 
     agent._update_task_contract_from_recipe_observation(
         action="read instructions to make sugar water",

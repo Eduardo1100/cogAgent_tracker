@@ -21,7 +21,12 @@ from rich.text import Text
 
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
-from src.agent.env_adapter import NetHackAdapter, ScienceWorldAdapter, TalesAdapter, infer_task_type
+from src.agent.env_adapter import (
+    NetHackAdapter,
+    ScienceWorldAdapter,
+    TalesAdapter,
+    infer_task_type,
+)
 from src.agent.gwt_agent import GWTAutogenAgent
 from src.config.env_validation import require_env_vars
 from src.config.schema_health import require_current_schema
@@ -1926,7 +1931,9 @@ def run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 )
                 print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
 
-                print(f"[Ran Game #{game_no}] variant={variant} reward={adapter.cumulative_reward:.1f}")
+                print(
+                    f"[Ran Game #{game_no}] variant={variant} reward={adapter.cumulative_reward:.1f}"
+                )
                 print(
                     f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m"
                 )
