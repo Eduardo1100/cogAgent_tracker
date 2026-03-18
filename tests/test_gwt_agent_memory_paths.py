@@ -492,10 +492,7 @@ def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_
     assert "action_attempts_left" not in agent.percept
     assert "look at aluminum foil" in shortlist
     assert "pick up aluminum foil" in shortlist
-    assert (
-        "Current exact task-relevant admissible shortlist"
-        in agent.action_agent.system_message
-    )
+    assert "Shortlist (top-scored admissible" in agent.action_agent.system_message
     assert "Salient grounded entities" in agent.action_agent.system_message
     assert "connect aluminum foil to battery" in agent.action_agent.system_message
 
