@@ -1193,7 +1193,10 @@ class GWTAutogenAgent(AutogenAgent):
             ),
             "device_control",
         ),
-        (("use ", "heat ", "cool ", "boil ", "cook ", "zap ", "apply ", "cast "), "tool_application"),
+        (
+            ("use ", "heat ", "cool ", "boil ", "cook ", "zap ", "apply ", "cast "),
+            "tool_application",
+        ),
         (("eat ", "quaff "), "consumption"),
         (("wait",), "idle"),
         (
@@ -1225,7 +1228,9 @@ class GWTAutogenAgent(AutogenAgent):
     # Force Thinking_Agent every N actions even when Belief_State_Agent shows
     # no uncertainty.  Prevents long stretches of unreflective action cycling.
     _FORCED_DELIBERATION_INTERVAL = 5
-    _LOW_RISK_FAMILIES: frozenset[str] = frozenset({"inspect", "idle", "relocation", "focus"})
+    _LOW_RISK_FAMILIES: frozenset[str] = frozenset(
+        {"inspect", "idle", "relocation", "focus"}
+    )
     # NetHack vi-key shortcuts or old short labels the LLM may emit.
     # Normalized to full "move X" form before family classification and
     # admissible matching in execute_action_sequence.
@@ -1422,9 +1427,9 @@ class GWTAutogenAgent(AutogenAgent):
         self._last_analyst_trace_text = ""
         self._last_analyst_trace_ansi_text = ""
         self._analyst_trace_message_cursor = 0
-        self._episode_target_embeddings: "np.ndarray | None" = None
+        self._episode_target_embeddings: np.ndarray | None = None
         self._episode_target_entity_list: list[str] = []
-        self._action_embedding_cache: dict[str, "np.ndarray"] = {}
+        self._action_embedding_cache: dict[str, np.ndarray] = {}
         self._empty_admissible_streak: int = 0
         self._recently_failed_actions: list[str] = []
         self._recently_executed_actions: list[str] = []
@@ -1722,8 +1727,7 @@ class GWTAutogenAgent(AutogenAgent):
             role_phrases["required_relations"]
             and role_phrases["primary_targets"]
             and (
-                role_phrases["supporting_targets"]
-                or _relations_imply_abstract_support
+                role_phrases["supporting_targets"] or _relations_imply_abstract_support
             )
             and not candidate_classes
             and not lifecycle_sequence
@@ -5265,9 +5269,7 @@ class GWTAutogenAgent(AutogenAgent):
         # so we can filter out Thinking_Agent meta-reasoning language.
         percept = getattr(self, "percept", {}) or {}
         observation = percept.get("resulting_observation", "")
-        observation_token_set = set(
-            self._extract_runtime_tokens(observation, limit=60)
-        )
+        observation_token_set = set(self._extract_runtime_tokens(observation, limit=60))
 
         stopwords = self._TASK_STOPWORDS | self._ACTION_COMMAND_STOPWORDS
         thinking_tokens = self._extract_runtime_tokens(
@@ -7457,8 +7459,12 @@ class GWTAutogenAgent(AutogenAgent):
                 "idle": -5,
             },
         }
-        phase_priorities = priorities_by_phase.get(current_phase, priorities_by_phase["act"])
-        return {**GWTAutogenAgent._FAMILY_DEFAULT_PRIORITY, **phase_priorities}.get(family, 0)
+        phase_priorities = priorities_by_phase.get(
+            current_phase, priorities_by_phase["act"]
+        )
+        return {**GWTAutogenAgent._FAMILY_DEFAULT_PRIORITY, **phase_priorities}.get(
+            family, 0
+        )
 
     _BARE_DIRECTION_WORDS: frozenset[str] = frozenset(
         {
@@ -7885,7 +7891,8 @@ class GWTAutogenAgent(AutogenAgent):
             action_str = (executed_action or suggested_action or "").strip().lower()
             if action_str not in {"go up", "go down"}:
                 self._recently_failed_actions = (
-                    self._recently_failed_actions + [executed_action or suggested_action]
+                    self._recently_failed_actions
+                    + [executed_action or suggested_action]
                 )[-3:]
             self._record_invalid_referent_attempt(
                 family=family,
@@ -10320,9 +10327,10 @@ class GWTAutogenAgent(AutogenAgent):
         # apply a strong penalty to break the cycle before it consumes more budget.
         if family == "relocation" and len(self._recently_executed_actions) >= 4:
             ra = self._recently_executed_actions
-            if (
-                self._normalize_runtime_text(ra[-4]) == self._normalize_runtime_text(ra[-2])
-                and self._normalize_runtime_text(ra[-3]) == self._normalize_runtime_text(ra[-1])
+            if self._normalize_runtime_text(ra[-4]) == self._normalize_runtime_text(
+                ra[-2]
+            ) and self._normalize_runtime_text(ra[-3]) == self._normalize_runtime_text(
+                ra[-1]
             ):
                 oscillating = {
                     self._normalize_runtime_text(ra[-1]),
@@ -10902,7 +10910,9 @@ class GWTAutogenAgent(AutogenAgent):
         task_keyword_set = set(task_keywords)
         target_entity_set = set(task_contract.get("target_entities", []))
         current_observation = (self.percept or {}).get("resulting_observation", "")
-        nh_passable, nh_blocked, nh_stair_dirs = self._parse_nh_surroundings(current_observation)
+        nh_passable, nh_blocked, nh_stair_dirs = self._parse_nh_surroundings(
+            current_observation
+        )
         current_location_tokens = set(
             self._extract_current_location_tokens(current_observation)
         )
@@ -11482,7 +11492,9 @@ class GWTAutogenAgent(AutogenAgent):
         if self._recently_failed_actions:
             snapshots["recently_failed_actions"] = list(self._recently_failed_actions)
         if self._recently_executed_actions:
-            snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
+            snapshots["recently_executed_actions"] = list(
+                self._recently_executed_actions
+            )
         if self.percept.get("admissible_actions_unchanged"):
             snapshots["admissible_actions_unchanged"] = True
         if self._pending_sequence:
@@ -11701,7 +11713,9 @@ class GWTAutogenAgent(AutogenAgent):
             }
 
         if self._recently_executed_actions:
-            snapshots["recently_executed_actions"] = list(self._recently_executed_actions)
+            snapshots["recently_executed_actions"] = list(
+                self._recently_executed_actions
+            )
 
         thinking_hints = self._get_thinking_agent_entity_hints()
         if thinking_hints:
@@ -12988,9 +13002,7 @@ class GWTAutogenAgent(AutogenAgent):
             self.percept["resolved_action"] = reasoning_action
         self._update_episode_hypothesis_ledger(
             suggested_action=reasoning_action or suggested_action,
-            executed_action=reasoning_action
-            if executed_action is not None
-            else None,
+            executed_action=reasoning_action if executed_action is not None else None,
             previous_observation=previous_observation,
         )
         hypothesis_snapshot = self._get_episode_hypothesis_snapshot(
@@ -13252,18 +13264,20 @@ class GWTAutogenAgent(AutogenAgent):
                 )[-5:]
 
                 # State pipeline
-                reflection = self._apply_post_action_pipeline(
+                self._apply_post_action_pipeline(
                     executed_action=action,
                     canonical_suggested_action=canonical_suggested_action,
                     suggested_action=suggested_action,
                     previous_observation=previous_observation,
                 )
 
-                burst_log.append({
-                    "action": action,
-                    "observation": self.adapter.observation,
-                    "family": family,
-                })
+                burst_log.append(
+                    {
+                        "action": action,
+                        "observation": self.adapter.observation,
+                        "family": family,
+                    }
+                )
 
                 # Task outcome check
                 if self.task_status == "COMPLETED":
@@ -13300,7 +13314,9 @@ class GWTAutogenAgent(AutogenAgent):
             self._last_burst_stop_reason = stop_reason
             # Carry unexecuted actions forward so the next action agent call can
             # continue or adapt the plan without re-deriving it from scratch.
-            self._pending_sequence = list(remaining_actions) if remaining_actions else []
+            self._pending_sequence = (
+                list(remaining_actions) if remaining_actions else []
+            )
 
             result = {
                 "burst_log": burst_log,
@@ -13320,7 +13336,7 @@ class GWTAutogenAgent(AutogenAgent):
                 "Execute a sequence of low-risk actions (inspect, idle, relocation, focus) "
                 "in one turn. Choose as many actions as appropriate — the burst stops "
                 "automatically on any high-risk, inadmissible, or observation-changing action. "
-                "Input: a list of action strings, e.g. [\"go north\", \"look\", \"examine door\"]."
+                'Input: a list of action strings, e.g. ["go north", "look", "examine door"].'
             ),
         )
 
@@ -13754,8 +13770,7 @@ class GWTAutogenAgent(AutogenAgent):
                 or "no observation" in current_content.lower()
             )
             needs_forced_deliberation = (
-                self._actions_since_last_thinking
-                >= self._FORCED_DELIBERATION_INTERVAL
+                self._actions_since_last_thinking >= self._FORCED_DELIBERATION_INTERVAL
             )
 
             if has_uncertainty or needs_forced_deliberation:

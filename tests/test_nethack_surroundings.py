@@ -1,7 +1,6 @@
 """Tests for _parse_surroundings in NetHackAdapter."""
 
 import numpy as np
-import pytest
 
 from src.agent.env_adapter import _parse_surroundings
 
