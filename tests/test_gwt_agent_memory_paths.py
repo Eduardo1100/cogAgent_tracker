@@ -669,10 +669,7 @@ def test_recover_from_chat_error_reorders_provider_and_retries(tmp_path):
         "google",
     ]
     assert agent.group_chat_manager.llm_config["api_type"] == "openai"
-    assert (
-        "Current exact task-relevant admissible shortlist"
-        in agent.action_agent.system_message
-    )
+    assert "Shortlist (top-scored admissible" in agent.action_agent.system_message
 
 
 def test_set_agent_system_message_supports_read_only_autogen_property(tmp_path):
