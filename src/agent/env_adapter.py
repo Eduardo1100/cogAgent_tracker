@@ -1,5 +1,14 @@
 import re
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from src.agent.v2.types import (
+    ActionResult,
+    AdapterCapabilities,
+    AdapterEvent,
+    FrontierDelta,
+    OperatorCandidate,
+    SpatialContext,
+)
 
 try:
     import tales as _tales
@@ -41,6 +50,116 @@ class EnvironmentAdapter(Protocol):
     def infer_task_type(self) -> int | None: ...
 
     def count_inadmissible_actions(self, log_path: str) -> int: ...
+
+
+@runtime_checkable
+class V2EnvironmentAdapter(Protocol):
+    """Normalized adapter seam for the v2 runtime.
+
+    The v2 controller consumes typed adapter events rather than relying on raw
+    text prompts. Concrete adapters may still expose legacy methods while the
+    migration is in progress.
+    """
+
+    @property
+    def observation(self) -> str: ...
+
+    @property
+    def task(self) -> str: ...
+
+    def get_v2_capabilities(self) -> AdapterCapabilities: ...
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent: ...
+
+
+def _infer_operator_family(action_label: str) -> str:
+    normalized = action_label.strip().lower()
+    if normalized.startswith("move ") or normalized in {"go up", "go down"}:
+        return "relocation"
+    if normalized in {"search", "look", "inventory", "wait", "more"}:
+        return "inspect"
+    if normalized.startswith(("open", "close", "kick", "loot")):
+        return "interaction"
+    if normalized.startswith(
+        (
+            "pick up",
+            "drop",
+            "wear",
+            "take off",
+            "wield",
+            "put on",
+            "swap",
+        )
+    ):
+        return "inventory"
+    if normalized.startswith(
+        ("eat", "quaff", "read", "zap", "throw", "apply", "fire", "cast")
+    ):
+        return "tool_application"
+    if normalized.startswith(("pray", "ride", "rub", "tip", "turn", "teleport")):
+        return "device_control"
+    return "environment_action"
+
+
+def _build_operator_candidates(
+    adapter_name: str, admissible_actions: list[str]
+) -> list[OperatorCandidate]:
+    return [
+        OperatorCandidate(
+            operator_id=f"{adapter_name}:action:{idx}",
+            family=_infer_operator_family(action),
+            action_label=action,
+        )
+        for idx, action in enumerate(admissible_actions)
+    ]
+
+
+def build_text_only_adapter_event(
+    *,
+    adapter_name: str,
+    task_text: str,
+    observation: str,
+    admissible_actions: list[str],
+    step_index: int,
+    action_text: str | None = None,
+    action_executed: bool | None = None,
+    reward_delta: float | None = None,
+    status_delta: dict[str, float | int | str | bool] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> AdapterEvent:
+    """Build a minimal normalized event for legacy text or grid adapters.
+
+    This keeps Phase A compatibility simple while making room for richer UI
+    adapters such as WebArena later.
+    """
+
+    operator_candidates = _build_operator_candidates(adapter_name, admissible_actions)
+    event_metadata = {"adapter_name": adapter_name}
+    if metadata:
+        event_metadata.update(metadata)
+    return AdapterEvent(
+        step_index=step_index,
+        task_text=task_text,
+        raw_observation=observation,
+        normalized_observation=observation,
+        action_result=ActionResult(
+            action_text=action_text,
+            action_executed=action_executed,
+        ),
+        operator_candidates=operator_candidates,
+        reward_delta=reward_delta,
+        status_delta=status_delta or {},
+        metadata=event_metadata,
+    )
 
 
 def infer_task_type(task: str) -> int | None:
@@ -112,6 +231,36 @@ class ALFWorldAdapter:
         except Exception:
             return 0
 
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="alfworld",
+            observation_mode="text",
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        return build_text_only_adapter_event(
+            adapter_name="alfworld",
+            task_text=self.task,
+            observation=self.observation,
+            admissible_actions=self.admissible_actions,
+            step_index=step_index,
+            action_text=action_text,
+            action_executed=action_executed,
+            reward_delta=reward_delta,
+            status_delta=status_delta,
+            metadata=metadata,
+        )
+
 
 class ScienceWorldAdapter:
     def __init__(self, env, obs, info, task_name: str = ""):
@@ -167,6 +316,37 @@ class ScienceWorldAdapter:
                 )
         except Exception:
             return 0
+
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="scienceworld",
+            observation_mode="text",
+            supports_reward_delta=True,
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        return build_text_only_adapter_event(
+            adapter_name="scienceworld",
+            task_text=self.task,
+            observation=self.observation,
+            admissible_actions=self.admissible_actions,
+            step_index=step_index,
+            action_text=action_text,
+            action_executed=action_executed,
+            reward_delta=reward_delta,
+            status_delta=status_delta,
+            metadata=metadata,
+        )
 
 
 _INFOCOM_PREAMBLE_RE = re.compile(
@@ -289,6 +469,36 @@ class TalesAdapter:
                 )
         except Exception:
             return 0
+
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="tales",
+            observation_mode="text",
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        return build_text_only_adapter_event(
+            adapter_name=f"tales:{self._family}",
+            task_text=self.task,
+            observation=self.observation,
+            admissible_actions=self.admissible_actions,
+            step_index=step_index,
+            action_text=action_text,
+            action_executed=action_executed,
+            reward_delta=reward_delta,
+            status_delta=status_delta,
+            metadata=metadata,
+        )
 
 
 # ── NetHack action label helpers ──────────────────────────────────────────────
@@ -451,6 +661,8 @@ _DIRECTION_LABELS = {
     (1, 1): "southeast",
 }
 
+_STATUS_LINE_RE = re.compile(r"\b([A-Za-z$]+):([^\s]+)")
+
 
 def _parse_surroundings(tty_chars) -> str | None:
     """Parse the 24x80 TTY grid and return a concise spatial summary.
@@ -514,6 +726,69 @@ def _parse_surroundings(tty_chars) -> str | None:
     return "\n".join(lines)
 
 
+def _extract_surroundings_map(observation: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for line in observation.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == "[Surroundings]":
+            continue
+        if stripped.startswith("passable:") or stripped.startswith("blocked:"):
+            continue
+        if ":" not in stripped:
+            continue
+        direction, label = stripped.split(":", 1)
+        direction = direction.strip()
+        if direction in _DIRECTION_LABELS.values():
+            mapping[direction] = label.strip()
+    return mapping
+
+
+def _extract_passable_directions(observation: str) -> list[str]:
+    for line in observation.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("passable:"):
+            values = stripped.removeprefix("passable:").strip()
+            return [item.strip() for item in values.split(",") if item.strip()]
+    return []
+
+
+def _extract_blocked_directions(observation: str) -> list[str]:
+    for line in observation.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("blocked:"):
+            values = stripped.removeprefix("blocked:").strip()
+            return [item.strip() for item in values.split(",") if item.strip()]
+    return []
+
+
+def _extract_nethack_status(screen: str) -> dict[str, int | str]:
+    status: dict[str, int | str] = {}
+    for line in screen.splitlines():
+        if "Dlvl:" not in line and "HP:" not in line and " S:" not in line:
+            continue
+        for key, value in _STATUS_LINE_RE.findall(line):
+            if value.isdigit():
+                status[key] = int(value)
+            else:
+                status[key] = value
+    return status
+
+
+def _compute_status_delta(
+    previous: dict[str, int | str], current: dict[str, int | str]
+) -> dict[str, int | str]:
+    delta: dict[str, int | str] = {}
+    for key, current_value in current.items():
+        previous_value = previous.get(key)
+        if previous_value == current_value:
+            continue
+        if isinstance(previous_value, int) and isinstance(current_value, int):
+            delta[key] = current_value - previous_value
+        else:
+            delta[key] = current_value
+    return delta
+
+
 # Patterns for interactive prompts that the agent cannot answer through the
 # normal action space.  Auto-confirming prevents the cognitive loop from
 # burning its entire action budget on an unanswerable prompt.
@@ -545,6 +820,22 @@ class NetHackAdapter:
         self._yn_confirm_idx = self._find_char_action_idx(env, ord("y"))
         self._more_dismiss_idx = self._find_char_action_idx(env, ord(" "))
         self._initial_obs_str = self._render_tty(obs)
+        self._status_snapshot = _extract_nethack_status(self._initial_obs_str)
+        self._passable_directions = _extract_passable_directions(
+            self.initial_observation
+        )
+        self._blocked_directions = _extract_blocked_directions(self.initial_observation)
+        self._last_transition: dict[str, Any] = {
+            "action_text": None,
+            "action_executed": None,
+            "reward_delta": 0.0,
+            "previous_status": self._status_snapshot,
+            "current_status": self._status_snapshot,
+            "previous_passable": self._passable_directions,
+            "current_passable": self._passable_directions,
+            "previous_blocked": self._blocked_directions,
+            "current_blocked": self._blocked_directions,
+        }
         if self._render:
             self._print_tty(self._initial_obs_str)
 
@@ -596,7 +887,7 @@ class NetHackAdapter:
         tty = obs["tty_chars"]  # shape (24, 80), dtype int
         lines: list[str] = []
         for row in tty:
-            line = bytes(row).decode("latin-1").rstrip()
+            line = "".join(chr(int(cell)) for cell in row).rstrip()
             lines.append(line)
         # strip trailing empty lines
         while lines and not lines[-1]:
@@ -656,6 +947,9 @@ class NetHackAdapter:
     def step(self, action: str) -> str:
         self._obs_override = None
         action_key = action.lower().strip()
+        previous_status = _extract_nethack_status(self._render_tty(self._obs))
+        previous_passable = _extract_passable_directions(self.observation)
+        previous_blocked = _extract_blocked_directions(self.observation)
         idx = self._label_to_idx.get(action_key)
         if idx is None:
             # Fuzzy-match via sentence-transformer similarity
@@ -670,6 +964,21 @@ class NetHackAdapter:
         self._terminated = terminated or truncated
         self._cumulative_reward += float(reward)
         self._auto_dismiss_prompts()
+        current_screen = self._render_tty(self._obs)
+        self._status_snapshot = _extract_nethack_status(current_screen)
+        self._passable_directions = _extract_passable_directions(self.observation)
+        self._blocked_directions = _extract_blocked_directions(self.observation)
+        self._last_transition = {
+            "action_text": action_key,
+            "action_executed": True,
+            "reward_delta": float(reward),
+            "previous_status": previous_status,
+            "current_status": self._status_snapshot,
+            "previous_passable": previous_passable,
+            "current_passable": self._passable_directions,
+            "previous_blocked": previous_blocked,
+            "current_blocked": self._blocked_directions,
+        }
         result = self.observation
         if self._render:
             self._print_tty(result)
@@ -692,3 +1001,123 @@ class NetHackAdapter:
                 )
         except Exception:
             return 0
+
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="nethack",
+            observation_mode="grid",
+            supports_spatial_context=True,
+            supports_reward_delta=True,
+            supports_status_delta=True,
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        current_observation = self.observation
+        current_status = _extract_nethack_status(self._render_tty(self._obs))
+        transition = self._last_transition
+        effective_action = (
+            action_text if action_text is not None else transition.get("action_text")
+        )
+        effective_executed = (
+            action_executed
+            if action_executed is not None
+            else transition.get("action_executed")
+        )
+        effective_reward = (
+            reward_delta if reward_delta is not None else transition.get("reward_delta")
+        )
+        computed_status_delta = _compute_status_delta(
+            transition.get("previous_status", {}),
+            current_status,
+        )
+        current_passable = _extract_passable_directions(current_observation)
+        current_blocked = _extract_blocked_directions(current_observation)
+        current_surroundings = _extract_surroundings_map(current_observation)
+        opened = [
+            direction
+            for direction in current_passable
+            if direction not in transition.get("previous_passable", [])
+        ]
+        closed = [
+            direction
+            for direction in transition.get("previous_passable", [])
+            if direction not in current_passable
+        ]
+        blocked = [
+            direction
+            for direction in current_blocked
+            if direction not in transition.get("previous_blocked", [])
+        ]
+        spatial_context = SpatialContext(
+            topology="grid",
+            current_region=(
+                f"Dlvl:{current_status['Dlvl']}" if "Dlvl" in current_status else None
+            ),
+            current_node_id=(
+                f"Dlvl:{current_status['Dlvl']}:T:{current_status['T']}"
+                if "Dlvl" in current_status and "T" in current_status
+                else None
+            ),
+            visible_nodes=list(current_surroundings.keys()),
+            frontier_nodes=current_passable,
+            passable_directions=current_passable,
+            blocked_directions=current_blocked,
+            local_map_summary=current_observation,
+            metadata={"adjacent_tiles": current_surroundings},
+        )
+        entity_updates = [
+            {
+                "entity_id": f"adjacent:{direction}",
+                "direction": direction,
+                "label": label,
+                "entity_type": "adjacent_tile",
+            }
+            for direction, label in current_surroundings.items()
+        ]
+        event_metadata = {
+            "adapter_name": "nethack",
+            "variant": self._variant,
+            "cumulative_reward": self._cumulative_reward,
+            "status_snapshot": current_status,
+        }
+        if metadata:
+            event_metadata.update(metadata)
+        return AdapterEvent(
+            step_index=step_index,
+            task_text=self.task,
+            raw_observation=current_observation,
+            normalized_observation=current_observation,
+            action_result=ActionResult(
+                action_text=effective_action,
+                action_executed=effective_executed,
+                operator_family=(
+                    _infer_operator_family(effective_action)
+                    if effective_action
+                    else None
+                ),
+            ),
+            operator_candidates=_build_operator_candidates(
+                "nethack", self.admissible_actions
+            ),
+            entity_updates=entity_updates,
+            reward_delta=effective_reward,
+            status_delta=status_delta or computed_status_delta,
+            frontier_delta=FrontierDelta(
+                opened=opened,
+                closed=closed,
+                blocked=blocked,
+            ),
+            novelty_signals=opened + blocked,
+            spatial_context=spatial_context,
+            metadata=event_metadata,
+        )
