@@ -114,6 +114,8 @@ def test_world_model_applies_spatial_event_deterministically():
     assert snapshot.entities[0]["entity_id"] == "adjacent:north"
     assert snapshot.active_option is not None
     assert snapshot.active_option.family == "explore_frontier"
+    assert snapshot.revision_required is False
+    assert snapshot.action_outcomes
     assert snapshot.memory_cues[0].cue_id == "frontier"
     assert analyst["operator_families"] == ["inspect", "relocation"]
     assert analyst["memory_cue_count"] == 1
@@ -217,3 +219,65 @@ def test_build_world_model_snapshot_from_decision_state_bridges_legacy_state():
     assert compact["unresolved_referents"] == ["it"]
     assert compact["uncertainty"][0]["category"] == "referent_resolution"
     assert compact["metadata"]["legacy_progress"]["option_family_value"] == 3
+
+
+def test_world_model_marks_revision_required_after_repeated_blocked_action():
+    capabilities = AdapterCapabilities(
+        adapter_name="nethack",
+        observation_mode="grid",
+        supports_spatial_context=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Explore the dungeon")
+
+    for step_index in (1, 2):
+        model.apply_event(
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="It's a wall.",
+                normalized_observation="It's a wall.",
+                action_result=ActionResult(
+                    action_text="move north",
+                    action_executed=True,
+                    operator_family="relocation",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="move-north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="move-east",
+                        family="relocation",
+                        action_label="move east",
+                    ),
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["east", "north"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north", "west"],
+                ),
+            )
+        )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.revision_required is True
+    assert snapshot.metadata["revision_reason"] == "repeated_contradiction"
+    assert snapshot.metadata["contradiction_debt"] >= 3
+    assert "move north" in snapshot.metadata["blocked_action_labels"]
+    assert any(
+        contradiction.category == "blocked_path"
+        for contradiction in snapshot.contradictions
+    )

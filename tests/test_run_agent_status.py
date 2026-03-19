@@ -688,13 +688,18 @@ def test_aggregate_architecture_metrics_counts_terminal_status_reasons():
 
     aggregated = run_agent.aggregate_architecture_metrics(
         [
-            {"version": 7, "terminal_status_reason": "budget_exhausted"},
-            {"version": 7, "terminal_status_reason": "success"},
-            {"version": 7, "terminal_status_reason": "budget_exhausted"},
+            {
+                "version": 8,
+                "terminal_status_reason": "budget_exhausted",
+                "v2_revision_required_count": 1,
+            },
+            {"version": 8, "terminal_status_reason": "success"},
+            {"version": 8, "terminal_status_reason": "budget_exhausted"},
         ]
     )
 
-    assert aggregated["version"] == 7
+    assert aggregated["version"] == 8
+    assert aggregated["v2_revision_required_count"] == 1
     assert aggregated["terminal_status_reasons"] == {
         "budget_exhausted": 2,
         "success": 1,

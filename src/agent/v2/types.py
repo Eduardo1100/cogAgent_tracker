@@ -6,6 +6,17 @@ from typing import Any, Literal
 ObservationMode = Literal["text", "grid", "ui", "hybrid"]
 TopologyType = Literal["grid", "graph", "ui", "mixed"]
 ReasoningTier = Literal["none", "light", "full"]
+OutcomeType = Literal[
+    "progress",
+    "blocked",
+    "no_effect",
+    "unexpected_transition",
+    "contradiction",
+    "resource_change",
+    "status_change",
+    "novelty_gain",
+    "unknown",
+]
 
 
 def _drop_empty(value: Any) -> Any:
@@ -124,6 +135,25 @@ class ActionResult(_CompactSerializable):
 
 
 @dataclass(frozen=True)
+class ActionOutcomeRecord(_CompactSerializable):
+    outcome_type: OutcomeType
+    confidence: float = 1.0
+    signals: list[str] = field(default_factory=list)
+    rationale: str | None = None
+
+
+@dataclass(frozen=True)
+class ContradictionRecord(_CompactSerializable):
+    category: str
+    step_index: int
+    severity: float = 1.0
+    subject: str | None = None
+    action_text: str | None = None
+    evidence: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AdapterEvent(_CompactSerializable):
     step_index: int
     task_text: str
@@ -194,6 +224,9 @@ class WorldModelSnapshot(_CompactSerializable):
     uncertainty: list[UncertaintyRecord] = field(default_factory=list)
     active_option: OptionContract | None = None
     memory_cues: list[MemoryCue] = field(default_factory=list)
+    action_outcomes: list[ActionOutcomeRecord] = field(default_factory=list)
+    contradictions: list[ContradictionRecord] = field(default_factory=list)
+    revision_required: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

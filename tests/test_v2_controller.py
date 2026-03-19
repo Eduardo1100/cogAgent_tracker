@@ -261,3 +261,64 @@ def test_controller_injects_memory_cues_into_future_planning():
     )
     assert step.planner_directive.option is not None
     assert step.planner_directive.option.family == "manipulate_target"
+
+
+def test_controller_revises_before_act_after_repeated_contradiction():
+    capabilities = AdapterCapabilities(
+        adapter_name="nethack",
+        observation_mode="grid",
+        supports_spatial_context=True,
+        supports_status_delta=True,
+    )
+    world_model = WorldModel(capabilities=capabilities, task_text="Explore the dungeon")
+    controller = V2Controller()
+
+    for step_index in (1, 2):
+        controller.observe(
+            world_model,
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="It's a wall.",
+                normalized_observation="It's a wall.",
+                action_result=ActionResult(
+                    action_text="move north",
+                    action_executed=True,
+                    operator_family="relocation",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="move-north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="move-east",
+                        family="relocation",
+                        action_label="move east",
+                    ),
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["east", "north"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north", "west"],
+                ),
+            ),
+        )
+
+    step = controller.step(world_model)
+
+    assert step.planner_directive.stop_reason == "revise_before_act"
+    assert step.planner_directive.option is not None
+    assert step.planner_directive.option.family == "recover_from_failure"
+    assert step.execution_step.action_label != "move north"

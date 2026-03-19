@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.decision_state import DecisionState
 from src.agent.v2.types import (
+    ActionOutcomeRecord,
     ActionResult,
     AdapterCapabilities,
     AdapterEvent,
+    ContradictionRecord,
     GoalRecord,
     MemoryCue,
     OperatorCandidate,
@@ -17,6 +20,38 @@ from src.agent.v2.types import (
     UncertaintyRecord,
     WorldModelSnapshot,
 )
+
+_OBS_BLOCKED_RE = re.compile(
+    r"(?:it's a wall|you can't|you cannot|blocked|nothing happens|no effect)",
+    re.IGNORECASE,
+)
+_NON_PROGRESS_STATUS_KEYS = {"T", "time", "turn", "turns"}
+
+
+def _extract_direction_from_action(action_text: str | None) -> str | None:
+    if not action_text:
+        return None
+    normalized = action_text.strip().lower()
+    if normalized.startswith("move "):
+        return normalized.removeprefix("move ").strip() or None
+    if normalized == "go up":
+        return "up"
+    if normalized == "go down":
+        return "down"
+    return None
+
+
+def _meaningful_status_delta(
+    status_delta: dict[str, Any],
+) -> dict[str, Any]:
+    meaningful: dict[str, Any] = {}
+    for key, value in status_delta.items():
+        if key in _NON_PROGRESS_STATUS_KEYS:
+            continue
+        if value in (None, "", 0, 0.0, False):
+            continue
+        meaningful[key] = value
+    return meaningful
 
 
 @dataclass(frozen=True)
@@ -284,6 +319,14 @@ class WorldModel:
         self.observation_mode = capabilities.observation_mode
         self.novelty_events = 0
         self.frontier_change_events = 0
+        self.action_outcomes: list[ActionOutcomeRecord] = []
+        self.contradictions: list[ContradictionRecord] = []
+        self.contradiction_debt = 0
+        self.no_progress_streak = 0
+        self.revision_required = False
+        self.revision_reason: str | None = None
+        self.blocked_action_counts: dict[str, int] = {}
+        self.recent_contradiction_actions: list[str] = []
 
     @classmethod
     def from_event(
@@ -298,6 +341,190 @@ class WorldModel:
 
     def set_active_option(self, option: OptionContract | None) -> None:
         self.active_option = option
+
+    def _derive_feedback_state(
+        self, event: AdapterEvent
+    ) -> tuple[list[ActionOutcomeRecord], list[ContradictionRecord]]:
+        outcomes: list[ActionOutcomeRecord] = []
+        contradictions: list[ContradictionRecord] = []
+
+        action_text = event.action_result.action_text
+        observation = event.normalized_observation or event.raw_observation
+        observation_lower = observation.lower()
+        direction = _extract_direction_from_action(action_text)
+        meaningful_status = _meaningful_status_delta(event.status_delta)
+
+        progress_signals: list[str] = []
+        if float(event.reward_delta or 0.0) != 0.0:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="resource_change",
+                    signals=["reward_delta"],
+                    rationale="Reward delta changed after the action.",
+                )
+            )
+            progress_signals.append("reward_delta")
+        if meaningful_status:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="status_change",
+                    signals=sorted(meaningful_status.keys()),
+                    rationale="Meaningful status fields changed after the action.",
+                )
+            )
+            progress_signals.extend(sorted(meaningful_status.keys()))
+        novelty_signals = list(event.novelty_signals or [])
+        if novelty_signals:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="novelty_gain",
+                    signals=novelty_signals[:4],
+                    rationale="New novelty signals were emitted by the adapter.",
+                )
+            )
+            progress_signals.extend(novelty_signals[:4])
+        if (
+            event.frontier_delta.opened
+            or event.entity_updates
+            or event.relation_updates
+        ):
+            signals = (
+                [f"frontier:{node}" for node in event.frontier_delta.opened[:3]]
+                or [
+                    f"entity:{update.get('entity_id')}"
+                    for update in event.entity_updates[:3]
+                ]
+                or [
+                    f"relation:{relation.relation_type}"
+                    for relation in event.relation_updates[:3]
+                ]
+            )
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="progress",
+                    signals=signals,
+                    rationale="The action expanded the frontier or grounded new world structure.",
+                )
+            )
+            progress_signals.extend(signals)
+
+        blocked = False
+        if direction and event.spatial_context is not None:
+            blocked = direction in set(event.spatial_context.blocked_directions)
+        blocked = blocked or bool(_OBS_BLOCKED_RE.search(observation_lower))
+        if blocked and action_text:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="blocked",
+                    signals=[direction] if direction else [],
+                    rationale="The attempted action produced explicit blockage feedback.",
+                )
+            )
+            contradictions.append(
+                ContradictionRecord(
+                    category="blocked_path",
+                    step_index=event.step_index,
+                    severity=1.0,
+                    subject=direction,
+                    action_text=action_text,
+                    evidence=observation.splitlines()[0][:160] if observation else None,
+                )
+            )
+
+        if event.action_result.failure_reason:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="contradiction",
+                    signals=["failure_reason"],
+                    rationale="The adapter reported an explicit failure reason.",
+                )
+            )
+            contradictions.append(
+                ContradictionRecord(
+                    category="execution_failure",
+                    step_index=event.step_index,
+                    severity=1.0,
+                    action_text=action_text,
+                    evidence=str(event.action_result.failure_reason),
+                )
+            )
+
+        if action_text and not progress_signals and not blocked:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="no_effect",
+                    rationale="The action consumed a step without reward, novelty, or state progress.",
+                )
+            )
+
+        if not outcomes:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="unknown",
+                    rationale="No typed outcome signal was derived from the latest event.",
+                )
+            )
+
+        return outcomes, contradictions
+
+    def _update_feedback_memory(
+        self,
+        *,
+        event: AdapterEvent,
+        outcomes: list[ActionOutcomeRecord],
+        contradictions: list[ContradictionRecord],
+    ) -> None:
+        progress_hit = any(
+            outcome.outcome_type
+            in {"progress", "resource_change", "status_change", "novelty_gain"}
+            for outcome in outcomes
+        )
+        contradiction_hit = any(
+            outcome.outcome_type in {"blocked", "contradiction"} for outcome in outcomes
+        )
+        no_effect_hit = any(outcome.outcome_type == "no_effect" for outcome in outcomes)
+
+        self.action_outcomes = (self.action_outcomes + list(outcomes))[-8:]
+        self.contradictions = (self.contradictions + list(contradictions))[-8:]
+
+        action_text = event.action_result.action_text
+        if action_text and contradiction_hit:
+            normalized_action = action_text.strip().lower()
+            self.blocked_action_counts[normalized_action] = (
+                self.blocked_action_counts.get(normalized_action, 0) + 1
+            )
+            self.recent_contradiction_actions = (
+                self.recent_contradiction_actions + [normalized_action]
+            )[-6:]
+
+        if progress_hit:
+            self.no_progress_streak = 0
+            self.contradiction_debt = max(0, self.contradiction_debt - 1)
+        else:
+            if event.action_result.action_text:
+                self.no_progress_streak += 1
+            if contradiction_hit:
+                self.contradiction_debt += 2
+            elif no_effect_hit:
+                self.contradiction_debt += 1
+
+        repeated_contradiction = False
+        if action_text:
+            repeated_contradiction = (
+                self.blocked_action_counts.get(action_text.strip().lower(), 0) >= 2
+            )
+
+        self.revision_required = False
+        self.revision_reason = None
+        if repeated_contradiction:
+            self.revision_required = True
+            self.revision_reason = "repeated_contradiction"
+        elif self.contradiction_debt >= 3:
+            self.revision_required = True
+            self.revision_reason = "contradiction_debt_exceeded"
+        elif self.no_progress_streak >= 4:
+            self.revision_required = True
+            self.revision_reason = "nonprogress_streak"
 
     def apply_event(self, event: AdapterEvent) -> None:
         self.step_index = event.step_index
@@ -351,6 +578,12 @@ class WorldModel:
             self.observation_mode = self.capabilities.observation_mode
         if event.novelty_signals:
             self.novelty_events += len(event.novelty_signals)
+        outcomes, contradictions = self._derive_feedback_state(event)
+        self._update_feedback_memory(
+            event=event,
+            outcomes=outcomes,
+            contradictions=contradictions,
+        )
         for update in event.entity_updates:
             entity_id = str(update.get("entity_id") or f"entity:{len(self.entities)}")
             existing = self.entities.get(entity_id)
@@ -424,6 +657,17 @@ class WorldModel:
             "last_action_result": self.last_action_result.to_dict(),
             "novelty_events": self.novelty_events,
             "frontier_change_events": self.frontier_change_events,
+            "contradiction_debt": self.contradiction_debt,
+            "no_progress_streak": self.no_progress_streak,
+            "revision_reason": self.revision_reason,
+            "blocked_action_labels": sorted(
+                action
+                for action, count in self.blocked_action_counts.items()
+                if count > 0
+            )[:6],
+            "recent_contradiction_actions": list(
+                self.recent_contradiction_actions[-4:]
+            ),
             "capabilities": self.capabilities.to_dict(),
         }
         if self.ui_context is not None:
@@ -441,6 +685,9 @@ class WorldModel:
             uncertainty=self._build_uncertainty(),
             active_option=self.active_option,
             memory_cues=list(self.memory_cues),
+            action_outcomes=list(self.action_outcomes),
+            contradictions=list(self.contradictions),
+            revision_required=self.revision_required,
             metadata=metadata,
         )
 
@@ -458,6 +705,12 @@ class WorldModel:
             ),
             "entity_count": len(self.entities),
             "uncertainty": [record.to_dict() for record in snapshot.uncertainty],
+            "revision_required": snapshot.revision_required,
+            "revision_reason": snapshot.metadata.get("revision_reason"),
+            "contradiction_debt": snapshot.metadata.get("contradiction_debt", 0),
+            "recent_outcomes": [
+                outcome.outcome_type for outcome in snapshot.action_outcomes[-3:]
+            ],
             "memory_cue_count": len(self.memory_cues),
             "active_option": (
                 self.active_option.to_dict() if self.active_option is not None else {}

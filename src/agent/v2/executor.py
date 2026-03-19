@@ -9,11 +9,22 @@ def _score_operator(
     candidate: OperatorCandidate,
     option: OptionContract,
     *,
+    snapshot: WorldModelSnapshot,
     failed_actions: set[str],
     executed_actions: list[str],
 ) -> tuple[int, int, int, str]:
     if candidate.action_label in failed_actions:
         return (-1000, 0, 0, candidate.action_label)
+    blocked_actions = {
+        str(action)
+        for action in snapshot.metadata.get("blocked_action_labels", [])
+        if action
+    }
+    contradiction_actions = {
+        str(action)
+        for action in snapshot.metadata.get("recent_contradiction_actions", [])
+        if action
+    }
     score = 0
     if option.family == "explore_frontier" and candidate.family == "relocation":
         score += 30
@@ -38,6 +49,13 @@ def _score_operator(
         "go down",
     }:
         score += 30
+    if option.family == "recover_from_failure":
+        if candidate.family == "inspect":
+            score += 28
+        elif candidate.family == "interaction":
+            score += 16
+        elif candidate.family == "relocation":
+            score += 12
     if option.target_signature:
         if candidate.action_label == option.target_signature:
             score += 25
@@ -45,6 +63,10 @@ def _score_operator(
             score += 25
         if option.target_signature in candidate.action_label:
             score += 12
+    if candidate.action_label in blocked_actions:
+        score -= 120
+    if candidate.action_label in contradiction_actions:
+        score -= 80
     recency_penalty = 5 if candidate.action_label in executed_actions[-3:] else 0
     score -= recency_penalty
     return (score, -recency_penalty, len(candidate.target_ids), candidate.action_label)
@@ -75,6 +97,7 @@ class DeterministicExecutor:
             key=lambda candidate: _score_operator(
                 candidate,
                 option,
+                snapshot=snapshot,
                 failed_actions=failed,
                 executed_actions=executed,
             ),
@@ -84,7 +107,11 @@ class DeterministicExecutor:
             ranked[0]
             if ranked
             and _score_operator(
-                ranked[0], option, failed_actions=failed, executed_actions=executed
+                ranked[0],
+                option,
+                snapshot=snapshot,
+                failed_actions=failed,
+                executed_actions=executed,
             )[0]
             > -1000
             else None

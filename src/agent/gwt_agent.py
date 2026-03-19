@@ -1394,6 +1394,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._v2_runtime_advisory: dict = {}
         self._v2_bridge_update_count = 0
         self._v2_bridge_error_count = 0
+        self._v2_revision_required_count = 0
         self._v2_direct_action_count = 0
         self._reset_episode_reasoning_state()
 
@@ -1427,6 +1428,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._v2_runtime_advisory = {}
         self._v2_bridge_update_count = 0
         self._v2_bridge_error_count = 0
+        self._v2_revision_required_count = 0
         self._v2_direct_action_count = 0
         self.episode_hypothesis_ledger: dict[str, dict] = {}
         self.recent_hypothesis_tests: list[dict] = []
@@ -1589,6 +1591,8 @@ class GWTAutogenAgent(AutogenAgent):
         if not advisory or advisory.get("planner_stop_reason") == "v2_bridge_error":
             return None
         if self.task_status != "INCOMPLETE":
+            return None
+        if advisory.get("revision_required"):
             return None
         if int(advisory.get("uncertainty_count") or 0) > 0:
             return None
@@ -11703,6 +11707,8 @@ class GWTAutogenAgent(AutogenAgent):
             parts.append(f"hint={advisory['suggested_action']}")
         if advisory.get("planner_stop_reason"):
             parts.append(f"reason={advisory['planner_stop_reason']}")
+        if advisory.get("revision_required"):
+            parts.append(f"revise={advisory.get('revision_reason', 'yes')}")
         if status_line:
             parts.append(status_line)
         print(" | ".join(parts), flush=True)
@@ -11771,6 +11777,10 @@ class GWTAutogenAgent(AutogenAgent):
                 for cue in list(snapshot.memory_cues or [])[:2]
                 if cue.summary
             ]
+            recent_outcomes = [
+                outcome.outcome_type
+                for outcome in list(snapshot.action_outcomes or [])[-3:]
+            ]
             frontier_nodes = snapshot.frontier_summary.get("frontier_nodes", [])
             status_snapshot = snapshot.metadata.get("status_snapshot", {})
             status_parts = [
@@ -11800,13 +11810,21 @@ class GWTAutogenAgent(AutogenAgent):
                         controller_step.planner_directive.planner_notes[:2]
                     ),
                     "memory_cues": memory_cues,
+                    "recent_outcomes": recent_outcomes,
                     "entity_count": len(snapshot.entities),
                     "frontier_count": len(frontier_nodes),
                     "uncertainty_count": len(snapshot.uncertainty),
+                    "contradiction_debt": snapshot.metadata.get(
+                        "contradiction_debt", 0
+                    ),
+                    "revision_required": snapshot.revision_required,
+                    "revision_reason": snapshot.metadata.get("revision_reason"),
                     "status_summary": " ".join(status_parts),
                 }
             )
             self._v2_bridge_update_count += 1
+            if snapshot.revision_required:
+                self._v2_revision_required_count += 1
         except Exception:
             self._v2_bridge_error_count += 1
             self._v2_runtime_advisory = {
@@ -13120,7 +13138,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         return {
-            "version": 7,
+            "version": 8,
             "thinking_count": thinking_count,
             "belief_update_count": belief_update_count,
             "deliberation_count": thinking_count + belief_update_count,
@@ -13182,6 +13200,7 @@ class GWTAutogenAgent(AutogenAgent):
             "option_interrupt_reasons": dict(sorted(option_interrupt_reasons.items())),
             "v2_bridge_update_count": int(self._v2_bridge_update_count or 0),
             "v2_bridge_error_count": int(self._v2_bridge_error_count or 0),
+            "v2_revision_required_count": int(self._v2_revision_required_count or 0),
             "v2_direct_action_count": int(self._v2_direct_action_count or 0),
             "v2_bridge_last_option_family": self._v2_runtime_advisory.get(
                 "option_family"

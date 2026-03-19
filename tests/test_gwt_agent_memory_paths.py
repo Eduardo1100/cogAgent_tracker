@@ -615,12 +615,13 @@ def test_get_architecture_metrics_reports_option_interrupts(tmp_path):
 
     metrics = agent.get_architecture_metrics()
 
-    assert metrics["version"] == 7
+    assert metrics["version"] == 8
     assert metrics["option_count"] == 1
     assert metrics["option_interrupt_count"] == 1
     assert metrics["option_stop_reasons"] == {"expected_progress_missing": 1}
     assert metrics["option_interrupt_reasons"] == {"expected_progress_missing": 1}
     assert metrics["v2_bridge_update_count"] == 0
+    assert metrics["v2_revision_required_count"] == 0
     assert metrics["v2_direct_action_count"] == 0
     assert metrics["terminal_status_reason"] is None
 
@@ -1055,6 +1056,7 @@ def test_v2_runtime_advisory_is_wired_into_gwt_runtime_context(tmp_path):
     assert agent._v2_runtime_advisory["option_family"] == "explore_frontier"
     assert agent._v2_runtime_advisory["target_signature"] == "north"
     assert agent._v2_runtime_advisory["suggested_action"] == "move north"
+    assert agent._v2_runtime_advisory["revision_required"] is False
     assert agent._v2_bridge_update_count == 1
 
     runtime_snapshots = agent._get_action_agent_runtime_snapshots(
@@ -6300,6 +6302,26 @@ def test_get_v2_direct_execution_action_skips_when_uncertain(tmp_path):
         "suggested_action": "move northwest",
         "planner_stop_reason": "frontier_available",
         "uncertainty_count": 2,
+    }
+
+    chosen = agent._get_v2_direct_execution_action(
+        admissible_commands=["move northwest", "search"],
+        requested_action="move south",
+    )
+
+    assert chosen is None
+
+
+def test_get_v2_direct_execution_action_skips_when_revision_required(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task_status = "INCOMPLETE"
+    agent._v2_runtime_advisory = {
+        "option_family": "recover_from_failure",
+        "suggested_action": "search",
+        "planner_stop_reason": "revise_before_act",
+        "uncertainty_count": 0,
+        "revision_required": True,
+        "revision_reason": "repeated_contradiction",
     }
 
     chosen = agent._get_v2_direct_execution_action(

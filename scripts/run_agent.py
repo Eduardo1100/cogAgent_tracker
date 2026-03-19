@@ -874,6 +874,7 @@ def aggregate_architecture_metrics(
         "belief_update_count": _sum_int("belief_update_count"),
         "deliberation_count": _sum_int("deliberation_count"),
         "burst_count": _sum_int("burst_count"),
+        "v2_revision_required_count": _sum_int("v2_revision_required_count"),
         "v2_direct_action_count": _sum_int("v2_direct_action_count"),
         "mean_tokens_per_action": _mean_float("tokens_per_action"),
         "mean_tokens_per_deliberation": _mean_float("tokens_per_deliberation"),

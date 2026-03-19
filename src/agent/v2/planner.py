@@ -134,6 +134,8 @@ def can_continue_option(
 ) -> tuple[bool, str]:
     if option is None:
         return False, "no_active_option"
+    if snapshot.revision_required and option.family != "recover_from_failure":
+        return False, "revise_before_act"
     if option.family == "explore_frontier":
         if snapshot.frontier_summary.get("frontier_nodes"):
             return True, "frontier_available"
@@ -190,7 +192,16 @@ class SparsePlanner:
         goal_text = _goal_text(snapshot.goals)
         memory_preference = _preferred_family_from_memory(snapshot)
 
-        if memory_preference == "manipulate_target" and snapshot.metadata.get(
+        if snapshot.revision_required:
+            option_family = "recover_from_failure"
+            notes.append(
+                "Revision required before further direct action because recent outcomes contradict the current local model."
+            )
+            if snapshot.metadata.get("revision_reason"):
+                notes.append(
+                    f"Revision trigger: {snapshot.metadata['revision_reason']}."
+                )
+        elif memory_preference == "manipulate_target" and snapshot.metadata.get(
             "ui_context"
         ):
             option_family = "manipulate_target"
@@ -249,5 +260,9 @@ class SparsePlanner:
             continue_current_option=False,
             planner_notes=notes,
             memory_queries=memory_queries,
-            stop_reason=reason if current_option is not None else "new_option",
+            stop_reason=(
+                "revise_before_act"
+                if snapshot.revision_required
+                else (reason if current_option is not None else "new_option")
+            ),
         )

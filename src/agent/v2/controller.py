@@ -44,6 +44,8 @@ class V2Controller:
             )
         )
         snapshot = world_model.to_snapshot()
+        if snapshot.revision_required:
+            self.current_option = None
         directive = self.planner.plan(snapshot, current_option=self.current_option)
         self.current_option = directive.option
         world_model.set_active_option(self.current_option)
