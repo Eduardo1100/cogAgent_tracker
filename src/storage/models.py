@@ -105,6 +105,7 @@ class ExperimentRun(Base):
     avg_runtime_per_failing_game: Mapped[float | None] = mapped_column(
         Float, nullable=True
     )
+    architecture_metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Relationship: One Experiment has Many Episodes
     episodes: Mapped[list["EpisodeRun"]] = relationship(
@@ -170,6 +171,7 @@ class EpisodeRun(Base):
         String(255), nullable=True
     )  # e.g., "experiments/run_1/game_124_chat.txt"
     analyst_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    architecture_metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Relationship back to the parent Experiment
     experiment: Mapped["ExperimentRun"] = relationship(

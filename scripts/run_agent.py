@@ -6,6 +6,7 @@ import re
 import signal
 import subprocess
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -299,6 +300,7 @@ def finalize_experiment(
     avg_runtime_per_failing_game: float,
     status: str,
 ) -> None:
+    persist_experiment_architecture_snapshot(db, experiment)
     persist_experiment_updates(
         db,
         experiment,
@@ -672,6 +674,227 @@ def persist_experiment_usage_snapshot(
         db.rollback()
 
 
+def _round_metric(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 6)
+
+
+def _normalize_architecture_metric_text(text: str) -> str:
+    normalized = re.sub(r"\b\d+\b", "#", str(text or "").lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_history_actions(history_path: str | None) -> list[str]:
+    if not history_path or not os.path.exists(history_path):
+        return []
+    history_text = Path(history_path).read_text()
+    return [
+        _normalize_architecture_metric_text(action)
+        for action in re.findall(r"action: '([^']*)'\. observation: '", history_text)
+        if action and action != "None"
+    ]
+
+
+def _extract_observation_history(agent) -> list[str]:
+    observations: list[str] = []
+    for item in getattr(agent, "curr_episodic_memory", []) or []:
+        payload = None
+        if isinstance(item, str):
+            try:
+                payload = json.loads(item)
+            except json.JSONDecodeError:
+                payload = None
+        elif isinstance(item, dict):
+            payload = item
+        if not isinstance(payload, dict):
+            continue
+        observation = payload.get("resulting_observation")
+        if observation:
+            observations.append(_normalize_architecture_metric_text(observation))
+    return observations
+
+
+def _extract_message_names(agent, chat_text: str) -> list[str]:
+    messages = getattr(getattr(agent, "group_chat", None), "messages", None) or []
+    if messages:
+        return [str(message.get("name") or "") for message in messages if message]
+    return re.findall(r"^name: (.*)", chat_text or "", re.MULTILINE)
+
+
+def _build_fallback_architecture_metrics(
+    agent, *, chat_text: str, log_paths: dict
+) -> dict:
+    message_names = _extract_message_names(agent, chat_text)
+    thinking_count = sum(1 for name in message_names if name == "Thinking_Agent")
+    belief_update_count = sum(
+        1 for name in message_names if name == "Belief_State_Agent"
+    )
+
+    actions = _extract_history_actions(log_paths.get("history_path"))
+    observations = _extract_observation_history(agent)
+    repeated_action_count = max(len(actions) - len(set(actions)), 0)
+    repeated_state_count = max(len(observations) - len(set(observations)), 0)
+
+    return {
+        "version": 1,
+        "thinking_count": thinking_count,
+        "belief_update_count": belief_update_count,
+        "deliberation_count": thinking_count + belief_update_count,
+        "repeated_action_density": (
+            repeated_action_count / len(actions) if actions else None
+        ),
+        "repeated_state_density": (
+            repeated_state_count / len(observations) if observations else None
+        ),
+        "observation_novelty_rate": (
+            len(set(observations)) / len(observations) if observations else None
+        ),
+        "grounded_entity_growth_rate": None,
+        "unique_grounded_entities": None,
+        "burst_count": None,
+        "mean_burst_length": None,
+        "burst_length_histogram": {},
+        "burst_stop_reasons": {},
+    }
+
+
+def get_agent_architecture_metrics(
+    agent,
+    *,
+    log_paths: dict,
+    chat_text: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> dict:
+    getter = getattr(agent, "get_architecture_metrics", None)
+    metrics: dict | None = None
+    if callable(getter):
+        try:
+            candidate = getter()
+            if isinstance(candidate, dict):
+                metrics = candidate
+        except Exception as exc:
+            print(f"⚠️ Architecture-metrics collection failed from agent runtime: {exc}")
+    if metrics is None:
+        metrics = _build_fallback_architecture_metrics(
+            agent, chat_text=chat_text, log_paths=log_paths
+        )
+
+    total_tokens = int(prompt_tokens) + int(completion_tokens)
+    actions_taken = int(getattr(agent, "num_actions_taken", 0) or 0)
+    deliberation_count = int(metrics.get("deliberation_count") or 0)
+
+    return {
+        **metrics,
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "total_tokens": total_tokens,
+        "tokens_per_action": (
+            _round_metric(total_tokens / actions_taken) if actions_taken else None
+        ),
+        "tokens_per_deliberation": (
+            _round_metric(total_tokens / deliberation_count)
+            if deliberation_count
+            else None
+        ),
+        "repeated_action_density": _round_metric(
+            metrics.get("repeated_action_density")
+        ),
+        "repeated_state_density": _round_metric(metrics.get("repeated_state_density")),
+        "observation_novelty_rate": _round_metric(
+            metrics.get("observation_novelty_rate")
+        ),
+        "grounded_entity_growth_rate": _round_metric(
+            metrics.get("grounded_entity_growth_rate")
+        ),
+        "mean_burst_length": _round_metric(metrics.get("mean_burst_length")),
+    }
+
+
+def aggregate_architecture_metrics(
+    episode_metrics: list[dict | None],
+) -> dict | None:
+    valid_metrics = [
+        metrics for metrics in episode_metrics if isinstance(metrics, dict)
+    ]
+    if not valid_metrics:
+        return None
+
+    hist_stop_reasons: Counter[str] = Counter()
+    hist_burst_lengths: Counter[str] = Counter()
+    hist_option_stop_reasons: Counter[str] = Counter()
+    hist_option_interrupt_reasons: Counter[str] = Counter()
+    for metrics in valid_metrics:
+        hist_stop_reasons.update(metrics.get("burst_stop_reasons") or {})
+        hist_burst_lengths.update(metrics.get("burst_length_histogram") or {})
+        hist_option_stop_reasons.update(metrics.get("option_stop_reasons") or {})
+        hist_option_interrupt_reasons.update(
+            metrics.get("option_interrupt_reasons") or {}
+        )
+
+    def _sum_int(key: str) -> int:
+        return sum(int(metrics.get(key) or 0) for metrics in valid_metrics)
+
+    def _mean_float(key: str) -> float | None:
+        values = [
+            metrics.get(key)
+            for metrics in valid_metrics
+            if metrics.get(key) is not None
+        ]
+        if not values:
+            return None
+        return _round_metric(sum(float(value) for value in values) / len(values))
+
+    version = max(int(metrics.get("version") or 1) for metrics in valid_metrics)
+    return {
+        "version": version,
+        "episode_count": len(valid_metrics),
+        "thinking_count": _sum_int("thinking_count"),
+        "belief_update_count": _sum_int("belief_update_count"),
+        "deliberation_count": _sum_int("deliberation_count"),
+        "burst_count": _sum_int("burst_count"),
+        "mean_tokens_per_action": _mean_float("tokens_per_action"),
+        "mean_tokens_per_deliberation": _mean_float("tokens_per_deliberation"),
+        "mean_repeated_action_density": _mean_float("repeated_action_density"),
+        "mean_repeated_state_density": _mean_float("repeated_state_density"),
+        "mean_observation_novelty_rate": _mean_float("observation_novelty_rate"),
+        "mean_grounded_entity_growth_rate": _mean_float("grounded_entity_growth_rate"),
+        "mean_unique_grounded_entities": _mean_float("unique_grounded_entities"),
+        "mean_burst_length": _mean_float("mean_burst_length"),
+        "burst_stop_reasons": dict(sorted(hist_stop_reasons.items())),
+        "burst_length_histogram": dict(sorted(hist_burst_lengths.items())),
+        "option_count": _sum_int("option_count"),
+        "mean_option_length": _mean_float("mean_option_length"),
+        "mean_option_progress_debt": _mean_float("mean_option_progress_debt"),
+        "mean_option_revisitation_count": _mean_float("mean_option_revisitation_count"),
+        "mean_option_family_value": _mean_float("mean_option_family_value"),
+        "option_stop_reasons": dict(sorted(hist_option_stop_reasons.items())),
+        "option_interrupt_count": _sum_int("option_interrupt_count"),
+        "option_interrupt_reasons": dict(sorted(hist_option_interrupt_reasons.items())),
+    }
+
+
+def persist_experiment_architecture_snapshot(
+    db,
+    experiment: ExperimentRun,
+) -> None:
+    try:
+        episodes = (
+            db.query(EpisodeRun)
+            .filter(EpisodeRun.experiment_id == experiment.id)
+            .order_by(EpisodeRun.game_number.asc(), EpisodeRun.id.asc())
+            .all()
+        )
+        experiment.architecture_metrics = aggregate_architecture_metrics(
+            [episode.architecture_metrics for episode in episodes]
+        )
+        db.commit()
+    except Exception as exc:
+        print(f"⚠️ Architecture-metrics aggregation failed: {exc}")
+        db.rollback()
+
+
 def load_analyst_trace_from_disk(analyst_trace_path: str | None) -> str:
     if not analyst_trace_path or not os.path.exists(analyst_trace_path):
         return ""
@@ -802,6 +1025,13 @@ def persist_episode_run(
         adapter, log_paths.get("history_path")
     )
     concepts_learned = extract_concepts(chat_text)
+    architecture_metrics = get_agent_architecture_metrics(
+        agent,
+        log_paths=log_paths,
+        chat_text=chat_text,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
     episode = EpisodeRun(
         experiment_id=experiment.id,
@@ -828,9 +1058,11 @@ def persist_episode_run(
         error_adjusted_success_rate=error_adjusted_success_rate,
         chat_history_s3_key=chat_history_s3_key,
         analyst_trace=analyst_trace,
+        architecture_metrics=architecture_metrics,
     )
     db.add(episode)
     db.commit()
+    persist_experiment_architecture_snapshot(db, experiment)
     return episode
 
 

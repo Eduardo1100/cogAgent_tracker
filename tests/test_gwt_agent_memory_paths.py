@@ -229,6 +229,462 @@ def test_register_log_paths_switches_to_adapter_environment(tmp_path):
     assert Path(agent.log_paths["memory2_path"]) == alfworld_dir / "memory2.txt"
 
 
+def test_decision_state_snapshot_groups_runtime_fields(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.admissible_actions = ["search", "move north"]
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "referent_resolution": {"requested": "seed", "resolved": "blue seed"},
+        "admissible_actions_unchanged": True,
+        "task_contract": {
+            "required_families": ["focus"],
+            "primary_targets": ["blue seed"],
+        },
+    }
+    agent._persistent_admissible = {"search"}
+    agent._pending_sequence = ["search"]
+    agent._recently_executed_actions = ["move north"]
+    agent._recently_failed_actions = ["open hatch"]
+    agent._current_option_contract = {
+        "option_id": 1,
+        "objective": "explore_and_gather_evidence",
+        "primary_family": "inspect",
+        "option_family": "inspect_novelty",
+        "target_signature": "blue seed",
+        "expected_progress_signals": ["grounding_changed", "observation_changed"],
+        "expected_outcomes": ["inspection_yield", "grounding_progress"],
+        "step_budget": 3,
+        "steps_taken": 1,
+        "family_value": 1,
+        "outcome_events": 1,
+    }
+    agent._last_option_interrupt_decision = {
+        "should_interrupt": False,
+        "reason": "stable_progress",
+        "signal_flags": {"expected_progress_hit": True},
+    }
+    agent._current_option_stagnation_steps = 0
+    agent._previous_interaction_opportunity_count = 0
+    agent._current_interaction_opportunity_count = 1
+    summary = {
+        "total_actions": 10,
+        "current_phase": "explore_and_gather_evidence",
+        "salient_entities": ["blue seed", "flower pot"],
+        "task_relevant_action_shortlist": ["search", "move north"],
+        "deprioritized_families": ["device_control"],
+        "candidate_tracking": {
+            "active_candidate": "blue seed",
+            "rejected_candidates": ["red seed"],
+        },
+        "remote_room_signal": {"room": "greenhouse", "reason": "open exit seen"},
+        "task_contract": {
+            "required_families": ["focus"],
+            "primary_targets": ["blue seed"],
+        },
+    }
+
+    snapshot = agent.get_decision_state_snapshot(summary)
+
+    assert snapshot["action_surface"]["current_phase"] == "explore_and_gather_evidence"
+    assert snapshot["action_surface"]["required_families"] == ["focus"]
+    assert snapshot["goal_state"]["task_contract"]["primary_targets"] == ["blue seed"]
+    assert snapshot["grounding_state"]["candidate_tracking"]["active_candidate"] == (
+        "blue seed"
+    )
+    assert snapshot["grounding_state"]["remote_room_signal"]["room"] == "greenhouse"
+    assert "interaction_opportunity_count" not in snapshot["action_surface"]
+    assert snapshot["option_state"]["current_option"]["primary_family"] == "inspect"
+    assert (
+        snapshot["option_state"]["current_option"]["option_family"] == "inspect_novelty"
+    )
+    assert snapshot["option_state"]["pending_sequence"] == ["search"]
+    assert snapshot["option_state"]["persistent_admissible_actions"] == ["search"]
+    assert snapshot["progress_state"]["interaction_opportunity_delta"] == 1
+    assert snapshot["progress_state"]["option_step"] == 1
+    assert snapshot["progress_state"]["option_family_value"] == 1
+    assert snapshot["uncertainty_state"]["admissible_actions_unchanged"] is True
+
+    runtime_snapshot = agent._get_action_agent_runtime_snapshots(summary)
+    assert runtime_snapshot["current_option"]["target_signature"] == "blue seed"
+    assert runtime_snapshot["current_option"]["option_family"] == "inspect_novelty"
+    assert runtime_snapshot["option_step_budget"] == 3
+    assert runtime_snapshot["option_family_value"] == 1
+    assert runtime_snapshot["pending_sequence"] == ["search"]
+    assert runtime_snapshot["recently_failed_actions"] == ["open hatch"]
+    assert runtime_snapshot["remote_room_signal"]["room"] == "greenhouse"
+
+
+def test_analyst_runtime_snapshot_is_derived_from_decision_state(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent._recently_executed_actions = ["search", "move north"]
+    summary = {
+        "candidate_tracking": {
+            "active_candidate": "blue seed",
+            "last_seen_room": "greenhouse",
+            "rejected_candidates": ["red seed"],
+        },
+        "measurement_tracking": {
+            "measurement_target": "water",
+            "measurement_property": "temperature",
+            "property_resolved": True,
+            "branch_ready": False,
+        },
+        "comparison_tracking": {
+            "comparison_targets": ["cup a", "cup b"],
+            "selected_target": "cup a",
+        },
+        "conditional_branch_tracking": {
+            "evidence_target": "flower color",
+            "selected_branch": "blue seed",
+        },
+        "relation_frontier": {
+            "frontier_referents": ["wire", "battery"],
+            "control_candidates": ["switch"],
+        },
+        "remote_room_signal": {"room": "greenhouse", "reason": "doorway"},
+        "substance_search": {
+            "phase": "locate_substance",
+            "grounded_substances": ["water"],
+            "source_candidates": ["sink"],
+        },
+        "artifact_creation": {
+            "artifact_type": "mixture",
+            "grounded_artifacts": ["blue mixture"],
+        },
+    }
+
+    snapshot = agent._get_analyst_runtime_snapshots(summary)
+
+    assert snapshot["candidate"]["active"] == "blue seed"
+    assert snapshot["measurement"]["property"] == "temperature"
+    assert snapshot["comparison"]["resolved_target"] == "cup a"
+    assert snapshot["conditional_branch"]["resolved_target"] == "blue seed"
+    assert snapshot["relation_frontier"]["referents"] == ["wire", "battery"]
+    assert snapshot["remote_room"]["room"] == "greenhouse"
+    assert snapshot["substance_search"]["source_candidates"] == ["sink"]
+    assert snapshot["artifact_creation"]["artifact_type"] == "mixture"
+    assert snapshot["recently_executed_actions"] == ["search", "move north"]
+
+
+def test_decision_state_runtime_fallbacks_include_grounding_snapshots(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Find the blue seed."
+    agent.admissible_actions = ["search", "move north"]
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "admissible_actions_unchanged": False,
+        "admissible_action_summary": {
+            "current_phase": "gather_evidence",
+            "total_actions": 2,
+            "salient_entities": ["blue seed", "greenhouse"],
+        },
+        "task_relevant_action_shortlist": ["search", "move north"],
+        "newly_admissible_actions": ["focus on blue seed"],
+        "newly_relevant_actions": ["focus on blue seed"],
+    }
+    agent._persistent_admissible = {"search"}
+    agent._active_candidate = "blue seed"
+    agent._candidate_states = {
+        "blue seed": {"last_seen_room": "greenhouse", "aliases": ["seed", "blue seed"]}
+    }
+    agent._rejected_candidates = ["red seed"]
+    agent._remote_room_signals = {
+        "shed": {"signal_tokens": ["seed"], "last_seen_timestep": 2}
+    }
+
+    state = agent._build_decision_state()
+
+    assert state.grounding_state.candidate_tracking["active_candidate"] == "blue seed"
+    assert state.grounding_state.remote_room_signal["room"] == "shed"
+    assert state.action_surface.current_phase == "gather_evidence"
+    assert state.action_surface.interaction_opportunity_count == 0
+    assert state.option_state.persistent_admissible_actions == ["search"]
+    assert state.progress_state.affordance_delta_count == 1
+    assert state.progress_state.task_relevant_affordance_delta_count == 1
+    assert state.uncertainty_state.admissible_actions_unchanged is False
+
+
+def test_sequence_interrupt_decision_stops_on_grounding_change(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": True}
+
+    previous_state = agent._build_decision_state()
+    agent._remote_room_signals = {
+        "vault": {"signal_tokens": ["treasure"], "last_seen_timestep": 1}
+    }
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are in a hallway with plain walls.",
+        current_observation="You enter a vault with a treasure marking nearby.",
+    )
+
+    assert decision["should_interrupt"] is True
+    assert decision["reason"] == "grounding_changed"
+    assert decision["signal_flags"]["grounding_changed"] is True
+
+
+def test_sequence_interrupt_decision_stops_on_action_surface_change(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": True}
+
+    previous_state = agent._build_decision_state()
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": False}
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are in a hallway with plain walls.",
+        current_observation="You enter a doorway with several new exits visible.",
+    )
+
+    assert decision["should_interrupt"] is True
+    assert decision["reason"] == "action_surface_changed"
+    assert decision["signal_flags"]["action_surface_changed"] is True
+
+
+def test_sequence_interrupt_decision_stops_when_option_progress_is_missing(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": True}
+    agent._current_option_contract = {
+        "option_id": 1,
+        "objective": "gather_evidence",
+        "primary_family": "relocation",
+        "option_mode": "pursue_grounded_target",
+        "target_signature": "move east",
+        "expected_progress_signals": [
+            "grounding_changed",
+            "interaction_opportunity_changed",
+            "action_surface_changed",
+        ],
+        "progress_debt": 2,
+        "progress_debt_limit": 3,
+        "state_signatures": ["you move into a wider hallway with a stone floor."],
+        "step_budget": 3,
+        "steps_taken": 1,
+    }
+    agent._current_option_stagnation_steps = 1
+
+    previous_state = agent._build_decision_state()
+    agent._current_option_contract["steps_taken"] = 2
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are in a narrow hallway with a stone floor.",
+        current_observation="You move into a wider hallway with a stone floor.",
+    )
+
+    assert decision["should_interrupt"] is True
+    assert decision["reason"] == "expected_progress_missing"
+    assert decision["signal_flags"]["expected_progress_missing"] is True
+
+
+def test_sequence_interrupt_decision_allows_relocation_churn_before_progress_debt_limit(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "admissible_actions_unchanged": True,
+    }
+    agent._current_option_contract = {
+        "option_id": 1,
+        "objective": "gather_evidence",
+        "primary_family": "relocation",
+        "option_mode": "explore_frontier",
+        "option_family": "explore_frontier",
+        "target_signature": "move east",
+        "expected_progress_signals": [
+            "grounding_changed",
+            "interaction_opportunity_changed",
+            "action_surface_changed",
+        ],
+        "expected_outcomes": ["frontier_expansion", "novel_observation"],
+        "progress_debt": 1,
+        "progress_debt_limit": 4,
+        "state_signatures": ["you are in a hallway with plain walls."],
+        "step_budget": 5,
+        "steps_taken": 2,
+    }
+
+    previous_state = agent._build_decision_state()
+    agent.percept["newly_relevant_actions"] = ["move south"]
+    agent.percept["no_longer_relevant_actions"] = ["move west"]
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are in a hallway with plain walls.",
+        current_observation="You enter a doorway with several new exits visible.",
+    )
+
+    assert decision["should_interrupt"] is False
+    assert decision["reason"] == "stable_progress"
+    assert decision["signal_flags"]["task_relevant_affordance_changed"] is True
+
+
+def test_sequence_interrupt_decision_stops_when_option_family_value_turns_negative(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "admissible_actions_unchanged": True,
+    }
+    agent._current_option_contract = {
+        "option_id": 1,
+        "objective": "act",
+        "primary_family": "relocation",
+        "option_mode": "explore_frontier",
+        "option_family": "commit_transition",
+        "target_signature": "go down",
+        "expected_progress_signals": ["grounding_changed"],
+        "expected_outcomes": ["environment_transition"],
+        "family_value": -1,
+        "progress_debt": 1,
+        "progress_debt_limit": 4,
+        "state_signatures": ["you are standing near the stairs."],
+        "step_budget": 3,
+        "steps_taken": 1,
+    }
+
+    previous_state = agent._build_decision_state()
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are standing near the stairs.",
+        current_observation="You are still standing near the stairs.",
+    )
+
+    assert decision["should_interrupt"] is True
+    assert decision["reason"] == "family_value_negative"
+    assert decision["signal_flags"]["family_value_negative"] is True
+
+
+def test_sequence_interrupt_decision_allows_stable_relocation_progress(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": True}
+
+    previous_state = agent._build_decision_state()
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="relocation",
+        previous_observation="You are in a narrow hallway with a stone floor.",
+        current_observation="You move into a wider hallway with a stone floor.",
+    )
+
+    assert decision["should_interrupt"] is False
+    assert decision["reason"] == "stable_progress"
+
+
+def test_get_architecture_metrics_reports_option_interrupts(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    history_path = tmp_path / "history.txt"
+    history_path.write_text("action: 'move north'. observation: 'room'\n")
+    agent.log_paths = {"history_path": str(history_path)}
+    agent.curr_episodic_memory = [{"resulting_observation": "room"}]
+    agent.group_chat = SimpleNamespace(messages=[])
+    agent._option_history = [
+        {
+            "option_id": 1,
+            "steps_taken": 2,
+            "final_stop_reason": "expected_progress_missing",
+        }
+    ]
+    agent._option_interrupt_history = [
+        {
+            "option_id": 1,
+            "step": 2,
+            "should_interrupt": True,
+            "reason": "expected_progress_missing",
+            "signal_flags": {"expected_progress_missing": True},
+        }
+    ]
+
+    metrics = agent.get_architecture_metrics()
+
+    assert metrics["version"] == 4
+    assert metrics["option_count"] == 1
+    assert metrics["option_interrupt_count"] == 1
+    assert metrics["option_stop_reasons"] == {"expected_progress_missing": 1}
+    assert metrics["option_interrupt_reasons"] == {"expected_progress_missing": 1}
+
+
+def test_start_option_contract_infers_transition_family_for_stair_actions(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.task = "Maximize score by exploring the dungeon."
+
+    agent._start_option_contract(
+        action_list=["go down", "move east"],
+        current_phase="act",
+    )
+
+    assert agent._current_option_contract is not None
+    assert agent._current_option_contract["option_mode"] == "explore_frontier"
+    assert agent._current_option_contract["option_family"] == "commit_transition"
+    assert (
+        "environment_transition" in agent._current_option_contract["expected_outcomes"]
+    )
+
+
+def test_start_option_contract_resumes_paused_option_progress(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE"}
+    agent._current_option_contract = {
+        "option_id": 3,
+        "objective": "gather_evidence",
+        "primary_family": "relocation",
+        "option_mode": "pursue_grounded_target",
+        "target_signature": "move east",
+        "expected_progress_signals": ["grounding_changed"],
+        "progress_debt_limit": 3,
+        "progress_debt": 2,
+        "progress_events": 1,
+        "revisitation_count": 1,
+        "frontier_expansion_events": 1,
+        "state_signatures": ["hallway"],
+        "step_budget": 2,
+        "steps_taken": 1,
+        "pause_count": 1,
+        "status": "paused",
+    }
+
+    agent._start_option_contract(
+        action_list=["move east", "move north"],
+        current_phase="gather_evidence",
+    )
+
+    assert agent._current_option_contract is not None
+    assert agent._current_option_contract["option_id"] == 3
+    assert agent._current_option_contract["status"] == "active"
+    assert agent._current_option_contract["progress_debt"] == 2
+    assert agent._current_option_contract["step_budget"] == 4
+
+
+def test_sequence_interrupt_decision_stops_on_non_relocation_observation_shift(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.percept = {"task_status": "INCOMPLETE", "admissible_actions_unchanged": True}
+
+    previous_state = agent._build_decision_state()
+
+    decision = agent._get_sequence_interrupt_decision(
+        previous_state=previous_state,
+        action_family="inspect",
+        previous_observation="The drawer is closed and the room is quiet.",
+        current_observation="The drawer opens to reveal a silver key and folded note.",
+    )
+
+    assert decision["should_interrupt"] is True
+    assert decision["reason"] == "observation_changed"
+    assert decision["signal_flags"]["observation_changed"] is True
+
+
 def test_analyst_trace_is_written_as_structured_text_and_exposed_via_getter(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     analyst_trace_path = tmp_path / "game_1" / "analyst_trace.txt"
@@ -570,6 +1026,186 @@ def test_custom_speaker_selection_repairs_malformed_belief_state_and_continues(
     next_speaker = agent.custom_speaker_selection(agent.belief_state_agent, groupchat)
 
     assert next_speaker is agent.action_agent
+
+
+def test_custom_speaker_selection_deliberates_on_referent_ambiguity(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.belief_state_agent = object()
+    agent.thinking_agent = object()
+    agent.action_agent = object()
+    agent.echo_agent = object()
+    agent.learning_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "referent_resolution": {"requested": "seed", "resolved": "blue seed"},
+        "resulting_observation": "The blue seed is on the table.",
+    }
+    agent._reset_episode_reasoning_state()
+    agent._last_belief_content = ""
+    agent._consecutive_thinking_count = 0
+    agent.allowed_transitions = {
+        agent.belief_state_agent: [agent.action_agent, agent.thinking_agent]
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[
+            {
+                "content": (
+                    "BELIEF STATE: [The target appears grounded and the local "
+                    "context is stable.]"
+                )
+            }
+        ]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.belief_state_agent, groupchat)
+
+    assert next_speaker is agent.thinking_agent
+    assert agent._last_deliberation_decision == {
+        "should_deliberate": True,
+        "reason": "referent_ambiguity",
+        "signal_flags": {
+            "textual_uncertainty": False,
+            "forced_interval": False,
+            "referent_ambiguity": True,
+            "recent_failures": False,
+            "interrupted_option": False,
+            "state_uncertainty": False,
+            "remote_room_signal": False,
+        },
+    }
+
+
+def test_custom_speaker_selection_deliberates_after_recent_failures(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.belief_state_agent = object()
+    agent.thinking_agent = object()
+    agent.action_agent = object()
+    agent.echo_agent = object()
+    agent.learning_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "resulting_observation": "The hatch is still closed.",
+    }
+    agent._reset_episode_reasoning_state()
+    agent._recently_failed_actions = ["open hatch"]
+    agent._last_belief_content = ""
+    agent._consecutive_thinking_count = 0
+    agent.allowed_transitions = {
+        agent.belief_state_agent: [agent.action_agent, agent.thinking_agent]
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[
+            {
+                "content": (
+                    "BELIEF STATE: [The last grounded attempt failed and the "
+                    "task remains incomplete.]"
+                )
+            }
+        ]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.belief_state_agent, groupchat)
+
+    assert next_speaker is agent.thinking_agent
+    assert agent._last_deliberation_decision == {
+        "should_deliberate": True,
+        "reason": "recent_failures",
+        "signal_flags": {
+            "textual_uncertainty": False,
+            "forced_interval": False,
+            "referent_ambiguity": False,
+            "recent_failures": True,
+            "interrupted_option": False,
+            "state_uncertainty": False,
+            "remote_room_signal": False,
+        },
+    }
+
+
+def test_custom_speaker_selection_takes_lightweight_option_update_on_shallow_interrupt(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.echo_agent = object()
+    agent.action_agent = object()
+    agent.belief_state_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent._reset_episode_reasoning_state()
+    agent._last_seen_actions_taken = 0
+    agent.num_actions_taken = 1
+    agent._last_burst_size = 1
+    agent._last_burst_stop_reason = "task_relevant_affordance_changed"
+    agent._last_option_interrupt_decision = {
+        "should_interrupt": True,
+        "reason": "task_relevant_affordance_changed",
+        "signal_flags": {
+            "task_relevant_affordance_changed": True,
+            "goal_progress_changed": False,
+            "grounding_changed": False,
+            "expected_progress_missing": False,
+        },
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"burst_stopped_reason": "..."}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.echo_agent, groupchat)
+
+    assert next_speaker is agent.action_agent
+    assert agent._consecutive_lightweight_option_updates == 1
+    assert agent._last_deliberation_decision == {
+        "should_deliberate": False,
+        "reason": "lightweight_option_update",
+        "signal_flags": {
+            "task_relevant_affordance_changed": True,
+            "goal_progress_changed": False,
+            "grounding_changed": False,
+            "expected_progress_missing": False,
+        },
+    }
+
+
+def test_custom_speaker_selection_routes_to_belief_state_when_progress_is_missing(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="scienceworld")
+    agent.echo_agent = object()
+    agent.action_agent = object()
+    agent.belief_state_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent._reset_episode_reasoning_state()
+    agent._last_seen_actions_taken = 0
+    agent.num_actions_taken = 1
+    agent._last_burst_size = 1
+    agent._last_burst_stop_reason = "expected_progress_missing"
+    agent._last_option_interrupt_decision = {
+        "should_interrupt": True,
+        "reason": "expected_progress_missing",
+        "signal_flags": {
+            "task_relevant_affordance_changed": False,
+            "goal_progress_changed": False,
+            "grounding_changed": False,
+            "expected_progress_missing": True,
+        },
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"burst_stopped_reason": "..."}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.echo_agent, groupchat)
+
+    assert next_speaker is agent.belief_state_agent
+    assert agent._consecutive_lightweight_option_updates == 0
 
 
 def test_generate_initial_message_omits_numeric_budget_counts(tmp_path):

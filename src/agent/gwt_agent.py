@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -18,6 +19,21 @@ from rich.text import Text
 from sklearn.cluster import KMeans
 
 from src.agent.autogen_agent import AutogenAgent
+from src.agent.decision_state import (
+    ActionSurfaceState,
+    DecisionState,
+    GoalState,
+    GroundingState,
+    OptionState,
+    ProgressState,
+    UncertaintyState,
+    build_action_runtime_snapshot,
+    build_analyst_runtime_snapshot,
+)
+from src.agent.deliberation_policy import (
+    evaluate_deliberation_policy,
+    evaluate_sequence_interrupt_policy,
+)
 from src.agent.env_adapter import ALFWorldAdapter, NetHackAdapter, ScienceWorldAdapter
 from src.agent.helpers import (
     ConvertOrphanedToolMessages,
@@ -1435,18 +1451,31 @@ class GWTAutogenAgent(AutogenAgent):
         self._recently_executed_actions: list[str] = []
         self._actions_since_last_thinking: int = 0
         self._last_burst_size: int = 1
+        self._last_deliberation_decision: dict | None = None
+        self._last_option_interrupt_decision: dict | None = None
+        self._current_option_contract: dict[str, object] | None = None
+        self._option_history: list[dict[str, object]] = []
+        self._option_interrupt_history: list[dict[str, object]] = []
+        self._current_option_stagnation_steps: int = 0
+        self._previous_interaction_opportunity_count: int = 0
+        self._current_interaction_opportunity_count: int = 0
         # Stop reason of the most recent burst — used by the speaker selector to
         # decide whether to self-loop Action_Agent or force a belief update.
         self._last_burst_stop_reason: str = ""
         # Number of consecutive Action_Agent self-loops taken without an
         # intervening Belief_State update.  Capped at _MAX_ACTION_SELFLOOPS.
         self._consecutive_action_selfloops: int = 0
+        # Number of consecutive shallow option updates resumed without a
+        # Belief_State round. This keeps local affordance churn cheap while
+        # still forcing a replan if those updates fail to produce progress.
+        self._consecutive_lightweight_option_updates: int = 0
         # Actions unexecuted from the last burst (stopped early) — passed to the
         # next action agent call so it can continue or adapt the sequence.
         self._pending_sequence: list[str] = []
         # Intersection of admissible sets seen so far this episode.  Actions that
         # remain in this set are unconditionally valid at any sequence position.
         self._persistent_admissible: set[str] | None = None
+        self._burst_history: list[dict[str, object]] = []
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -11458,58 +11487,677 @@ class GWTAutogenAgent(AutogenAgent):
                 percept_snapshot[key] = list(percept_snapshot.get(key, [])[:4])
         return percept_snapshot
 
-    def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
-        snapshots = {}
-        ordered_progress = self._get_ordered_target_snapshot()
-        if self._snapshot_has_signal(ordered_progress):
-            snapshots["ordered_target_progress"] = ordered_progress
-        candidate_tracking = summary.get("candidate_tracking", {})
-        if self._snapshot_has_signal(candidate_tracking):
-            snapshots["candidate_tracking"] = candidate_tracking
-        relation_frontier = summary.get("relation_frontier", {})
-        if self._snapshot_has_signal(relation_frontier):
-            snapshots["relation_frontier"] = relation_frontier
-        substance_search = summary.get("substance_search", {})
-        if self._snapshot_has_signal(substance_search):
-            snapshots["substance_search"] = substance_search
-        artifact_creation = summary.get("artifact_creation", {})
-        if self._snapshot_has_signal(artifact_creation):
-            snapshots["artifact_creation"] = artifact_creation
-        measurement_tracking = summary.get("measurement_tracking", {})
-        if self._snapshot_has_signal(measurement_tracking):
-            snapshots["measurement_tracking"] = measurement_tracking
-        comparison_tracking = summary.get("comparison_tracking", {})
-        if self._snapshot_has_signal(comparison_tracking):
-            snapshots["comparison_tracking"] = comparison_tracking
-        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
-        if self._snapshot_has_signal(conditional_branch_tracking):
-            snapshots["conditional_branch_tracking"] = conditional_branch_tracking
-        remote_room_signal = summary.get("remote_room_signal", {})
-        if self._snapshot_has_signal(remote_room_signal, key="room"):
-            snapshots["remote_room_signal"] = remote_room_signal
-        if self.percept.get("referent_resolution"):
-            snapshots["referent_resolution"] = self.percept["referent_resolution"]
-        if self._recently_failed_actions:
-            snapshots["recently_failed_actions"] = list(self._recently_failed_actions)
-        if self._recently_executed_actions:
-            snapshots["recently_executed_actions"] = list(
-                self._recently_executed_actions
+    def _get_persistent_admissible_actions_snapshot(self) -> list[str]:
+        if self._persistent_admissible is None:
+            return []
+        curr_set = set(self.admissible_actions)
+        persistent_now = self._persistent_admissible & curr_set
+        if persistent_now < curr_set:
+            return sorted(persistent_now)
+        return []
+
+    def _count_interaction_opportunities(self, actions: list[str] | None) -> int:
+        count = 0
+        seen: set[str] = set()
+        for action in actions or []:
+            family = self._classify_action_family(action)
+            if family in {"relocation", "inspect", "idle", "unknown"}:
+                continue
+            normalized = self._normalize_runtime_text(action)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            count += 1
+        return count
+
+    def _get_option_target_signature(self, actions: list[str]) -> str:
+        for action in actions:
+            family = self._classify_action_family(action)
+            for signature in (
+                self._extract_action_primary_object_signature(action, family=family),
+                self._get_action_referent_signature(action, family=family),
+                self._extract_action_destination_signature(action, family=family),
+            ):
+                if signature:
+                    return signature
+        if actions:
+            normalized = self._normalize_runtime_text(actions[0])
+            if normalized:
+                return normalized
+        return ""
+
+    def _get_option_expected_progress_signals(
+        self, *, primary_family: str, current_phase: str
+    ) -> list[str]:
+        if primary_family == "relocation":
+            return [
+                "grounding_changed",
+                "interaction_opportunity_changed",
+                "action_surface_changed",
+            ]
+        if primary_family == "inspect":
+            return [
+                "grounding_changed",
+                "task_relevant_affordance_changed",
+                "observation_changed",
+            ]
+        if primary_family == "focus":
+            return ["goal_progress_changed", "grounding_changed"]
+        if current_phase in {"commit_to_goal", "execute_branch"}:
+            return ["goal_progress_changed", "grounding_changed"]
+        return [
+            "goal_progress_changed",
+            "grounding_changed",
+            "action_surface_changed",
+            "task_relevant_affordance_changed",
+        ]
+
+    def _get_option_mode(
+        self,
+        *,
+        primary_family: str,
+        current_phase: str,
+        task_contract: dict | None = None,
+    ) -> str:
+        contract = task_contract if isinstance(task_contract, dict) else {}
+        if primary_family == "relocation" and contract.get("exploration_task"):
+            return "explore_frontier"
+        if primary_family == "inspect":
+            return "inspect_novelty"
+        if primary_family == "focus":
+            return "commit_goal"
+        if current_phase in {"commit_to_goal", "execute_branch"}:
+            return "commit_goal"
+        if primary_family in {
+            "relation",
+            "tool_application",
+            "transfer_or_transform",
+            "device_control",
+        }:
+            return "manipulate_target"
+        if primary_family == "relocation":
+            return "pursue_grounded_target"
+        return "pursue_grounded_target"
+
+    def _get_option_family(
+        self,
+        *,
+        option_mode: str,
+        primary_family: str,
+        current_phase: str,
+        actions: list[str],
+    ) -> str:
+        normalized_actions = [
+            self._normalize_runtime_text(action) for action in actions if action
+        ]
+        if any(
+            action in {"go up", "go down"}
+            or action.startswith("enter ")
+            or action.startswith("exit ")
+            for action in normalized_actions
+        ):
+            return "commit_transition"
+        if primary_family == "inspect":
+            return "inspect_novelty"
+        if primary_family == "focus" or current_phase in {
+            "commit_to_goal",
+            "execute_branch",
+        }:
+            return "commit_goal"
+        if primary_family in {
+            "relation",
+            "tool_application",
+            "transfer_or_transform",
+            "device_control",
+        }:
+            return "manipulate_target"
+        if option_mode == "explore_frontier":
+            return "explore_frontier"
+        return "pursue_grounded_target"
+
+    @staticmethod
+    def _get_option_expected_outcomes(option_family: str) -> list[str]:
+        if option_family == "commit_transition":
+            return ["environment_transition", "goal_progress", "status_metric_gain"]
+        if option_family == "explore_frontier":
+            return ["frontier_expansion", "novel_observation"]
+        if option_family == "inspect_novelty":
+            return ["inspection_yield", "grounding_progress", "novel_observation"]
+        if option_family == "commit_goal":
+            return ["goal_progress", "grounding_progress", "status_metric_gain"]
+        if option_family == "manipulate_target":
+            return ["goal_progress", "grounding_progress", "status_metric_gain"]
+        return ["grounding_progress", "novel_observation", "frontier_expansion"]
+
+    @staticmethod
+    def _get_option_progress_debt_limit(option_mode: str) -> int:
+        if option_mode == "explore_frontier":
+            return 4
+        if option_mode in {"inspect_novelty", "pursue_grounded_target"}:
+            return 3
+        return 2
+
+    @staticmethod
+    def _extract_observation_numeric_metrics(observation: str) -> dict[str, int]:
+        metrics: dict[str, int] = {}
+        for key, value in re.findall(
+            r"([A-Za-z$]+):\s*(-?\d+)", str(observation or "")
+        ):
+            metrics[key.lower()] = int(value)
+        return metrics
+
+    def _can_resume_option_contract(
+        self,
+        *,
+        normalized_actions: list[str],
+        current_phase: str,
+        primary_family: str,
+        option_mode: str,
+    ) -> bool:
+        contract = self._current_option_contract
+        if not contract or contract.get("status") != "paused":
+            return False
+        if str(contract.get("objective") or "") != str(current_phase or ""):
+            return False
+        if str(contract.get("option_mode") or "") != option_mode:
+            return False
+        previous_family = str(contract.get("primary_family") or "")
+        if previous_family == primary_family:
+            return True
+        return option_mode == "explore_frontier" and bool(normalized_actions)
+
+    def _start_option_contract(
+        self, *, action_list: list[str], current_phase: str | None
+    ) -> None:
+        normalized_actions = [str(action) for action in action_list if str(action)]
+        if not normalized_actions:
+            self._current_option_contract = None
+            self._current_option_stagnation_steps = 0
+            return
+
+        family_counts = Counter(
+            self._classify_action_family(action) for action in normalized_actions
+        )
+        primary_family = family_counts.most_common(1)[0][0]
+        objective = current_phase or "act"
+        task_contract = self._get_task_contract()
+        option_mode = self._get_option_mode(
+            primary_family=primary_family,
+            current_phase=objective,
+            task_contract=task_contract,
+        )
+        option_family = self._get_option_family(
+            option_mode=option_mode,
+            primary_family=primary_family,
+            current_phase=objective,
+            actions=normalized_actions,
+        )
+        expected_progress_signals = self._get_option_expected_progress_signals(
+            primary_family=primary_family,
+            current_phase=objective,
+        )
+        expected_outcomes = self._get_option_expected_outcomes(option_family)
+        if self._can_resume_option_contract(
+            normalized_actions=normalized_actions,
+            current_phase=objective,
+            primary_family=primary_family,
+            option_mode=option_mode,
+        ):
+            self._current_option_contract["status"] = "active"
+            self._current_option_contract["primary_family"] = primary_family
+            self._current_option_contract["objective"] = objective
+            self._current_option_contract["option_mode"] = option_mode
+            self._current_option_contract["option_family"] = option_family
+            self._current_option_contract["expected_progress_signals"] = (
+                expected_progress_signals
             )
-        if self.percept.get("admissible_actions_unchanged"):
-            snapshots["admissible_actions_unchanged"] = True
-        if self._pending_sequence:
-            snapshots["pending_sequence"] = list(self._pending_sequence)
-        if self._persistent_admissible is not None:
-            # Intersect the ever-seen union with the CURRENT admissible set so
-            # we only expose actions that (a) have appeared before in this
-            # episode and (b) are valid right now.  Only surface when it's a
-            # strict subset — otherwise it equals the full admissible set
-            # (e.g. fixed-action-space envs like NetHack) and adds no signal.
-            curr_set = set(self.admissible_actions)
-            persistent_now = self._persistent_admissible & curr_set
-            if persistent_now < curr_set:
-                snapshots["persistent_admissible_actions"] = sorted(persistent_now)
-        return snapshots
+            self._current_option_contract["expected_outcomes"] = expected_outcomes
+            self._current_option_contract["step_budget"] = int(
+                self._current_option_contract.get("step_budget", 0) or 0
+            ) + len(normalized_actions)
+            if not self._current_option_contract.get("target_signature"):
+                self._current_option_contract["target_signature"] = (
+                    self._get_option_target_signature(normalized_actions)
+                )
+            return
+
+        if (
+            self._current_option_contract
+            and self._current_option_contract.get("status") == "paused"
+        ):
+            self._finalize_option_contract(stop_reason="option_replaced")
+
+        self._current_option_contract = {
+            "option_id": len(self._option_history) + 1,
+            "objective": objective,
+            "primary_family": primary_family,
+            "option_mode": option_mode,
+            "option_family": option_family,
+            "target_signature": self._get_option_target_signature(normalized_actions),
+            "expected_progress_signals": expected_progress_signals,
+            "expected_outcomes": expected_outcomes,
+            "progress_debt_limit": self._get_option_progress_debt_limit(option_mode),
+            "step_budget": len(normalized_actions),
+            "steps_taken": 0,
+            "progress_events": 0,
+            "outcome_events": 0,
+            "progress_debt": 0,
+            "family_value": 0,
+            "revisitation_count": 0,
+            "frontier_expansion_events": 0,
+            "realized_outcomes": {},
+            "state_signatures": [],
+            "pause_count": 0,
+            "stagnation_steps": 0,
+            "status": "active",
+        }
+        self._current_option_stagnation_steps = 0
+
+    def _pause_option_contract(self, *, stop_reason: str) -> None:
+        if not self._current_option_contract:
+            return
+        self._current_option_contract["status"] = "paused"
+        self._current_option_contract["paused_stop_reason"] = stop_reason
+        self._current_option_contract["pause_count"] = (
+            int(self._current_option_contract.get("pause_count", 0) or 0) + 1
+        )
+        self._current_option_contract["stagnation_steps"] = (
+            self._current_option_stagnation_steps
+        )
+
+    def _finalize_option_contract(self, *, stop_reason: str) -> None:
+        if not self._current_option_contract:
+            return
+
+        finalized = dict(self._current_option_contract)
+        finalized["status"] = (
+            "interrupted"
+            if stop_reason not in {"sequence_complete", "single_action"}
+            else "completed"
+        )
+        finalized["final_stop_reason"] = stop_reason
+        finalized["stagnation_steps"] = self._current_option_stagnation_steps
+        self._option_history.append(finalized)
+        self._current_option_contract = finalized
+
+    def _compute_option_step_features(
+        self,
+        *,
+        previous_state: DecisionState,
+        current_state: DecisionState,
+        action_family: str,
+        previous_observation: str,
+        observation_changed: bool,
+        current_observation: str,
+    ) -> dict[str, object]:
+        current_option = self._current_option_contract or {}
+        option_family = str(current_option.get("option_family") or "")
+        current_signature = self._normalize_architecture_metric_text(
+            current_observation
+        )
+        seen_signatures = {
+            str(signature)
+            for signature in current_option.get("state_signatures", [])
+            if signature
+        }
+        observation_novelty_gain = bool(
+            current_signature and current_signature not in seen_signatures
+        )
+        local_revisitation = bool(
+            current_signature and current_signature in seen_signatures
+        )
+        strong_progress = bool(
+            previous_state.goal_state.ordered_target_progress
+            != current_state.goal_state.ordered_target_progress
+            or previous_state.grounding_state != current_state.grounding_state
+            or (observation_changed and action_family != "relocation")
+        )
+        interaction_gain = (
+            current_state.progress_state.interaction_opportunity_delta > 0
+        )
+        task_relevant_affordance_gain = (
+            current_state.progress_state.task_relevant_affordance_delta_count > 0
+        )
+        previous_metrics = self._extract_observation_numeric_metrics(
+            previous_observation
+        )
+        current_metrics = self._extract_observation_numeric_metrics(current_observation)
+        environment_transition = any(
+            current_metrics.get(key) != previous_metrics.get(key)
+            for key in {"dlvl", "depth", "level", "floor"}
+            if key in current_metrics or key in previous_metrics
+        )
+        status_metric_gain = any(
+            current_value > previous_metrics.get(metric, current_value)
+            for metric, current_value in current_metrics.items()
+            if metric
+            not in {
+                "t",
+                "hp",
+                "pw",
+                "ac",
+                "st",
+                "dx",
+                "co",
+                "in",
+                "wi",
+                "ch",
+            }
+            and metric in previous_metrics
+        )
+        realized_outcomes = {
+            "goal_progress": bool(
+                previous_state.goal_state.ordered_target_progress
+                != current_state.goal_state.ordered_target_progress
+                or previous_state.goal_state.task_status
+                != current_state.goal_state.task_status
+            ),
+            "grounding_progress": bool(
+                previous_state.grounding_state != current_state.grounding_state
+            ),
+            "frontier_expansion": bool(
+                interaction_gain or task_relevant_affordance_gain
+            ),
+            "novel_observation": observation_novelty_gain,
+            "inspection_yield": bool(
+                action_family == "inspect"
+                and (
+                    observation_changed
+                    or previous_state.grounding_state != current_state.grounding_state
+                )
+            ),
+            "environment_transition": environment_transition,
+            "status_metric_gain": status_metric_gain,
+        }
+        progress_credit = 0
+        if strong_progress:
+            progress_credit += 2
+        if observation_novelty_gain:
+            progress_credit += 1
+        if interaction_gain:
+            progress_credit += 1
+        if task_relevant_affordance_gain and (
+            strong_progress or observation_novelty_gain or interaction_gain
+        ):
+            progress_credit += 1
+        current_progress_debt = int(current_option.get("progress_debt", 0) or 0)
+        progress_debt_delta = 0
+        if progress_credit == 0:
+            progress_debt_delta += 1
+        elif progress_credit >= 2:
+            progress_debt_delta -= 1
+        if local_revisitation:
+            progress_debt_delta += 1
+        projected_progress_debt = max(0, current_progress_debt + progress_debt_delta)
+        expected_outcomes = list(current_option.get("expected_outcomes", []) or [])
+        family_outcome_hit = any(
+            realized_outcomes.get(outcome, False) for outcome in expected_outcomes
+        )
+        current_family_value = int(current_option.get("family_value", 0) or 0)
+        family_value_delta = 0
+        if family_outcome_hit:
+            family_value_delta += 2
+        elif (
+            option_family
+            in {
+                "explore_frontier",
+                "inspect_novelty",
+                "pursue_grounded_target",
+            }
+            and observation_novelty_gain
+        ):
+            family_value_delta += 1
+        else:
+            family_value_delta -= 1
+        if local_revisitation:
+            family_value_delta -= 1
+        if environment_transition:
+            family_value_delta += 2
+        if status_metric_gain:
+            family_value_delta += 1
+        projected_family_value = current_family_value + family_value_delta
+        return {
+            "observation_signature": current_signature,
+            "observation_novelty_gain": observation_novelty_gain,
+            "local_revisitation": local_revisitation,
+            "strong_progress": strong_progress,
+            "interaction_gain": interaction_gain,
+            "task_relevant_affordance_gain": task_relevant_affordance_gain,
+            "realized_outcomes": realized_outcomes,
+            "family_outcome_hit": family_outcome_hit,
+            "progress_credit": progress_credit,
+            "projected_progress_debt": projected_progress_debt,
+            "projected_family_value": projected_family_value,
+        }
+
+    def _update_current_option_progress(
+        self,
+        *,
+        current_state: DecisionState,
+        step_features: dict[str, object],
+        signal_flags: dict[str, bool],
+    ) -> None:
+        if self._current_option_contract is None:
+            return
+
+        signature = str(step_features.get("observation_signature") or "")
+        if signature:
+            seen_signatures = list(
+                self._current_option_contract.get("state_signatures", [])
+            )
+            if signature not in seen_signatures:
+                seen_signatures.append(signature)
+                self._current_option_contract["state_signatures"] = seen_signatures[-8:]
+
+        if step_features.get("local_revisitation"):
+            self._current_option_contract["revisitation_count"] = (
+                int(self._current_option_contract.get("revisitation_count", 0) or 0) + 1
+            )
+        if step_features.get("interaction_gain") or step_features.get(
+            "task_relevant_affordance_gain"
+        ):
+            self._current_option_contract["frontier_expansion_events"] = (
+                int(
+                    self._current_option_contract.get("frontier_expansion_events", 0)
+                    or 0
+                )
+                + 1
+            )
+
+        self._current_option_contract["progress_debt"] = int(
+            step_features.get("projected_progress_debt", 0) or 0
+        )
+        self._current_option_contract["family_value"] = int(
+            step_features.get("projected_family_value", 0) or 0
+        )
+        realized_outcomes = dict(
+            self._current_option_contract.get("realized_outcomes", {})
+        )
+        for outcome_name, outcome_hit in (
+            step_features.get("realized_outcomes", {}) or {}
+        ).items():
+            if outcome_hit:
+                realized_outcomes[outcome_name] = (
+                    int(realized_outcomes.get(outcome_name, 0) or 0) + 1
+                )
+        self._current_option_contract["realized_outcomes"] = realized_outcomes
+        if signal_flags.get("expected_progress_hit"):
+            self._current_option_contract["progress_events"] = (
+                int(self._current_option_contract.get("progress_events", 0) or 0) + 1
+            )
+        if step_features.get("family_outcome_hit"):
+            self._current_option_contract["outcome_events"] = (
+                int(self._current_option_contract.get("outcome_events", 0) or 0) + 1
+            )
+
+    def _build_decision_state(self, summary: dict | None = None) -> DecisionState:
+        summary = summary if isinstance(summary, dict) else {}
+        percept_summary = self.percept.get("admissible_action_summary", {})
+        current_phase = summary.get(
+            "current_phase", percept_summary.get("current_phase")
+        )
+        total_actions = summary.get(
+            "total_actions", percept_summary.get("total_actions")
+        )
+        shortlist = list(
+            summary.get(
+                "task_relevant_action_shortlist",
+                self.percept.get("task_relevant_action_shortlist", []),
+            )[:8]
+        )
+        salient_entities = list(
+            summary.get(
+                "salient_entities", percept_summary.get("salient_entities", [])
+            )[:6]
+        )
+        deprioritized_families = list(
+            summary.get(
+                "deprioritized_families",
+                percept_summary.get("deprioritized_families", []),
+            )[:4]
+        )
+        task_contract_source = summary.get(
+            "task_contract", self.percept.get("task_contract", {})
+        )
+        ordered_progress = self._get_ordered_target_snapshot()
+        task_contract = self._get_compact_task_contract_snapshot(task_contract_source)
+        current_actions = list(self.admissible_actions)
+        candidate_tracking = summary.get(
+            "candidate_tracking", self._get_candidate_tracking_snapshot()
+        )
+        relation_frontier = summary.get(
+            "relation_frontier",
+            self._get_relation_frontier_snapshot(current_actions, task_contract_source),
+        )
+        substance_search = summary.get(
+            "substance_search", self._get_substance_search_snapshot(current_actions)
+        )
+        artifact_creation = summary.get(
+            "artifact_creation", self._get_artifact_creation_snapshot()
+        )
+        measurement_tracking = summary.get(
+            "measurement_tracking", self._get_measurement_tracking_snapshot()
+        )
+        comparison_tracking = summary.get(
+            "comparison_tracking", self._get_comparison_tracking_snapshot()
+        )
+        conditional_branch_tracking = summary.get(
+            "conditional_branch_tracking",
+            self._get_conditional_branch_tracking_snapshot(),
+        )
+        remote_room_signal = summary.get(
+            "remote_room_signal", self._get_remote_room_signal_snapshot()
+        )
+        required_families = list(task_contract.get("required_families", [])[:4])
+        admissible_actions_unchanged = self.percept.get("admissible_actions_unchanged")
+        current_option = dict(self._current_option_contract or {})
+        current_option_step = int(current_option.get("steps_taken", 0) or 0)
+        current_option_budget = int(current_option.get("step_budget", 0) or 0)
+        current_option_progress_events = int(
+            current_option.get("progress_events", 0) or 0
+        )
+        current_option_progress_debt = int(current_option.get("progress_debt", 0) or 0)
+        current_option_progress_debt_limit = int(
+            current_option.get("progress_debt_limit", 0) or 0
+        )
+        current_option_family_value = int(current_option.get("family_value", 0) or 0)
+        current_option_outcome_events = int(
+            current_option.get("outcome_events", 0) or 0
+        )
+        current_option_revisitation_count = int(
+            current_option.get("revisitation_count", 0) or 0
+        )
+        current_option_frontier_expansion_events = int(
+            current_option.get("frontier_expansion_events", 0) or 0
+        )
+        current_option_signatures = list(current_option.get("state_signatures", []))
+        interaction_opportunity_count = self._count_interaction_opportunities(shortlist)
+        affordance_delta_count = len(
+            self.percept.get("newly_admissible_actions", [])
+        ) + len(self.percept.get("no_longer_admissible_actions", []))
+        task_relevant_affordance_delta_count = len(
+            self.percept.get("newly_relevant_actions", [])
+        ) + len(self.percept.get("no_longer_relevant_actions", []))
+
+        return DecisionState(
+            action_surface=ActionSurfaceState(
+                total_actions=total_actions,
+                current_phase=current_phase,
+                salient_entities=salient_entities,
+                shortlist=shortlist,
+                deprioritized_families=deprioritized_families,
+                required_families=required_families,
+                interaction_opportunity_count=interaction_opportunity_count,
+            ),
+            goal_state=GoalState(
+                task_status=self.percept.get("task_status", self.task_status),
+                current_phase=current_phase,
+                task_contract=task_contract,
+                ordered_target_progress=ordered_progress,
+            ),
+            grounding_state=GroundingState(
+                candidate_tracking=candidate_tracking,
+                relation_frontier=relation_frontier,
+                substance_search=substance_search,
+                artifact_creation=artifact_creation,
+                measurement_tracking=measurement_tracking,
+                comparison_tracking=comparison_tracking,
+                conditional_branch_tracking=conditional_branch_tracking,
+                remote_room_signal=remote_room_signal,
+                referent_resolution=self.percept.get("referent_resolution", {}),
+            ),
+            option_state=OptionState(
+                current_option=current_option,
+                pending_sequence=list(self._pending_sequence),
+                persistent_admissible_actions=self._get_persistent_admissible_actions_snapshot(),
+                recently_executed_actions=list(self._recently_executed_actions),
+                recently_failed_actions=list(self._recently_failed_actions),
+                last_interrupt=dict(self._last_option_interrupt_decision or {}),
+            ),
+            progress_state=ProgressState(
+                actions_taken=self.num_actions_taken,
+                actions_since_last_thinking=self._actions_since_last_thinking,
+                last_burst_size=self._last_burst_size,
+                last_burst_stop_reason=self._last_burst_stop_reason,
+                affordance_delta_count=affordance_delta_count,
+                task_relevant_affordance_delta_count=task_relevant_affordance_delta_count,
+                interaction_opportunity_delta=(
+                    self._current_interaction_opportunity_count
+                    - self._previous_interaction_opportunity_count
+                ),
+                option_step=current_option_step,
+                option_step_budget=current_option_budget,
+                option_stagnation_steps=self._current_option_stagnation_steps,
+                option_progress_events=current_option_progress_events,
+                option_progress_debt=current_option_progress_debt,
+                option_progress_debt_limit=current_option_progress_debt_limit,
+                option_revisitation_count=current_option_revisitation_count,
+                option_frontier_expansion_events=(
+                    current_option_frontier_expansion_events
+                ),
+                option_novelty_rate=(
+                    len(current_option_signatures) / current_option_step
+                    if current_option_signatures and current_option_step
+                    else None
+                ),
+                option_family_value=current_option_family_value,
+                option_outcome_events=current_option_outcome_events,
+            ),
+            uncertainty_state=UncertaintyState(
+                admissible_actions_unchanged=(
+                    admissible_actions_unchanged
+                    if isinstance(admissible_actions_unchanged, bool)
+                    else None
+                ),
+                referent_resolution=self.percept.get("referent_resolution", {}),
+            ),
+        )
+
+    def get_decision_state_snapshot(self, summary: dict | None = None) -> dict:
+        return self._build_decision_state(summary).to_compact_dict()
+
+    def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
+        return build_action_runtime_snapshot(self._build_decision_state(summary))
 
     def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
         summary = summary if isinstance(summary, dict) else {}
@@ -11637,86 +12285,7 @@ class GWTAutogenAgent(AutogenAgent):
         return "\n".join(lines)
 
     def _get_analyst_runtime_snapshots(self, summary: dict) -> dict:
-        snapshots = {}
-
-        ordered_progress = self._get_ordered_target_snapshot()
-        if self._snapshot_has_signal(ordered_progress):
-            snapshots["ordered_progress"] = {
-                "focused": ordered_progress.get("focused_stage_labels", [])[:3],
-                "pending": ordered_progress.get("pending_stage_candidates", [])[:3],
-            }
-
-        candidate_tracking = summary.get("candidate_tracking", {})
-        if self._snapshot_has_signal(candidate_tracking):
-            snapshots["candidate"] = {
-                "active": candidate_tracking.get("active_candidate"),
-                "last_seen_room": candidate_tracking.get("last_seen_room"),
-                "rejected": candidate_tracking.get("rejected_candidates", [])[:2],
-            }
-
-        measurement_tracking = summary.get("measurement_tracking", {})
-        if self._snapshot_has_signal(measurement_tracking):
-            snapshots["measurement"] = {
-                "target": measurement_tracking.get("measurement_target"),
-                "property": measurement_tracking.get("measurement_property"),
-                "resolved": measurement_tracking.get("property_resolved"),
-                "branch_ready": measurement_tracking.get("branch_ready"),
-            }
-
-        comparison_tracking = summary.get("comparison_tracking", {})
-        if self._snapshot_has_signal(comparison_tracking):
-            snapshots["comparison"] = {
-                "targets": comparison_tracking.get("comparison_targets", [])[:2],
-                "resolved_target": comparison_tracking.get("selected_target"),
-            }
-
-        conditional_branch_tracking = summary.get("conditional_branch_tracking", {})
-        if self._snapshot_has_signal(conditional_branch_tracking):
-            snapshots["conditional_branch"] = {
-                "evidence_target": conditional_branch_tracking.get("evidence_target"),
-                "resolved_target": conditional_branch_tracking.get("selected_branch"),
-            }
-
-        relation_frontier = summary.get("relation_frontier", {})
-        if self._snapshot_has_signal(relation_frontier):
-            snapshots["relation_frontier"] = {
-                "referents": relation_frontier.get("frontier_referents", [])[:4],
-                "control_candidates": relation_frontier.get("control_candidates", [])[
-                    :2
-                ],
-            }
-
-        remote_room_signal = summary.get("remote_room_signal", {})
-        if self._snapshot_has_signal(remote_room_signal, key="room"):
-            snapshots["remote_room"] = {
-                "room": remote_room_signal.get("room"),
-                "reason": remote_room_signal.get("reason"),
-            }
-
-        substance_search = summary.get("substance_search", {})
-        if self._snapshot_has_signal(substance_search):
-            snapshots["substance_search"] = {
-                "phase": substance_search.get("phase"),
-                "grounded_substances": substance_search.get("grounded_substances", [])[
-                    :3
-                ],
-                "source_candidates": substance_search.get("source_candidates", [])[:3],
-            }
-
-        artifact_creation = summary.get("artifact_creation", {})
-        if self._snapshot_has_signal(artifact_creation):
-            snapshots["artifact_creation"] = {
-                "artifact_type": artifact_creation.get("artifact_type"),
-                "grounded_artifacts": artifact_creation.get("grounded_artifacts", [])[
-                    :3
-                ],
-            }
-
-        if self._recently_executed_actions:
-            snapshots["recently_executed_actions"] = list(
-                self._recently_executed_actions
-            )
-
+        snapshots = build_analyst_runtime_snapshot(self._build_decision_state(summary))
         thinking_hints = self._get_thinking_agent_entity_hints()
         if thinking_hints:
             snapshots["thinking_agent_entity_hints"] = thinking_hints
@@ -12064,6 +12633,188 @@ class GWTAutogenAgent(AutogenAgent):
                 return f.read()
         return ""
 
+    @staticmethod
+    def _normalize_architecture_metric_text(text: str) -> str:
+        normalized = re.sub(r"\b\d+\b", "#", str(text or "").lower())
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _record_burst_history(
+        self,
+        *,
+        planned_actions: int,
+        actions_executed: int,
+        stop_reason: str,
+    ) -> None:
+        self._burst_history.append(
+            {
+                "planned_actions": max(planned_actions, 0),
+                "actions_executed": max(actions_executed, 0),
+                "stop_reason": stop_reason or "unknown",
+            }
+        )
+
+    def get_architecture_metrics(self) -> dict:
+        messages = getattr(getattr(self, "group_chat", None), "messages", None) or []
+        thinking_count = sum(
+            1
+            for message in messages
+            if str(message.get("name") or "") == "Thinking_Agent"
+        )
+        belief_update_count = sum(
+            1
+            for message in messages
+            if str(message.get("name") or "") == "Belief_State_Agent"
+        )
+
+        normalized_actions: list[str] = []
+        history_path = (getattr(self, "log_paths", {}) or {}).get("history_path")
+        if history_path and os.path.exists(history_path):
+            history_text = Path(history_path).read_text()
+            normalized_actions = [
+                self._normalize_architecture_metric_text(action)
+                for action in re.findall(
+                    r"action: '([^']*)'\. observation: '", history_text, re.MULTILINE
+                )
+                if action and action != "None"
+            ]
+
+        normalized_observations: list[str] = []
+        for item in getattr(self, "curr_episodic_memory", []) or []:
+            payload = None
+            if isinstance(item, str):
+                try:
+                    payload = json.loads(item)
+                except json.JSONDecodeError:
+                    payload = None
+            elif isinstance(item, dict):
+                payload = item
+            if not isinstance(payload, dict):
+                continue
+            observation = payload.get("resulting_observation")
+            if observation:
+                normalized_observations.append(
+                    self._normalize_architecture_metric_text(observation)
+                )
+
+        repeated_action_count = max(
+            len(normalized_actions) - len(set(normalized_actions)),
+            0,
+        )
+        repeated_state_count = max(
+            len(normalized_observations) - len(set(normalized_observations)),
+            0,
+        )
+
+        salient_entity_history = [
+            [
+                self._normalize_architecture_metric_text(entity)
+                for entity in entry.get("salient_entities", [])
+                if entity
+            ]
+            for entry in self._analyst_trace_entries
+        ]
+        unique_grounded_entities: set[str] = set()
+        grounded_entity_growth_events = 0
+        for entities in salient_entity_history:
+            before = len(unique_grounded_entities)
+            unique_grounded_entities.update(entities)
+            grounded_entity_growth_events += max(
+                len(unique_grounded_entities) - before,
+                0,
+            )
+
+        burst_lengths = [
+            int(entry.get("actions_executed", 0) or 0) for entry in self._burst_history
+        ]
+        burst_stop_reasons = Counter(
+            str(entry.get("stop_reason") or "unknown") for entry in self._burst_history
+        )
+        burst_length_histogram = Counter(str(length) for length in burst_lengths)
+        option_lengths = [
+            int(entry.get("steps_taken", 0) or 0) for entry in self._option_history
+        ]
+        option_progress_debts = [
+            int(entry.get("progress_debt", 0) or 0) for entry in self._option_history
+        ]
+        option_revisitation_counts = [
+            int(entry.get("revisitation_count", 0) or 0)
+            for entry in self._option_history
+        ]
+        option_family_values = [
+            int(entry.get("family_value", 0) or 0) for entry in self._option_history
+        ]
+        option_stop_reasons = Counter(
+            str(entry.get("final_stop_reason") or "unknown")
+            for entry in self._option_history
+        )
+        option_interrupt_reasons = Counter(
+            str(entry.get("reason") or "stable_progress")
+            for entry in self._option_interrupt_history
+            if entry.get("should_interrupt")
+        )
+
+        return {
+            "version": 4,
+            "thinking_count": thinking_count,
+            "belief_update_count": belief_update_count,
+            "deliberation_count": thinking_count + belief_update_count,
+            "repeated_action_density": (
+                repeated_action_count / len(normalized_actions)
+                if normalized_actions
+                else None
+            ),
+            "repeated_state_density": (
+                repeated_state_count / len(normalized_observations)
+                if normalized_observations
+                else None
+            ),
+            "observation_novelty_rate": (
+                len(set(normalized_observations)) / len(normalized_observations)
+                if normalized_observations
+                else None
+            ),
+            "grounded_entity_growth_rate": (
+                grounded_entity_growth_events / len(salient_entity_history)
+                if salient_entity_history
+                else None
+            ),
+            "unique_grounded_entities": len(unique_grounded_entities),
+            "burst_count": len(self._burst_history),
+            "mean_burst_length": (
+                sum(burst_lengths) / len(burst_lengths) if burst_lengths else None
+            ),
+            "burst_length_histogram": dict(sorted(burst_length_histogram.items())),
+            "burst_stop_reasons": dict(sorted(burst_stop_reasons.items())),
+            "option_count": len(self._option_history),
+            "mean_option_length": (
+                sum(option_lengths) / len(option_lengths) if option_lengths else None
+            ),
+            "mean_option_progress_debt": (
+                sum(option_progress_debts) / len(option_progress_debts)
+                if option_progress_debts
+                else None
+            ),
+            "mean_option_revisitation_count": (
+                sum(option_revisitation_counts) / len(option_revisitation_counts)
+                if option_revisitation_counts
+                else None
+            ),
+            "mean_option_family_value": (
+                sum(option_family_values) / len(option_family_values)
+                if option_family_values
+                else None
+            ),
+            "option_stop_reasons": dict(sorted(option_stop_reasons.items())),
+            "option_interrupt_count": len(
+                [
+                    entry
+                    for entry in self._option_interrupt_history
+                    if entry.get("should_interrupt")
+                ]
+            ),
+            "option_interrupt_reasons": dict(sorted(option_interrupt_reasons.items())),
+        }
+
     def _refresh_action_agent_runtime_context(
         self, *, summary: dict | None = None
     ) -> None:
@@ -12141,6 +12892,92 @@ class GWTAutogenAgent(AutogenAgent):
 
         return "BELIEF STATE: [" + " ".join(parts) + "]"
 
+    def _should_route_to_thinking_agent(self, belief_content: str) -> bool:
+        decision = evaluate_deliberation_policy(
+            state=self._build_decision_state(),
+            belief_content=belief_content,
+            uncertainty_pattern=self._UNCERTAINTY_RE,
+            forced_interval=self._FORCED_DELIBERATION_INTERVAL,
+        )
+        self._last_deliberation_decision = {
+            "should_deliberate": decision.should_deliberate,
+            "reason": decision.reason,
+            "signal_flags": decision.signal_flags,
+        }
+        return decision.should_deliberate
+
+    def _get_sequence_interrupt_decision(
+        self,
+        *,
+        previous_state: DecisionState,
+        action_family: str,
+        previous_observation: str,
+        current_observation: str,
+    ) -> dict[str, object]:
+        current_state = self._build_decision_state()
+        observation_changed = self._observation_changed_significantly(
+            previous_observation, current_observation
+        )
+        projected_stagnation_steps = self._current_option_stagnation_steps + 1
+        step_features = self._compute_option_step_features(
+            previous_state=previous_state,
+            current_state=current_state,
+            action_family=action_family,
+            previous_observation=previous_observation,
+            observation_changed=observation_changed,
+            current_observation=current_observation,
+        )
+        decision = evaluate_sequence_interrupt_policy(
+            previous_state=previous_state,
+            current_state=current_state,
+            action_family=action_family,
+            observation_changed=observation_changed,
+            projected_stagnation_steps=projected_stagnation_steps,
+            observation_novelty_gain=bool(
+                step_features.get("observation_novelty_gain")
+            ),
+            local_revisitation=bool(step_features.get("local_revisitation")),
+            projected_progress_debt=int(
+                step_features.get("projected_progress_debt", 0) or 0
+            ),
+            family_outcome_hit=bool(step_features.get("family_outcome_hit")),
+            projected_family_value=int(
+                step_features.get("projected_family_value", 0) or 0
+            ),
+        )
+        if self._current_option_contract is not None:
+            self._current_option_stagnation_steps = (
+                0
+                if decision.signal_flags.get("expected_progress_hit")
+                else projected_stagnation_steps
+            )
+            self._current_option_contract["stagnation_steps"] = (
+                self._current_option_stagnation_steps
+            )
+            self._update_current_option_progress(
+                current_state=current_state,
+                step_features=step_features,
+                signal_flags=decision.signal_flags,
+            )
+        self._last_option_interrupt_decision = {
+            "should_interrupt": decision.should_interrupt,
+            "reason": decision.reason,
+            "signal_flags": decision.signal_flags,
+        }
+        option_entry = {
+            "option_id": (
+                self._current_option_contract.get("option_id")
+                if self._current_option_contract
+                else None
+            ),
+            "step": current_state.progress_state.option_step,
+            "should_interrupt": decision.should_interrupt,
+            "reason": decision.reason,
+            "signal_flags": decision.signal_flags,
+        }
+        self._option_interrupt_history.append(option_entry)
+        return self._last_option_interrupt_decision
+
     def _is_valid_thinking_output(self, content: str) -> bool:
         normalized = (content or "").lstrip().upper()
         if not normalized:
@@ -12148,6 +12985,42 @@ class GWTAutogenAgent(AutogenAgent):
         if normalized.startswith("[OBSERVATION]:") or normalized.startswith("ACTION:"):
             return False
         return normalized.startswith(self._THINKING_PREFIXES)
+
+    def _should_take_lightweight_option_update(self) -> bool:
+        decision = self._last_option_interrupt_decision or {}
+        if not decision.get("should_interrupt"):
+            return False
+
+        reason = str(decision.get("reason") or "")
+        if reason not in {
+            "task_relevant_affordance_changed",
+            "interaction_opportunity_changed",
+            "action_surface_changed",
+        }:
+            return False
+
+        signal_flags = decision.get("signal_flags") or {}
+        if signal_flags.get("goal_progress_changed"):
+            return False
+        if signal_flags.get("grounding_changed"):
+            return False
+        if signal_flags.get("expected_progress_missing"):
+            return False
+        if signal_flags.get("progress_debt_exceeded"):
+            return False
+        if signal_flags.get("family_value_negative"):
+            return False
+
+        current_option = self._current_option_contract or {}
+        progress_debt = int(current_option.get("progress_debt", 0) or 0)
+        progress_debt_limit = int(current_option.get("progress_debt_limit", 0) or 0)
+        if progress_debt_limit > 0 and progress_debt >= progress_debt_limit:
+            return False
+        family_value = int(current_option.get("family_value", 0) or 0)
+        if family_value <= -2:
+            return False
+
+        return True
 
     def _synthesize_thinking_fallback(self, malformed_content: str) -> str:
         candidate_tracking = self._get_candidate_tracking_snapshot()
@@ -12305,6 +13178,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._consecutive_thinking_count = 0
         self._actions_since_last_thinking = 0
         self._last_burst_size = 1
+        self._burst_history = []
         if hasattr(self, "_task_done_msg_count"):
             del self._task_done_msg_count
         # Reset echo agent relay state so stale_count from the previous game
@@ -12351,6 +13225,9 @@ class GWTAutogenAgent(AutogenAgent):
 
     def update_percept(self, action, executed: bool = True):
         previous_observation = (self.percept or {}).get("resulting_observation", "")
+        previous_shortlist = list(
+            self.percept.get("task_relevant_action_shortlist", [])
+        )
         curr_admissible = self.adapter.admissible_actions
         no_longer = sorted(set(self.admissible_actions) - set(curr_admissible))
         newly_added = sorted(set(curr_admissible) - set(self.admissible_actions))
@@ -12474,6 +13351,10 @@ class GWTAutogenAgent(AutogenAgent):
         self.percept["task_relevant_action_shortlist"] = shared_action_context[
             "task_relevant_action_shortlist"
         ]
+        if newly_added:
+            self.percept["newly_admissible_actions"] = newly_added[:8]
+        if no_longer:
+            self.percept["no_longer_admissible_actions"] = no_longer[:8]
         ordered_progress = self._get_ordered_target_snapshot()
         if self._snapshot_has_signal(ordered_progress):
             self.percept["ordered_target_progress"] = ordered_progress
@@ -12496,6 +13377,14 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
             if not newly_added and not no_longer:
                 self.percept["admissible_actions_unchanged"] = True
+        self._previous_interaction_opportunity_count = (
+            self._count_interaction_opportunities(previous_shortlist)
+        )
+        self._current_interaction_opportunity_count = (
+            self._count_interaction_opportunities(
+                shared_action_context["task_relevant_action_shortlist"]
+            )
+        )
         self._persist_analyst_trace(summary=shared_action_context)
         self._refresh_action_agent_runtime_context(summary=action_runtime_summary)
 
@@ -12547,6 +13436,10 @@ class GWTAutogenAgent(AutogenAgent):
         self.reasoner_config = {
             "config_list": list(reversed(self.llm_config_list)),
             "temperature": 1.0,  # Reasoners need higher temp for R1/o1
+        }
+        self.cool_reasoner_config = {
+            "config_list": list(reversed(self.llm_config_list)),
+            "temperature": 0.0,  # Reasoners need higher temp for R1/o1
         }
 
         self.echo_agent = create_echo_agent()
@@ -13048,6 +13941,9 @@ class GWTAutogenAgent(AutogenAgent):
             # speaker selector doesn't self-loop based on a previous burst.
             self._pending_sequence = []
             self._last_burst_stop_reason = ""
+            self._last_option_interrupt_decision = None
+            self._current_option_contract = None
+            self._current_option_stagnation_steps = 0
 
             if self.task_failed:
                 self.max_actions += self.max_round_actions
@@ -13110,6 +14006,23 @@ class GWTAutogenAgent(AutogenAgent):
                 suggested_action=suggested_action,
                 previous_observation=previous_observation,
             )
+            self._record_burst_history(
+                planned_actions=1,
+                actions_executed=1 if executed_action is not None else 0,
+                stop_reason=(
+                    "task_completed"
+                    if self.task_status == "COMPLETED"
+                    else (
+                        "task_failed"
+                        if self.task_status == "FAILED"
+                        else (
+                            "single_action"
+                            if executed_action is not None
+                            else "action_failed"
+                        )
+                    )
+                ),
+            )
 
             return json.dumps(self._get_agent_facing_percept_snapshot()) + reflection
 
@@ -13159,6 +14072,15 @@ class GWTAutogenAgent(AutogenAgent):
             burst_log: list[dict[str, str]] = []
             remaining_actions: list[str] | None = None
             stop_reason = "sequence_complete"
+            self._last_option_interrupt_decision = None
+            current_phase = (
+                self.percept.get("admissible_action_summary", {}).get("current_phase")
+                or self._get_current_phase()
+            )
+            self._start_option_contract(
+                action_list=action_list,
+                current_phase=current_phase,
+            )
             # Inject ONE navigation step at a time toward the stair tile.
             # Re-checked each iteration so the agent stops exactly on the tile
             # without overshooting it (3 injected steps caused the agent to
@@ -13234,6 +14156,7 @@ class GWTAutogenAgent(AutogenAgent):
                 self._empty_admissible_streak = 0
 
                 previous_observation = self.percept.get("resulting_observation", "")
+                previous_state = self._build_decision_state()
                 canonical_suggested_action = self._canonicalize_suggested_action(
                     suggested_action, admissible_commands
                 )
@@ -13270,6 +14193,11 @@ class GWTAutogenAgent(AutogenAgent):
                     suggested_action=suggested_action,
                     previous_observation=previous_observation,
                 )
+                if self._current_option_contract is not None:
+                    self._current_option_contract["steps_taken"] = (
+                        int(self._current_option_contract.get("steps_taken", 0) or 0)
+                        + 1
+                    )
 
                 burst_log.append(
                     {
@@ -13297,13 +14225,15 @@ class GWTAutogenAgent(AutogenAgent):
                     stop_reason = "action_failed"
                     break
 
-                # Observation change check — relocation actions always change the
-                # map view so we exempt them; other families stop for deliberation.
-                if family != "relocation" and self._observation_changed_significantly(
-                    previous_observation, self.adapter.observation
-                ):
+                interrupt_decision = self._get_sequence_interrupt_decision(
+                    previous_state=previous_state,
+                    action_family=family,
+                    previous_observation=previous_observation,
+                    current_observation=self.adapter.observation,
+                )
+                if interrupt_decision["should_interrupt"]:
                     remaining_actions = action_list[i + 1 :] or None
-                    stop_reason = "observation_changed"
+                    stop_reason = str(interrupt_decision["reason"])
                     break
 
                 i += 1
@@ -13317,6 +14247,15 @@ class GWTAutogenAgent(AutogenAgent):
             self._pending_sequence = (
                 list(remaining_actions) if remaining_actions else []
             )
+            self._record_burst_history(
+                planned_actions=len(action_list),
+                actions_executed=len(burst_log),
+                stop_reason=stop_reason,
+            )
+            if self._should_take_lightweight_option_update():
+                self._pause_option_contract(stop_reason=stop_reason)
+            else:
+                self._finalize_option_contract(stop_reason=stop_reason)
 
             result = {
                 "burst_log": burst_log,
@@ -13688,6 +14627,7 @@ class GWTAutogenAgent(AutogenAgent):
         # That guard fires first in a full stall; this counter covers the separate
         # (unlikely) case where execute_action IS called but num_actions_taken stalls.
         _MAX_ACTION_SELFLOOPS = 11
+        _MAX_LIGHTWEIGHT_OPTION_UPDATES = 4
 
         if last_speaker is self.echo_agent:
             if self.num_actions_taken == self._last_seen_actions_taken:
@@ -13723,8 +14663,34 @@ class GWTAutogenAgent(AutogenAgent):
                 and self._consecutive_action_selfloops < _MAX_ACTION_SELFLOOPS
             ):
                 self._consecutive_action_selfloops += 1
+                self._consecutive_lightweight_option_updates = 0
                 return self.action_agent
             self._consecutive_action_selfloops = 0
+            if (
+                not self.task_success
+                and not self.task_failed
+                and self._stale_action_count == 0
+                and self._should_take_lightweight_option_update()
+                and self._consecutive_lightweight_option_updates
+                < _MAX_LIGHTWEIGHT_OPTION_UPDATES
+            ):
+                self._consecutive_lightweight_option_updates += 1
+                self._last_deliberation_decision = {
+                    "should_deliberate": False,
+                    "reason": "lightweight_option_update",
+                    "signal_flags": (
+                        self._last_option_interrupt_decision.get("signal_flags") or {}
+                    ),
+                }
+                return self.action_agent
+            self._consecutive_lightweight_option_updates = 0
+            if (
+                self._current_option_contract
+                and self._current_option_contract.get("status") == "paused"
+            ):
+                self._finalize_option_contract(
+                    stop_reason=self._last_burst_stop_reason or "interrupted"
+                )
             # Normal path: belief update required.
             return self.belief_state_agent
 
@@ -13762,18 +14728,7 @@ class GWTAutogenAgent(AutogenAgent):
                 self._last_belief_content = ""
                 self._consecutive_thinking_count = 0
 
-            # Determine whether deliberation is warranted: either by
-            # uncertainty signals or by exceeding the forced-deliberation
-            # interval without any Thinking_Agent invocation.
-            has_uncertainty = (
-                self._UNCERTAINTY_RE.search(current_content.lower())
-                or "no observation" in current_content.lower()
-            )
-            needs_forced_deliberation = (
-                self._actions_since_last_thinking >= self._FORCED_DELIBERATION_INTERVAL
-            )
-
-            if has_uncertainty or needs_forced_deliberation:
+            if self._should_route_to_thinking_agent(current_content):
                 if (
                     current_content == self._last_belief_content
                     and self._consecutive_thinking_count >= 1
@@ -13781,13 +14736,21 @@ class GWTAutogenAgent(AutogenAgent):
                     # Identical belief state fired again — skip Thinking_Agent
                     self._consecutive_thinking_count = 0
                     self._last_belief_content = ""
+                    self._consecutive_lightweight_option_updates = 0
                     return self.action_agent
                 self._last_belief_content = current_content
                 self._consecutive_thinking_count += 1
+                self._consecutive_lightweight_option_updates = 0
                 self._actions_since_last_thinking = 0
                 return self.thinking_agent
+            self._last_deliberation_decision = {
+                "should_deliberate": False,
+                "reason": "stable_progress",
+                "signal_flags": {},
+            }
             self._last_belief_content = ""
             self._consecutive_thinking_count = 0
+            self._consecutive_lightweight_option_updates = 0
             return self.action_agent
 
         if (
@@ -13798,6 +14761,7 @@ class GWTAutogenAgent(AutogenAgent):
             last_msg["content"] = self._synthesize_thinking_fallback(
                 last_msg.get("content") or ""
             )
+            self._consecutive_lightweight_option_updates = 0
             return self.action_agent
 
         # Safety valve: if the task is done and the conversation is still

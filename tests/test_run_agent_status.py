@@ -371,6 +371,29 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
                 infer_task_type=lambda: 4,
                 count_inadmissible_actions=lambda _path: 1,
             ),
+            get_architecture_metrics=lambda: {
+                "version": 4,
+                "thinking_count": 2,
+                "belief_update_count": 1,
+                "deliberation_count": 3,
+                "repeated_action_density": 0.25,
+                "repeated_state_density": 0.5,
+                "observation_novelty_rate": 0.5,
+                "grounded_entity_growth_rate": 1.5,
+                "unique_grounded_entities": 4,
+                "burst_count": 2,
+                "mean_burst_length": 1.0,
+                "burst_length_histogram": {"1": 2},
+                "burst_stop_reasons": {"single_action": 2},
+                "option_count": 2,
+                "mean_option_length": 1.0,
+                "mean_option_progress_debt": 1.5,
+                "mean_option_revisitation_count": 0.5,
+                "mean_option_family_value": 0.5,
+                "option_stop_reasons": {"single_action": 2},
+                "option_interrupt_count": 1,
+                "option_interrupt_reasons": {"expected_progress_missing": 1},
+            },
         )
 
         totals = run_agent.persist_interrupted_episode_run(
@@ -407,6 +430,33 @@ def test_persist_interrupted_episode_run_saves_episode_and_chat_key(
             "[I see water in the sink.]"
         ]
         assert "T1 | locate_substance | INCOMPLETE" in persisted_episode.analyst_trace
+        assert persisted_episode.architecture_metrics["deliberation_count"] == 3
+        assert persisted_episode.architecture_metrics["tokens_per_action"] == 0.0
+        persisted_experiment = db.get(ExperimentRun, experiment.id)
+        assert persisted_experiment is not None
+        assert persisted_experiment.architecture_metrics["version"] == 4
+        assert persisted_experiment.architecture_metrics["episode_count"] == 1
+        assert persisted_experiment.architecture_metrics["deliberation_count"] == 3
+        assert (
+            persisted_experiment.architecture_metrics["burst_stop_reasons"][
+                "single_action"
+            ]
+            == 2
+        )
+        assert persisted_experiment.architecture_metrics["option_count"] == 2
+        assert (
+            persisted_experiment.architecture_metrics["option_interrupt_reasons"][
+                "expected_progress_missing"
+            ]
+            == 1
+        )
+        assert (
+            persisted_experiment.architecture_metrics["mean_option_progress_debt"]
+            == 1.5
+        )
+        assert (
+            persisted_experiment.architecture_metrics["mean_option_family_value"] == 0.5
+        )
         assert (
             fake_s3.calls[0]["Key"]
             == f"experiments/run_{experiment.id}/game_2_chat.txt"
@@ -521,6 +571,8 @@ def test_persist_interrupted_episode_run_tolerates_dead_adapter_task_inference(
         )
         assert persisted_episode.task_type is None
         assert persisted_episode.chat_rounds == 1
+        assert persisted_episode.architecture_metrics["belief_update_count"] == 1
+        assert persisted_episode.architecture_metrics["thinking_count"] == 0
         assert (
             "T2 | inspect_target_mechanism | INCOMPLETE"
             in persisted_episode.analyst_trace
