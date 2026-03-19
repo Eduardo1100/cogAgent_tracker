@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.agent.v2.types import OperatorCandidate, OptionContract, WorldModelSnapshot
+from src.agent.v2.types import (
+    OperatorCandidate,
+    OptionContract,
+    RepairDirective,
+    WorldModelSnapshot,
+)
 
 
 def _score_operator(
@@ -56,6 +61,8 @@ def _score_operator(
             score += 16
         elif candidate.family == "relocation":
             score += 12
+        if candidate.action_label == "wait":
+            score -= 18
     if option.target_signature:
         if candidate.action_label == option.target_signature:
             score += 25
@@ -82,6 +89,110 @@ class ExecutionStep:
 
 @dataclass(frozen=True)
 class DeterministicExecutor:
+    def select_repair_step(
+        self,
+        snapshot: WorldModelSnapshot,
+        option: OptionContract,
+        repair_directive: RepairDirective,
+        *,
+        failed_actions: set[str] | None = None,
+        executed_actions: list[str] | None = None,
+    ) -> ExecutionStep:
+        failed = failed_actions or set()
+        executed = executed_actions or []
+        invalidated = set(repair_directive.invalidated_actions)
+
+        def _score_repair_candidate(
+            candidate: OperatorCandidate,
+        ) -> tuple[int, int, str]:
+            if candidate.action_label in failed:
+                return (-1000, 0, candidate.action_label)
+            if candidate.action_label in invalidated:
+                return (-900, 0, candidate.action_label)
+
+            score = 0
+            operator = repair_directive.operator
+            preferred = set(repair_directive.preferred_families)
+
+            if candidate.family in preferred:
+                score += 18
+
+            if operator == "repair_topology":
+                if candidate.action_label in {"search", "look"}:
+                    score += 30
+                elif candidate.family == "inspect":
+                    score += 22
+                elif candidate.family == "relocation":
+                    score += 10
+            elif operator == "repair_transition_model":
+                if candidate.action_label in {"search", "look"}:
+                    score += 24
+                elif candidate.family == "interaction":
+                    score += 18
+                elif candidate.family == "inspect":
+                    score += 16
+            elif operator == "repair_target_binding":
+                if candidate.family == "ui_navigation":
+                    score += 30
+                elif candidate.family == "inspect":
+                    score += 24
+                elif candidate.family == "ui_select":
+                    score += 22
+                elif candidate.family.startswith("ui_"):
+                    score += 20
+            elif operator == "repair_operator_set":
+                if candidate.family == "inspect":
+                    score += 20
+                elif candidate.family == "ui_navigation":
+                    score += 18
+                elif candidate.family == "interaction":
+                    score += 16
+
+            blocked_actions = {
+                str(action)
+                for action in snapshot.metadata.get("blocked_action_labels", [])
+                if action
+            }
+            contradiction_actions = {
+                str(action)
+                for action in snapshot.metadata.get("recent_contradiction_actions", [])
+                if action
+            }
+            if candidate.action_label in blocked_actions:
+                score -= 120
+            if candidate.action_label in contradiction_actions:
+                score -= 80
+            if candidate.action_label == "wait":
+                score -= 25
+
+            recency_penalty = 5 if candidate.action_label in executed[-3:] else 0
+            score -= recency_penalty
+            return (score, -recency_penalty, candidate.action_label)
+
+        ranked = sorted(
+            snapshot.operator_candidates,
+            key=_score_repair_candidate,
+            reverse=True,
+        )
+        chosen = (
+            ranked[0]
+            if ranked and _score_repair_candidate(ranked[0])[0] > -1000
+            else None
+        )
+        if chosen is None:
+            return ExecutionStep(
+                option=option,
+                operator=None,
+                action_label=None,
+                stop_reason="no_repair_operator_available",
+            )
+        return ExecutionStep(
+            option=option,
+            operator=chosen,
+            action_label=chosen.action_label,
+            stop_reason="repair_operator_selected",
+        )
+
     def select_next_step(
         self,
         snapshot: WorldModelSnapshot,

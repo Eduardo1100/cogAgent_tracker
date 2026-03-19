@@ -615,13 +615,14 @@ def test_get_architecture_metrics_reports_option_interrupts(tmp_path):
 
     metrics = agent.get_architecture_metrics()
 
-    assert metrics["version"] == 8
+    assert metrics["version"] == 9
     assert metrics["option_count"] == 1
     assert metrics["option_interrupt_count"] == 1
     assert metrics["option_stop_reasons"] == {"expected_progress_missing": 1}
     assert metrics["option_interrupt_reasons"] == {"expected_progress_missing": 1}
     assert metrics["v2_bridge_update_count"] == 0
     assert metrics["v2_revision_required_count"] == 0
+    assert metrics["v2_revision_action_count"] == 0
     assert metrics["v2_direct_action_count"] == 0
     assert metrics["terminal_status_reason"] is None
 
@@ -6294,6 +6295,28 @@ def test_get_v2_direct_execution_action_returns_grounded_low_uncertainty_move(tm
     assert chosen == "move northwest"
 
 
+def test_get_v2_direct_execution_action_rejects_ambiguous_binding_during_repair_cycle(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task_status = "INCOMPLETE"
+    agent._v2_runtime_advisory = {
+        "option_family": "explore_frontier",
+        "suggested_action": "move west",
+        "planner_stop_reason": "frontier_available",
+        "uncertainty_count": 0,
+        "contradiction_debt": 2,
+        "repair_cycle_active": True,
+    }
+
+    chosen = agent._get_v2_direct_execution_action(
+        admissible_commands=["move northwest", "search"],
+        requested_action="move south",
+    )
+
+    assert chosen is None
+
+
 def test_get_v2_direct_execution_action_skips_when_uncertain(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="nethack")
     agent.task_status = "INCOMPLETE"
@@ -6330,3 +6353,92 @@ def test_get_v2_direct_execution_action_skips_when_revision_required(tmp_path):
     )
 
     assert chosen is None
+
+
+def test_get_v2_revision_execution_action_returns_recovery_action(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task_status = "INCOMPLETE"
+    agent._v2_runtime_advisory = {
+        "option_family": "recover_from_failure",
+        "suggested_action": "search",
+        "planner_stop_reason": "local_repair_selected",
+        "repair_pending": True,
+        "escalation_required": False,
+        "revision_required": True,
+        "revision_reason": "repeated_contradiction",
+        "repair_operator": "repair_topology",
+    }
+
+    chosen = agent._get_v2_revision_execution_action(
+        admissible_commands=["move northwest", "search"],
+    )
+
+    assert chosen == "search"
+
+
+def test_custom_speaker_selection_routes_revision_to_action_agent_when_repair_exists(
+    tmp_path,
+):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.echo_agent = object()
+    agent.action_agent = object()
+    agent.belief_state_agent = object()
+    agent.adapter = SimpleNamespace(admissible_actions=["search", "move east"])
+    agent.task_success = False
+    agent.task_failed = False
+    agent._reset_episode_reasoning_state()
+    agent._last_seen_actions_taken = 0
+    agent.num_actions_taken = 1
+    agent._last_burst_size = 1
+    agent._last_burst_stop_reason = "v2_revision_execution"
+    agent._v2_runtime_advisory = {
+        "revision_required": True,
+        "revision_reason": "repeated_contradiction",
+        "option_family": "recover_from_failure",
+        "planner_stop_reason": "local_repair_selected",
+        "repair_pending": True,
+        "escalation_required": False,
+        "suggested_action": "search",
+        "repair_operator": "repair_topology",
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"burst_stopped_reason": "..."}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.echo_agent, groupchat)
+
+    assert next_speaker is agent.action_agent
+
+
+def test_custom_speaker_selection_routes_escalation_to_belief_state(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.echo_agent = object()
+    agent.action_agent = object()
+    agent.belief_state_agent = object()
+    agent.adapter = SimpleNamespace(admissible_actions=["search", "move east"])
+    agent.task_success = False
+    agent.task_failed = False
+    agent._reset_episode_reasoning_state()
+    agent._last_seen_actions_taken = 0
+    agent.num_actions_taken = 1
+    agent._last_burst_size = 1
+    agent._last_burst_stop_reason = "v2_revision_required"
+    agent._v2_runtime_advisory = {
+        "revision_required": True,
+        "revision_reason": "repair_budget_exhausted",
+        "repair_pending": False,
+        "escalation_required": True,
+        "option_family": "recover_from_failure",
+        "planner_stop_reason": "semantic_escalation_required",
+        "suggested_action": None,
+        "repair_operator": "repair_topology",
+    }
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"burst_stopped_reason": "..."}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.echo_agent, groupchat)
+
+    assert next_speaker is agent.belief_state_agent

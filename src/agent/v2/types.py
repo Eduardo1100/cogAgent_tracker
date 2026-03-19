@@ -6,6 +6,12 @@ from typing import Any, Literal
 ObservationMode = Literal["text", "grid", "ui", "hybrid"]
 TopologyType = Literal["grid", "graph", "ui", "mixed"]
 ReasoningTier = Literal["none", "light", "full"]
+RepairOperator = Literal[
+    "repair_topology",
+    "repair_transition_model",
+    "repair_target_binding",
+    "repair_operator_set",
+]
 OutcomeType = Literal[
     "progress",
     "blocked",
@@ -154,6 +160,16 @@ class ContradictionRecord(_CompactSerializable):
 
 
 @dataclass(frozen=True)
+class RepairDirective(_CompactSerializable):
+    operator: RepairOperator
+    rationale: str
+    preferred_families: list[str] = field(default_factory=list)
+    invalidated_actions: list[str] = field(default_factory=list)
+    target_signature: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AdapterEvent(_CompactSerializable):
     step_index: int
     task_text: str
@@ -227,6 +243,7 @@ class WorldModelSnapshot(_CompactSerializable):
     action_outcomes: list[ActionOutcomeRecord] = field(default_factory=list)
     contradictions: list[ContradictionRecord] = field(default_factory=list)
     revision_required: bool = False
+    repair_directive: RepairDirective | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

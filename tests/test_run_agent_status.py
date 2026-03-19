@@ -69,6 +69,7 @@ def _install_run_agent_stubs() -> None:
     env_adapter_module.ScienceWorldAdapter = type("ScienceWorldAdapter", (), {})
     env_adapter_module.TalesAdapter = type("TalesAdapter", (), {})
     env_adapter_module.NetHackAdapter = type("NetHackAdapter", (), {})
+    env_adapter_module.WebArenaAdapter = type("WebArenaAdapter", (), {})
     env_adapter_module.infer_task_type = lambda task: None
     sys.modules["src.agent.env_adapter"] = env_adapter_module
 
@@ -197,6 +198,30 @@ def test_signal_handler_marks_active_experiment_cancelled(tmp_db):
         assert persisted.current_game_number is None
         assert persisted.current_game_label is None
         assert persisted.end_time is not None
+
+
+def test_parse_arguments_accepts_webarena_env(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_agent.py",
+            "src/agent/configs/webarena.yaml",
+            "--gwt",
+            "--env-type",
+            "webarena",
+            "--webarena-task-ids",
+            "17",
+            "42",
+        ],
+    )
+
+    args = run_agent.parse_arguments()
+
+    assert args.env_type == "webarena"
+    assert args.webarena_task_ids == [17, 42]
 
 
 def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
@@ -689,17 +714,19 @@ def test_aggregate_architecture_metrics_counts_terminal_status_reasons():
     aggregated = run_agent.aggregate_architecture_metrics(
         [
             {
-                "version": 8,
+                "version": 9,
                 "terminal_status_reason": "budget_exhausted",
                 "v2_revision_required_count": 1,
+                "v2_revision_action_count": 2,
             },
-            {"version": 8, "terminal_status_reason": "success"},
-            {"version": 8, "terminal_status_reason": "budget_exhausted"},
+            {"version": 9, "terminal_status_reason": "success"},
+            {"version": 9, "terminal_status_reason": "budget_exhausted"},
         ]
     )
 
-    assert aggregated["version"] == 8
+    assert aggregated["version"] == 9
     assert aggregated["v2_revision_required_count"] == 1
+    assert aggregated["v2_revision_action_count"] == 2
     assert aggregated["terminal_status_reasons"] == {
         "budget_exhausted": 2,
         "success": 1,

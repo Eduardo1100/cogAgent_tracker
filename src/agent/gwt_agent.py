@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import io
 import json
@@ -1395,6 +1397,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._v2_bridge_update_count = 0
         self._v2_bridge_error_count = 0
         self._v2_revision_required_count = 0
+        self._v2_revision_action_count = 0
         self._v2_direct_action_count = 0
         self._reset_episode_reasoning_state()
 
@@ -1429,6 +1432,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._v2_bridge_update_count = 0
         self._v2_bridge_error_count = 0
         self._v2_revision_required_count = 0
+        self._v2_revision_action_count = 0
         self._v2_direct_action_count = 0
         self.episode_hypothesis_ledger: dict[str, dict] = {}
         self.recent_hypothesis_tests: list[dict] = []
@@ -1617,9 +1621,11 @@ class GWTAutogenAgent(AutogenAgent):
         if direct_family not in self._LOW_RISK_FAMILIES:
             return None
 
+        strict_binding = self._should_require_strict_action_binding(advisory)
         resolved_action = self._canonicalize_suggested_action(
             suggested_action,
             admissible_commands,
+            require_unambiguous=strict_binding,
         )
         if self._normalize_runtime_text(resolved_action) not in {
             self._normalize_runtime_text(command) for command in admissible_commands
@@ -1631,6 +1637,49 @@ class GWTAutogenAgent(AutogenAgent):
         if requested_norm and requested_norm == resolved_norm:
             return resolved_action
 
+        return resolved_action
+
+    def _get_v2_revision_execution_action(
+        self,
+        *,
+        admissible_commands: list[str],
+    ) -> str | None:
+        advisory = self._get_v2_runtime_advisory_snapshot()
+        if not advisory:
+            return None
+        if not advisory.get("revision_required"):
+            return None
+        if advisory.get("escalation_required"):
+            return None
+        if not advisory.get("repair_pending", True):
+            return None
+        if str(advisory.get("option_family") or "") != "recover_from_failure":
+            return None
+        if str(advisory.get("planner_stop_reason") or "") not in {
+            "revise_before_act",
+            "local_repair_selected",
+        }:
+            return None
+
+        suggested_action = str(advisory.get("suggested_action") or "").strip()
+        if not suggested_action:
+            return None
+
+        suggested_family = self._classify_action_family(suggested_action)
+        if suggested_family not in {"inspect", "interaction", "relocation"}:
+            return None
+        if suggested_family not in self._LOW_RISK_FAMILIES:
+            return None
+
+        resolved_action = self._canonicalize_suggested_action(
+            suggested_action,
+            admissible_commands,
+            require_unambiguous=True,
+        )
+        if self._normalize_runtime_text(resolved_action) not in {
+            self._normalize_runtime_text(command) for command in admissible_commands
+        }:
+            return None
         return resolved_action
 
     def _build_task_contract(self, task: str) -> dict:
@@ -2081,7 +2130,7 @@ class GWTAutogenAgent(AutogenAgent):
             self._task_contract_source = task
         return self._task_contract
 
-    def _get_target_entity_embeddings(self) -> "tuple[list[str], np.ndarray | None]":
+    def _get_target_entity_embeddings(self) -> tuple[list[str], np.ndarray | None]:
         contract = self._get_task_contract()
         entities = contract.get("target_entities", [])
         if not entities:
@@ -6914,7 +6963,7 @@ class GWTAutogenAgent(AutogenAgent):
             referent_tokens = self._extract_action_content_tokens(action, family=family)
         return " ".join(referent_tokens[:6])
 
-    def _record_referent_resolution(
+    def _get_referent_resolution_payload(
         self, *, suggested_action: str, canonical_action: str
     ) -> dict | None:
         suggested_family = self._classify_action_family(suggested_action)
@@ -6934,12 +6983,21 @@ class GWTAutogenAgent(AutogenAgent):
             or requested_target == resolved_target
         ):
             return None
-
-        resolution = {
+        return {
             "status": "ambiguous",
             "requested_target": requested_target,
             "resolved_target": resolved_target,
         }
+
+    def _record_referent_resolution(
+        self, *, suggested_action: str, canonical_action: str
+    ) -> dict | None:
+        resolution = self._get_referent_resolution_payload(
+            suggested_action=suggested_action,
+            canonical_action=canonical_action,
+        )
+        if resolution is None:
+            return None
         if resolution not in self._referent_resolution_events:
             self._referent_resolution_events.append(resolution)
             self._referent_resolution_events = self._referent_resolution_events[-4:]
@@ -7698,8 +7756,50 @@ class GWTAutogenAgent(AutogenAgent):
             return False
         return len(diff) / union_size > 0.3
 
+    def _should_require_strict_action_binding(
+        self, advisory: dict | None = None
+    ) -> bool:
+        advisory = advisory or self._get_v2_runtime_advisory_snapshot()
+        if not advisory:
+            return False
+        return bool(
+            advisory.get("revision_required")
+            or advisory.get("repair_cycle_active")
+            or int(advisory.get("contradiction_debt") or 0) > 0
+        )
+
+    def _resolve_runtime_action_binding(
+        self,
+        suggested_action: str,
+        admissible_commands: list[str],
+        *,
+        strict_binding: bool = False,
+    ) -> tuple[str | None, str, float]:
+        canonical_suggested_action = self._canonicalize_suggested_action(
+            suggested_action,
+            admissible_commands,
+            require_unambiguous=strict_binding,
+        )
+        exact_matches = {
+            self._normalize_runtime_text(command): command
+            for command in admissible_commands
+        }
+        canonical_norm = self._normalize_runtime_text(canonical_suggested_action)
+        if canonical_norm in exact_matches:
+            return exact_matches[canonical_norm], canonical_suggested_action, 1.0
+        if strict_binding:
+            return None, canonical_suggested_action, 0.0
+        action, action_score = get_best_candidate(
+            canonical_suggested_action, admissible_commands
+        )
+        return action, canonical_suggested_action, action_score
+
     def _canonicalize_suggested_action(
-        self, suggested_action: str, admissible_commands: list[str]
+        self,
+        suggested_action: str,
+        admissible_commands: list[str],
+        *,
+        require_unambiguous: bool = False,
     ) -> str:
         normalized = self._normalize_runtime_text(suggested_action)
         exact_matches = {
@@ -7767,6 +7867,8 @@ class GWTAutogenAgent(AutogenAgent):
             if unsupported_substance_fallback is not None:
                 return unsupported_substance_fallback
             return suggested_action
+        if require_unambiguous and family == "relocation":
+            return suggested_action
         if len(candidates) > 1 and best_score - candidates[1][0] < 4:
             room_transition_fallback = self._canonicalize_room_transition_action(
                 suggested_action, admissible_commands
@@ -7780,6 +7882,11 @@ class GWTAutogenAgent(AutogenAgent):
             )
             if unsupported_substance_fallback is not None:
                 return unsupported_substance_fallback
+            return suggested_action
+        if require_unambiguous and self._get_referent_resolution_payload(
+            suggested_action=suggested_action,
+            canonical_action=best_command,
+        ):
             return suggested_action
         return best_command
 
@@ -11814,8 +11921,23 @@ class GWTAutogenAgent(AutogenAgent):
                     "entity_count": len(snapshot.entities),
                     "frontier_count": len(frontier_nodes),
                     "uncertainty_count": len(snapshot.uncertainty),
+                    "repair_operator": (
+                        snapshot.repair_directive.operator
+                        if snapshot.repair_directive is not None
+                        else None
+                    ),
                     "contradiction_debt": snapshot.metadata.get(
                         "contradiction_debt", 0
+                    ),
+                    "repair_cycle_active": snapshot.metadata.get(
+                        "repair_cycle_active", False
+                    ),
+                    "repair_pending": snapshot.metadata.get("repair_pending", False),
+                    "escalation_required": snapshot.metadata.get(
+                        "escalation_required", False
+                    ),
+                    "repair_attempt_count": snapshot.metadata.get(
+                        "repair_attempt_count", 0
                     ),
                     "revision_required": snapshot.revision_required,
                     "revision_reason": snapshot.metadata.get("revision_reason"),
@@ -13138,7 +13260,7 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         return {
-            "version": 8,
+            "version": 9,
             "thinking_count": thinking_count,
             "belief_update_count": belief_update_count,
             "deliberation_count": thinking_count + belief_update_count,
@@ -13201,6 +13323,7 @@ class GWTAutogenAgent(AutogenAgent):
             "v2_bridge_update_count": int(self._v2_bridge_update_count or 0),
             "v2_bridge_error_count": int(self._v2_bridge_error_count or 0),
             "v2_revision_required_count": int(self._v2_revision_required_count or 0),
+            "v2_revision_action_count": int(self._v2_revision_action_count or 0),
             "v2_direct_action_count": int(self._v2_direct_action_count or 0),
             "v2_bridge_last_option_family": self._v2_runtime_advisory.get(
                 "option_family"
@@ -14383,24 +14506,31 @@ class GWTAutogenAgent(AutogenAgent):
             self._empty_admissible_streak = 0
 
             previous_observation = self.percept.get("resulting_observation", "")
+            revision_execution_action = self._get_v2_revision_execution_action(
+                admissible_commands=admissible_commands
+            )
             effective_suggested_action = (
-                self._get_v2_direct_execution_action(
+                revision_execution_action
+                or self._get_v2_direct_execution_action(
                     admissible_commands=admissible_commands,
                     requested_action=suggested_action,
                 )
                 or suggested_action
             )
+            revision_execution_used = revision_execution_action is not None
             direct_execution_used = self._normalize_runtime_text(
                 effective_suggested_action
             ) != self._normalize_runtime_text(suggested_action)
-            canonical_suggested_action = self._canonicalize_suggested_action(
-                effective_suggested_action, admissible_commands
-            )
-            action, action_score = get_best_candidate(
-                canonical_suggested_action, admissible_commands
+            strict_binding = self._should_require_strict_action_binding()
+            action, canonical_suggested_action, action_score = (
+                self._resolve_runtime_action_binding(
+                    effective_suggested_action,
+                    admissible_commands,
+                    strict_binding=strict_binding,
+                )
             )
             executed_action = None
-            if action_score < 0.98:
+            if action is None or action_score < 0.98:
                 self.adapter.set_observation(
                     f"The action '{suggested_action}' is not in the list of admissible actions for the current timestep."
                 )
@@ -14413,6 +14543,8 @@ class GWTAutogenAgent(AutogenAgent):
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
+                if revision_execution_used:
+                    self._v2_revision_action_count += 1
                 if direct_execution_used:
                     self._v2_direct_action_count += 1
                 self._recently_executed_actions = (
@@ -14426,23 +14558,24 @@ class GWTAutogenAgent(AutogenAgent):
                 suggested_action=suggested_action,
                 previous_observation=previous_observation,
             )
-            self._last_burst_stop_reason = (
-                "v2_direct_execution"
-                if direct_execution_used and executed_action is not None
-                else (
-                    "task_completed"
-                    if self.task_status == "COMPLETED"
-                    else (
-                        "task_failed"
-                        if self.task_status == "FAILED"
-                        else (
-                            "single_action"
-                            if executed_action is not None
-                            else "action_failed"
-                        )
-                    )
-                )
-            )
+            current_v2_advisory = self._get_v2_runtime_advisory_snapshot()
+            if revision_execution_used and executed_action is not None:
+                self._last_burst_stop_reason = "v2_revision_execution"
+            elif (
+                current_v2_advisory.get("revision_required")
+                and executed_action is not None
+            ):
+                self._last_burst_stop_reason = "v2_revision_required"
+            elif direct_execution_used and executed_action is not None:
+                self._last_burst_stop_reason = "v2_direct_execution"
+            elif self.task_status == "COMPLETED":
+                self._last_burst_stop_reason = "task_completed"
+            elif self.task_status == "FAILED":
+                self._last_burst_stop_reason = "task_failed"
+            elif executed_action is not None:
+                self._last_burst_stop_reason = "single_action"
+            else:
+                self._last_burst_stop_reason = "action_failed"
             self._record_burst_history(
                 planned_actions=1,
                 actions_executed=1 if executed_action is not None else 0,
@@ -14558,13 +14691,6 @@ class GWTAutogenAgent(AutogenAgent):
                             if _steps > 0:
                                 continue
 
-                # Family gate
-                family = self._classify_action_family(suggested_action)
-                if family not in self._LOW_RISK_FAMILIES:
-                    remaining_actions = action_list[i:]
-                    stop_reason = "high_risk_family"
-                    break
-
                 # Admissible validation
                 admissible_commands = self.adapter.admissible_actions
                 if not admissible_commands:
@@ -14582,21 +14708,37 @@ class GWTAutogenAgent(AutogenAgent):
 
                 previous_observation = self.percept.get("resulting_observation", "")
                 previous_state = self._build_decision_state()
+                revision_execution_action = self._get_v2_revision_execution_action(
+                    admissible_commands=admissible_commands
+                )
                 direct_execution_action = self._get_v2_direct_execution_action(
                     admissible_commands=admissible_commands,
                     requested_action=suggested_action,
                 )
-                direct_execution_used = direct_execution_action is not None
-                if direct_execution_action is not None:
+                revision_execution_used = revision_execution_action is not None
+                direct_execution_used = (
+                    not revision_execution_used and direct_execution_action is not None
+                )
+                if revision_execution_action is not None:
+                    suggested_action = revision_execution_action
+                elif direct_execution_action is not None:
                     suggested_action = direct_execution_action
-                canonical_suggested_action = self._canonicalize_suggested_action(
-                    suggested_action, admissible_commands
-                )
-                action, action_score = get_best_candidate(
-                    canonical_suggested_action, admissible_commands
-                )
 
-                if action_score < 0.98:
+                family = self._classify_action_family(suggested_action)
+                if family not in self._LOW_RISK_FAMILIES:
+                    remaining_actions = action_list[i:]
+                    stop_reason = "high_risk_family"
+                    break
+
+                strict_binding = self._should_require_strict_action_binding()
+                action, canonical_suggested_action, action_score = (
+                    self._resolve_runtime_action_binding(
+                        suggested_action,
+                        admissible_commands,
+                        strict_binding=strict_binding,
+                    )
+                )
+                if action is None or action_score < 0.98:
                     # Action not found in admissible set — the whole sequence is
                     # now suspect.  Discard remaining actions and force a belief
                     # state update so the agent replans from current observation.
@@ -14614,6 +14756,8 @@ class GWTAutogenAgent(AutogenAgent):
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
+                if revision_execution_used:
+                    self._v2_revision_action_count += 1
                 if direct_execution_used:
                     self._v2_direct_action_count += 1
                 self._recently_executed_actions = (
@@ -14657,6 +14801,15 @@ class GWTAutogenAgent(AutogenAgent):
                 )
                 if _invalid_after > _invalid_before:
                     stop_reason = "action_failed"
+                    break
+
+                current_v2_advisory = self._get_v2_runtime_advisory_snapshot()
+                if current_v2_advisory.get("revision_required"):
+                    stop_reason = "v2_revision_required"
+                    break
+
+                if revision_execution_used:
+                    stop_reason = "v2_revision_execution"
                     break
 
                 if direct_execution_used:
@@ -15083,6 +15236,30 @@ class GWTAutogenAgent(AutogenAgent):
                 if self.group_chat.max_round > new_cap:
                     self.group_chat.max_round = new_cap
 
+            v2_advisory = self._get_v2_runtime_advisory_snapshot()
+            if (
+                v2_advisory.get("revision_required")
+                and not self.task_success
+                and not self.task_failed
+            ):
+                repair_admissible = (
+                    list(getattr(self.adapter, "admissible_actions", []) or [])
+                    if getattr(self, "adapter", None) is not None
+                    else []
+                )
+                repair_action = self._get_v2_revision_execution_action(
+                    admissible_commands=repair_admissible
+                )
+                self._consecutive_action_selfloops = 0
+                self._consecutive_lightweight_option_updates = 0
+                if (
+                    v2_advisory.get("repair_pending")
+                    and repair_action
+                    and self._stale_action_count == 0
+                ):
+                    return self.action_agent
+                return self.belief_state_agent
+
             # Self-loop: after a fully successful burst (all queued actions
             # executed, no early stop), route directly back to Action_Agent
             # without a Belief_State + Thinking round.  Action_Agent's system
@@ -15093,6 +15270,17 @@ class GWTAutogenAgent(AutogenAgent):
             #  - the task is done
             #  - we've self-looped _MAX_ACTION_SELFLOOPS times in a row
             #    (force a belief update to avoid context drift on long sequences)
+            if (
+                self._last_burst_stop_reason == "v2_revision_execution"
+                and not self.task_success
+                and not self.task_failed
+                and self._stale_action_count == 0
+                and not v2_advisory.get("revision_required")
+                and self._consecutive_action_selfloops < _MAX_ACTION_SELFLOOPS
+            ):
+                self._consecutive_action_selfloops += 1
+                self._consecutive_lightweight_option_updates = 0
+                return self.action_agent
             if (
                 self._last_burst_stop_reason
                 in {"sequence_complete", "v2_direct_execution"}
@@ -15159,6 +15347,38 @@ class GWTAutogenAgent(AutogenAgent):
             and not self.task_success
             and not self.task_failed
         ):
+            v2_advisory = self._get_v2_runtime_advisory_snapshot()
+            if v2_advisory.get("revision_required"):
+                repair_admissible = (
+                    list(getattr(self.adapter, "admissible_actions", []) or [])
+                    if getattr(self, "adapter", None) is not None
+                    else []
+                )
+                repair_action = self._get_v2_revision_execution_action(
+                    admissible_commands=repair_admissible
+                )
+                if v2_advisory.get("repair_pending") and repair_action:
+                    self._consecutive_lightweight_option_updates = 0
+                    return self.action_agent
+                self._last_deliberation_decision = {
+                    "should_deliberate": True,
+                    "reason": (
+                        "v2_semantic_escalation"
+                        if v2_advisory.get("escalation_required")
+                        else "v2_revision_required"
+                    ),
+                    "signal_flags": {
+                        "revision_required": True,
+                        "revision_reason": v2_advisory.get("revision_reason"),
+                        "repair_pending": bool(v2_advisory.get("repair_pending")),
+                        "escalation_required": bool(
+                            v2_advisory.get("escalation_required")
+                        ),
+                    },
+                }
+                self._consecutive_lightweight_option_updates = 0
+                self._actions_since_last_thinking = 0
+                return self.thinking_agent
             current_content = last_msg.get("content") or ""
             if not current_content.lstrip().upper().startswith("BELIEF STATE:"):
                 repaired = self._synthesize_belief_state_fallback(current_content)

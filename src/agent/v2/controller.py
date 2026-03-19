@@ -44,8 +44,76 @@ class V2Controller:
             )
         )
         snapshot = world_model.to_snapshot()
-        if snapshot.revision_required:
+        repair_pending = bool(snapshot.metadata.get("repair_pending", False))
+        escalation_required = bool(snapshot.metadata.get("escalation_required", False))
+        if repair_pending:
             self.current_option = None
+            repair_option = OptionContract(
+                family="recover_from_failure",
+                objective=world_model.task_text,
+                reasoning_budget="none",
+                metadata={
+                    "repair_operator": (
+                        snapshot.repair_directive.operator
+                        if snapshot.repair_directive is not None
+                        else None
+                    )
+                },
+            )
+            world_model.set_active_option(repair_option)
+            if snapshot.repair_directive is not None:
+                execution_step = self.executor.select_repair_step(
+                    snapshot,
+                    repair_option,
+                    snapshot.repair_directive,
+                    failed_actions=self.failed_actions,
+                    executed_actions=self.executed_actions,
+                )
+                if execution_step.action_label is not None:
+                    self.current_option = repair_option
+                    return ControllerStep(
+                        planner_directive=PlannerDirective(
+                            option=repair_option,
+                            reasoning_tier="none",
+                            continue_current_option=False,
+                            planner_notes=[snapshot.repair_directive.rationale],
+                            stop_reason="local_repair_selected",
+                        ),
+                        execution_step=execution_step,
+                    )
+            escalation_required = True
+        if escalation_required:
+            self.current_option = None
+            repair_option = OptionContract(
+                family="recover_from_failure",
+                objective=world_model.task_text,
+                reasoning_budget="full",
+                metadata={
+                    "repair_operator": (
+                        snapshot.repair_directive.operator
+                        if snapshot.repair_directive is not None
+                        else None
+                    )
+                },
+            )
+            world_model.set_active_option(repair_option)
+            return ControllerStep(
+                planner_directive=PlannerDirective(
+                    option=repair_option,
+                    reasoning_tier="full",
+                    continue_current_option=False,
+                    planner_notes=[
+                        "Bounded local repair did not resolve the contradiction; escalate to semantic recovery."
+                    ],
+                    stop_reason="semantic_escalation_required",
+                ),
+                execution_step=ExecutionStep(
+                    option=repair_option,
+                    operator=None,
+                    action_label=None,
+                    stop_reason="semantic_escalation_required",
+                ),
+            )
         directive = self.planner.plan(snapshot, current_option=self.current_option)
         self.current_option = directive.option
         world_model.set_active_option(self.current_option)

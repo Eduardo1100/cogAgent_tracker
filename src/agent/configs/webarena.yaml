@@ -1,0 +1,57 @@
+env:
+  type: webarena
+  task_ids: null
+  env_id: browsergym/webarena
+
+llm_profiles:
+
+  - gemini_with_deepseek_reasoner:
+      - model: "gemini-2.0-flash"
+        api_type: "google"
+        api_key: "${GEMINI_API_KEY}"
+        price: [0.0, 0.0]
+
+      - model: "deepseek-chat"
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00014, 0.00028]
+
+      - model: "deepseek-reasoner"
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00055, 0.00219]
+
+  - deepseek_full_stack:
+      - model: "deepseek-chat"
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00014, 0.00028]
+
+      - model: "deepseek-reasoner"
+        api_type: "openai"
+        api_key: "${DEEPSEEK_API_KEY}"
+        base_url: "https://api.deepseek.com"
+        price: [0.00055, 0.00219]
+
+  - openai_pro:
+      - model: "gpt-4o-mini"
+        api_type: "openai"
+        api_key: "${OPENAI_API_KEY}"
+
+      - model: "o1-preview"
+        api_type: "openai"
+        api_key: "${OPENAI_API_KEY}"
+
+  - local_dev:
+      - model: "llama3"
+        api_type: "openai"
+        base_url: "${LOCAL_API_BASE}"
+        api_key: "NULL"
+
+      - model: "llama3-70b"
+        api_type: "openai"
+        base_url: "${LOCAL_API_BASE}"
+        api_key: "NULL"

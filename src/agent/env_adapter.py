@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, Protocol, runtime_checkable
 
@@ -8,6 +9,8 @@ from src.agent.v2.types import (
     FrontierDelta,
     OperatorCandidate,
     SpatialContext,
+    UIContext,
+    UIElementRecord,
 )
 
 try:
@@ -85,6 +88,18 @@ def _infer_operator_family(action_label: str) -> str:
     normalized = action_label.strip().lower()
     if normalized.startswith("move ") or normalized in {"go up", "go down"}:
         return "relocation"
+    if normalized.startswith(("click ", "tap ", "press ")):
+        return "ui_click"
+    if normalized.startswith(("select ", "choose ")):
+        return "ui_select"
+    if normalized.startswith(("type ", "fill ", "enter ")):
+        return "ui_type"
+    if normalized.startswith(("scroll ", "page ", "hover ", "focus ", "go back")):
+        return "ui_navigation"
+    if normalized.startswith(("submit ", "confirm ", "send ")):
+        return "ui_submit"
+    if normalized.startswith(("go to ", "open url ", "visit ")):
+        return "navigation"
     if normalized in {"search", "look", "inventory", "wait", "more"}:
         return "inspect"
     if normalized.startswith(("open", "close", "kick", "loot")):
@@ -498,6 +513,504 @@ class TalesAdapter:
             reward_delta=reward_delta,
             status_delta=status_delta,
             metadata=metadata,
+        )
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_coerce_text(item).strip() for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            return str(value)
+    return str(value)
+
+
+def _extract_webarena_task_text(
+    observation: Any, info: dict[str, Any], task_config_path: str | None = None
+) -> str:
+    candidates = [
+        info.get("task"),
+        info.get("intent"),
+        info.get("goal"),
+        info.get("instruction"),
+    ]
+    if isinstance(observation, dict):
+        candidates.extend(
+            [
+                observation.get("task"),
+                observation.get("intent"),
+                observation.get("goal"),
+                observation.get("instruction"),
+                observation.get("utterance"),
+            ]
+        )
+    for candidate in candidates:
+        text = _coerce_text(candidate).strip()
+        if text:
+            return text
+    return task_config_path or "Complete the assigned web task."
+
+
+def _extract_webarena_text_observation(observation: Any, info: dict[str, Any]) -> str:
+    if isinstance(observation, str):
+        return observation
+    if isinstance(observation, dict):
+        parts = [
+            _coerce_text(observation.get(key) or info.get(key) or "").strip()
+            for key in (
+                "normalized_observation",
+                "observation",
+                "text",
+                "axtree_txt",
+                "accessibility_tree",
+                "page_text",
+                "utterance",
+            )
+        ]
+        text = "\n".join(part for part in parts if part)
+        if text:
+            return text
+    return _coerce_text(observation or info.get("observation") or "").strip()
+
+
+def _extract_webarena_status_snapshot(
+    observation: Any, info: dict[str, Any]
+) -> dict[str, float | int | str | bool]:
+    snapshot: dict[str, float | int | str | bool] = {}
+    if isinstance(observation, dict):
+        for key in (
+            "url",
+            "page_url",
+            "title",
+            "page_title",
+            "success",
+            "done",
+            "error",
+        ):
+            if key in observation and observation[key] not in (None, ""):
+                snapshot[key] = observation[key]
+    for key in (
+        "url",
+        "page_url",
+        "title",
+        "page_title",
+        "success",
+        "done",
+        "error",
+        "site",
+        "task_id",
+    ):
+        value = info.get(key)
+        if value not in (None, ""):
+            snapshot[key] = value
+    return snapshot
+
+
+def _extract_webarena_visible_elements(
+    observation: Any, info: dict[str, Any]
+) -> list[UIElementRecord]:
+    raw_elements: Any = []
+    if isinstance(observation, dict):
+        raw_elements = (
+            observation.get("visible_elements")
+            or observation.get("elements")
+            or observation.get("dom_elements")
+            or []
+        )
+    if not raw_elements:
+        raw_elements = (
+            info.get("visible_elements")
+            or info.get("elements")
+            or info.get("dom_elements")
+            or []
+        )
+
+    records: list[UIElementRecord] = []
+    for idx, item in enumerate(raw_elements):
+        if isinstance(item, UIElementRecord):
+            records.append(item)
+            continue
+        if not isinstance(item, dict):
+            text = _coerce_text(item).strip()
+            if text:
+                records.append(
+                    UIElementRecord(
+                        element_id=f"element-{idx}",
+                        role="unknown",
+                        text=text,
+                    )
+                )
+            continue
+        element_id = _coerce_text(
+            item.get("element_id")
+            or item.get("id")
+            or item.get("backend_id")
+            or item.get("bid")
+            or f"element-{idx}"
+        ).strip()
+        role = _coerce_text(item.get("role") or item.get("tag") or "unknown").strip()
+        records.append(
+            UIElementRecord(
+                element_id=element_id or f"element-{idx}",
+                role=role or "unknown",
+                name=_coerce_text(item.get("name") or item.get("label")).strip()
+                or None,
+                text=_coerce_text(item.get("text") or item.get("value")).strip()
+                or None,
+                selector=_coerce_text(item.get("selector") or item.get("xpath")).strip()
+                or None,
+                interactable=bool(item.get("interactable", True)),
+                disabled=bool(item.get("disabled", False)),
+                selected=bool(item.get("selected", False)),
+                bounds=item.get("bounds") or {},
+                attributes={
+                    key: value
+                    for key, value in item.items()
+                    if key
+                    not in {
+                        "element_id",
+                        "id",
+                        "backend_id",
+                        "bid",
+                        "role",
+                        "tag",
+                        "name",
+                        "label",
+                        "text",
+                        "value",
+                        "selector",
+                        "xpath",
+                        "interactable",
+                        "disabled",
+                        "selected",
+                        "bounds",
+                    }
+                },
+            )
+        )
+    return records
+
+
+def _extract_webarena_ui_context(observation: Any, info: dict[str, Any]) -> UIContext:
+    visible_elements = _extract_webarena_visible_elements(observation, info)
+    page_url = ""
+    page_title = ""
+    focused_element_id = None
+    active_dialog = None
+    action_scope = []
+    if isinstance(observation, dict):
+        page_url = _coerce_text(observation.get("page_url") or observation.get("url"))
+        page_title = _coerce_text(
+            observation.get("page_title") or observation.get("title")
+        )
+        focused_element_id = (
+            _coerce_text(
+                observation.get("focused_element_id") or observation.get("focused")
+            ).strip()
+            or None
+        )
+        active_dialog = (
+            _coerce_text(
+                observation.get("active_dialog") or observation.get("dialog")
+            ).strip()
+            or None
+        )
+        action_scope = list(observation.get("action_scope") or [])
+    if not page_url:
+        page_url = _coerce_text(info.get("page_url") or info.get("url"))
+    if not page_title:
+        page_title = _coerce_text(info.get("page_title") or info.get("title"))
+    if not focused_element_id:
+        focused_element_id = (
+            _coerce_text(info.get("focused_element_id") or info.get("focused")).strip()
+            or None
+        )
+    if not active_dialog:
+        active_dialog = (
+            _coerce_text(info.get("active_dialog") or info.get("dialog")).strip()
+            or None
+        )
+    if not action_scope:
+        action_scope = list(info.get("action_scope") or [])
+    if not action_scope:
+        inferred_scope: list[str] = ["click", "scroll", "go_back"]
+        if any(
+            element.role.lower() in {"textbox", "input", "textarea", "searchbox"}
+            for element in visible_elements
+        ):
+            inferred_scope.append("type")
+        action_scope = inferred_scope
+    return UIContext(
+        page_url=page_url or None,
+        page_title=page_title or None,
+        focused_element_id=focused_element_id,
+        active_dialog=active_dialog,
+        visible_elements=visible_elements,
+        action_scope=action_scope,
+        metadata={
+            "site": info.get("site"),
+            "task_id": info.get("task_id"),
+        },
+    )
+
+
+def _build_webarena_action_surface(
+    ui_context: UIContext, info: dict[str, Any]
+) -> tuple[list[str], dict[str, str]]:
+    aliases: dict[str, str] = {}
+    raw_candidates = (
+        info.get("valid")
+        or info.get("valid_actions")
+        or info.get("action_candidates")
+        or info.get("available_actions")
+        or info.get("admissible_actions")
+        or []
+    )
+    normalized: list[str] = []
+    if isinstance(raw_candidates, dict):
+        raw_candidates = list(raw_candidates.values())
+    for item in raw_candidates:
+        if isinstance(item, dict):
+            label = _coerce_text(item.get("label") or item.get("action")).strip()
+            native = _coerce_text(item.get("action") or item.get("label")).strip()
+        else:
+            label = native = _coerce_text(item).strip()
+        if label and label not in normalized:
+            normalized.append(label)
+            aliases[label] = native or label
+    if normalized:
+        return normalized, aliases
+
+    generated: list[str] = []
+    for element in ui_context.visible_elements[:12]:
+        identifier = element.name or element.text or element.element_id
+        if not identifier:
+            continue
+        role = element.role.lower()
+        if role in {"textbox", "input", "textarea", "searchbox"}:
+            generated.append(f"type {identifier}")
+        elif role in {"combobox", "listbox", "select"}:
+            generated.append(f"select {identifier}")
+        else:
+            generated.append(f"click {identifier}")
+    generated.extend(["scroll down", "scroll up", "go back"])
+    deduped: list[str] = []
+    for action in generated:
+        if action not in deduped:
+            deduped.append(action)
+            aliases[action] = action
+    return deduped, aliases
+
+
+def _format_webarena_observation(
+    raw_text: str, ui_context: UIContext, task_text: str
+) -> str:
+    lines: list[str] = []
+    task_line = task_text.strip()
+    if task_line:
+        lines.append(f"[Task] {task_line}")
+    if ui_context.page_title or ui_context.page_url:
+        lines.append("[Page]")
+        if ui_context.page_title:
+            lines.append(f"  title: {ui_context.page_title}")
+        if ui_context.page_url:
+            lines.append(f"  url: {ui_context.page_url}")
+        if ui_context.focused_element_id:
+            lines.append(f"  focused: {ui_context.focused_element_id}")
+        if ui_context.active_dialog:
+            lines.append(f"  dialog: {ui_context.active_dialog}")
+    if ui_context.visible_elements:
+        lines.append("[Visible Elements]")
+        for element in ui_context.visible_elements[:12]:
+            descriptor = element.name or element.text or element.element_id
+            lines.append(
+                f"  - id={element.element_id} role={element.role} label={descriptor}"
+            )
+    text = raw_text.strip()
+    if text:
+        lines.append("[Observation]")
+        lines.append(text)
+    return "\n".join(lines).strip()
+
+
+class WebArenaAdapter:
+    def __init__(
+        self,
+        env,
+        obs: Any,
+        info: dict[str, Any] | None,
+        *,
+        task_config_path: str | None = None,
+    ):
+        self._env = env
+        self._obs = obs
+        self._info = info or {}
+        self._terminated = False
+        self._truncated = False
+        self._reward_delta = 0.0
+        self._task_config_path = task_config_path
+        self._task_text = _extract_webarena_task_text(
+            self._obs, self._info, task_config_path
+        )
+        self._status_snapshot = _extract_webarena_status_snapshot(self._obs, self._info)
+        self._ui_context = _extract_webarena_ui_context(self._obs, self._info)
+        self._admissible_actions, self._action_aliases = _build_webarena_action_surface(
+            self._ui_context, self._info
+        )
+        self._observation_text = _format_webarena_observation(
+            _extract_webarena_text_observation(self._obs, self._info),
+            self._ui_context,
+            self._task_text,
+        )
+        self._initial_observation = self._observation_text
+        self._last_action_text: str | None = None
+        self._last_action_executed: bool | None = None
+
+    @property
+    def observation(self) -> str:
+        return self._observation_text
+
+    @property
+    def admissible_actions(self) -> list[str]:
+        return list(self._admissible_actions)
+
+    @property
+    def has_won(self) -> bool:
+        return bool(
+            self._info.get("success")
+            or self._info.get("won")
+            or self._info.get("has_won")
+            or self._status_snapshot.get("success")
+        )
+
+    @property
+    def task(self) -> str:
+        return self._task_text
+
+    @property
+    def initial_observation(self) -> str:
+        return self._initial_observation
+
+    def _refresh_cached_state(self) -> None:
+        self._task_text = _extract_webarena_task_text(
+            self._obs, self._info, self._task_config_path
+        )
+        self._status_snapshot = _extract_webarena_status_snapshot(self._obs, self._info)
+        self._ui_context = _extract_webarena_ui_context(self._obs, self._info)
+        self._admissible_actions, self._action_aliases = _build_webarena_action_surface(
+            self._ui_context, self._info
+        )
+        self._observation_text = _format_webarena_observation(
+            _extract_webarena_text_observation(self._obs, self._info),
+            self._ui_context,
+            self._task_text,
+        )
+
+    def step(self, action: str) -> str:
+        native_action = self._action_aliases.get(action, action)
+        result = self._env.step(native_action)
+        reward = 0.0
+        if len(result) == 5:
+            self._obs, reward, self._terminated, self._truncated, self._info = result
+        elif len(result) == 4:
+            self._obs, reward, self._terminated, self._info = result
+            self._truncated = False
+        else:
+            raise ValueError(
+                "Unsupported WebArena step() result. Expected 4 or 5 values."
+            )
+        self._reward_delta = float(reward or 0.0)
+        self._last_action_text = action
+        self._last_action_executed = True
+        self._refresh_cached_state()
+        return self._observation_text
+
+    def set_observation(self, msg: str) -> None:
+        self._observation_text = msg
+
+    def infer_task_type(self) -> int | None:
+        return None
+
+    def count_inadmissible_actions(self, log_path: str) -> int:
+        try:
+            with open(log_path) as f:
+                return sum(
+                    1
+                    for line in f
+                    if "not in the list of admissible actions" in line
+                    or "is not admissible" in line
+                    or "invalid action" in line.lower()
+                )
+        except Exception:
+            return 0
+
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="webarena",
+            observation_mode="ui",
+            supports_ui_context=True,
+            supports_status_delta=True,
+            supports_reward_delta=True,
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        effective_status_delta = status_delta or self._status_snapshot
+        event_metadata = {
+            "adapter_name": "webarena",
+            "task_config_path": self._task_config_path,
+            "status_snapshot": self._status_snapshot,
+            "terminated": self._terminated,
+            "truncated": self._truncated,
+        }
+        if metadata:
+            event_metadata.update(metadata)
+        return AdapterEvent(
+            step_index=step_index,
+            task_text=self.task,
+            raw_observation=_coerce_text(self._obs),
+            normalized_observation=self.observation,
+            action_result=ActionResult(
+                action_text=action_text or self._last_action_text,
+                action_executed=(
+                    action_executed
+                    if action_executed is not None
+                    else self._last_action_executed
+                ),
+                operator_family=(
+                    _infer_operator_family(action_text or self._last_action_text or "")
+                    if (action_text or self._last_action_text)
+                    else None
+                ),
+            ),
+            operator_candidates=_build_operator_candidates(
+                "webarena", self.admissible_actions
+            ),
+            reward_delta=reward_delta
+            if reward_delta is not None
+            else self._reward_delta,
+            status_delta=effective_status_delta,
+            novelty_signals=[
+                element.element_id for element in self._ui_context.visible_elements[:4]
+            ],
+            ui_context=self._ui_context,
+            metadata=event_metadata,
         )
 
 

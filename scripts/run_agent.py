@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import json
 import os
 import random
@@ -9,7 +10,6 @@ import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-
 import autogen
 import yaml
 from autogen.oai.client import OpenAIClient
@@ -26,6 +26,7 @@ from src.agent.env_adapter import (
     NetHackAdapter,
     ScienceWorldAdapter,
     TalesAdapter,
+    WebArenaAdapter,
     infer_task_type,
 )
 from src.agent.gwt_agent import GWTAutogenAgent
@@ -875,6 +876,7 @@ def aggregate_architecture_metrics(
         "deliberation_count": _sum_int("deliberation_count"),
         "burst_count": _sum_int("burst_count"),
         "v2_revision_required_count": _sum_int("v2_revision_required_count"),
+        "v2_revision_action_count": _sum_int("v2_revision_action_count"),
         "v2_direct_action_count": _sum_int("v2_direct_action_count"),
         "mean_tokens_per_action": _mean_float("tokens_per_action"),
         "mean_tokens_per_deliberation": _mean_float("tokens_per_deliberation"),
@@ -1265,7 +1267,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--env-type",
-        choices=["alfworld", "scienceworld", "tales", "nethack"],
+        choices=["alfworld", "scienceworld", "tales", "nethack", "webarena"],
         default="alfworld",
         help="Which environment to evaluate (default: alfworld).",
     )
@@ -1300,6 +1302,20 @@ def parse_arguments():
         default=None,
         dest="nethack_seeds",
         help="Optional list of integer seeds for reproducible NetHack episodes.",
+    )
+    parser.add_argument(
+        "--webarena-task-ids",
+        nargs="+",
+        type=int,
+        default=None,
+        dest="webarena_task_ids",
+        help="BrowserGym WebArena task ids to run (default: all registered task ids, sampled by --num_games if set).",
+    )
+    parser.add_argument(
+        "--webarena-env-id",
+        default="browsergym/webarena",
+        dest="webarena_env_id",
+        help="Gymnasium environment id to use for WebArena-style tasks.",
     )
     parser.add_argument(
         "--render",
@@ -2277,6 +2293,374 @@ def run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db):
     )
 
 
+def _discover_webarena_task_ids(task_id_args: list[int] | None) -> list[int]:
+    if task_id_args:
+        return list(dict.fromkeys(task_id_args))
+    try:
+        import browsergym.webarena.config as webarena_config
+    except ImportError as exc:
+        raise ImportError(
+            "WebArena task discovery requires browsergym-webarena to be installed."
+        ) from exc
+    return list(webarena_config.TASK_IDS)
+
+
+def _make_webarena_env(task_id: int, *, render: bool, env_id: str):
+    import gymnasium
+
+    import_candidates = ("browsergym.webarena", "webarena")
+    last_import_error: Exception | None = None
+    for module_name in import_candidates:
+        try:
+            importlib.import_module(module_name)
+            last_import_error = None
+            break
+        except ImportError as exc:
+            last_import_error = exc
+
+    if last_import_error is not None:
+        raise ImportError(
+            "WebArena integration requires an installed WebArena-compatible package "
+            "(for example `browsergym.webarena` or `webarena`)."
+        ) from last_import_error
+
+    full_env_id = env_id if env_id.endswith(f".{task_id}") else f"{env_id}.{task_id}"
+    make_attempts = [
+        {"headless": not render},
+        {"disable_viewport": False, "headless": not render},
+    ]
+    last_make_error: Exception | None = None
+    for kwargs in make_attempts:
+        try:
+            return gymnasium.make(full_env_id, **kwargs)
+        except Exception as exc:
+            last_make_error = exc
+    raise RuntimeError(
+        f"Unable to construct WebArena env `{full_env_id}`."
+    ) from last_make_error
+
+
+def run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db):
+    render = getattr(args, "render", False)
+    env_id = getattr(args, "webarena_env_id", "browsergym/webarena")
+    require_env_vars(
+        [
+            "WA_SHOPPING",
+            "WA_SHOPPING_ADMIN",
+            "WA_REDDIT",
+            "WA_GITLAB",
+            "WA_WIKIPEDIA",
+            "WA_MAP",
+            "WA_HOMEPAGE",
+        ],
+        context="WebArena startup",
+    )
+    task_ids = _discover_webarena_task_ids(args.webarena_task_ids)
+    if not task_ids:
+        raise FileNotFoundError("No WebArena task ids were discovered.")
+
+    selected_task_ids = (
+        random.sample(task_ids, k=min(args.num_games, len(task_ids)))
+        if args.num_games > 0
+        else task_ids
+    )
+    selected_task_ids = sorted(selected_task_ids)
+
+    chat_round_list: list[int] = []
+    error_list: list[int] = []
+    success_list: list[int] = []
+    failure_list: list[int] = []
+    cumulative_successful_actions = cumulative_failing_actions = 0
+    cumulative_successful_chat_rounds = cumulative_failing_chat_rounds = 0
+    cumulative_successful_runtime = cumulative_failing_runtime = 0
+    avg_actions_taken_per_successful_game = avg_actions_taken_per_failing_game = 0.0
+    avg_chat_rounds_per_successful_game = avg_chat_rounds_per_failing_game = 0.0
+    avg_runtime_per_successful_game = avg_runtime_per_failing_game = 0.0
+    cumulative_runtime = 0.0
+    num_games_evaluated = num_successes = 0
+    error_adjusted_success_rate = 0.0
+    success_rate = 0.0
+    total_run_usage: dict[str, float] = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
+
+    experiment = ExperimentRun(
+        agent_name=agent_name,
+        llm_model=llm_profile_name,
+        eval_env_type="webarena",
+        max_actions_per_game=args.max_actions,
+        max_chat_rounds=args.max_chat_rounds,
+        start_time=datetime.now(UTC),
+        status="RUNNING",
+        split="webarena",
+        num_games=len(selected_task_ids),
+    )
+    db.add(experiment)
+    db.commit()
+    db.refresh(experiment)
+    set_active_experiment(experiment.id)
+    print(f"✅ Started DB Experiment Run ID: {experiment.id}")
+
+    experiment.agents_config = agent.agents_info
+    experiment.git_commit = get_git_commit()
+    experiment.git_branch = get_git_branch()
+    experiment.selected_games = selected_task_ids
+    experiment.selected_games_display = compress_game_list(selected_task_ids)
+    db.commit()
+
+    try:
+        for game_no, task_id in enumerate(selected_task_ids, start=1):
+            num_games_evaluated += 1
+            task_label = f"task {task_id}"
+            episode_label = f"Game #{game_no} | {task_label}"
+            update_experiment_runtime_state(
+                db,
+                experiment,
+                current_game_number=game_no,
+                current_game_label=episode_label,
+            )
+
+            env = _make_webarena_env(task_id, render=render, env_id=env_id)
+            reset_result = env.reset()
+            if isinstance(reset_result, tuple) and len(reset_result) >= 2:
+                obs, info = reset_result[:2]
+            else:
+                obs, info = reset_result, {}
+            info = dict(info or {})
+            info.setdefault("task", task_label)
+            info.setdefault("task_id", task_id)
+            adapter = WebArenaAdapter(
+                env,
+                obs,
+                info,
+                task_config_path=f"{env_id}.{task_id}",
+            )
+            agent.set_environment(
+                env, adapter.observation, info, game_no, adapter=adapter
+            )
+            configure_live_analyst_trace(agent, experiment.id)
+            log_paths = agent.log_paths
+
+            print(
+                f"\n[Running Game #{game_no}] "
+                f"({num_games_evaluated}/{len(selected_task_ids)}) task={task_label}"
+            )
+            try:
+                game_start_time = time.time()
+                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
+                chat_text = chat_artifacts["chat_text"]
+                transitions = chat_artifacts["transitions"]
+                belief_matches = chat_artifacts["belief_matches"]
+                chat_round_list.append(chat_artifacts["chat_rounds"])
+                cumulative_runtime += elapsed_minutes
+
+                current_usage_totals = get_agent_usage_totals(agent)
+                game_usage = get_usage_delta(current_usage_totals, total_run_usage)
+                game_prompt_tokens = int(game_usage["prompt_tokens"])
+                game_completion_tokens = int(game_usage["completion_tokens"])
+                game_total_tokens = int(game_usage["total_tokens"])
+                game_total_cost = float(game_usage["total_cost"])
+                total_run_usage = {
+                    key: max(total_run_usage[key], current_usage_totals[key])
+                    for key in total_run_usage
+                }
+                if any(value > 0 for value in game_usage.values()):
+                    wandb.log(
+                        {
+                            "game/total_tokens": game_total_tokens,
+                            "game/cost": game_total_cost,
+                        },
+                        step=num_games_evaluated,
+                    )
+
+                if error_message:
+                    error_list.append(game_no)
+                    _append_text_file(
+                        log_paths["error_message_path"], f"Run Chat: {error_message}\n"
+                    )
+
+                agent.prev_episodic_memories.append(
+                    {
+                        "episode_number": num_games_evaluated,
+                        "task_outcome": agent.task_status,
+                        "memory": belief_matches
+                        if belief_matches
+                        else agent.curr_episodic_memory,
+                    }
+                )
+
+                s3_key = upload_chat_history_artifact(
+                    s3,
+                    experiment_id=experiment.id,
+                    game_number=game_no,
+                    chat_text=chat_text,
+                )
+
+                success = agent.success
+                if success:
+                    num_successes += 1
+                    success_list.append(game_no)
+                    cumulative_successful_actions += agent.num_actions_taken
+                    cumulative_successful_chat_rounds += chat_round_list[-1]
+                    cumulative_successful_runtime += elapsed_minutes
+                    avg_actions_taken_per_successful_game = (
+                        cumulative_successful_actions / num_successes
+                    )
+                    avg_chat_rounds_per_successful_game = (
+                        cumulative_successful_chat_rounds / num_successes
+                    )
+                    avg_runtime_per_successful_game = (
+                        cumulative_successful_runtime / num_successes
+                    )
+                else:
+                    num_failures = num_games_evaluated - num_successes
+                    failure_list.append(game_no)
+                    cumulative_failing_actions += agent.num_actions_taken
+                    cumulative_failing_chat_rounds += chat_round_list[-1]
+                    cumulative_failing_runtime += elapsed_minutes
+                    avg_actions_taken_per_failing_game = (
+                        cumulative_failing_actions / num_failures
+                    )
+                    avg_chat_rounds_per_failing_game = (
+                        cumulative_failing_chat_rounds / num_failures
+                    )
+                    avg_runtime_per_failing_game = (
+                        cumulative_failing_runtime / num_failures
+                    )
+
+                success_rate = num_successes / num_games_evaluated
+                num_games_no_error = num_games_evaluated - len(
+                    [g for g in error_list if g not in success_list]
+                )
+                error_adjusted_success_rate = (
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
+                )
+
+                wandb.log(
+                    {
+                        "game_no": game_no,
+                        "success": int(success),
+                        "actions_taken": agent.num_actions_taken,
+                        "success_rate": success_rate,
+                        "runtime": elapsed_minutes,
+                        "cumulative_runtime": cumulative_runtime,
+                        "chat_rounds": chat_round_list[-1],
+                        "error_adjusted_success_rate": error_adjusted_success_rate,
+                        "webarena/task": task_label,
+                        "webarena/page_url": (info or {}).get("page_url")
+                        or (info or {}).get("url"),
+                        "final/total_tokens": total_run_usage["total_tokens"],
+                        "final/total_cost": total_run_usage["total_cost"],
+                    },
+                    step=num_games_evaluated,
+                )
+
+                persist_experiment_usage_snapshot(db, experiment, total_run_usage)
+                agent.task = f"WebArena ({task_label})"
+                persist_episode_run(
+                    db,
+                    experiment=experiment,
+                    game_number=game_no,
+                    agent=agent,
+                    log_paths=log_paths,
+                    success=success,
+                    chat_rounds=chat_round_list[-1],
+                    runtime_minutes=elapsed_minutes,
+                    error_message=str(error_message) if error_message else None,
+                    transitions=transitions,
+                    belief_matches=belief_matches,
+                    chat_text=chat_text,
+                    prompt_tokens=game_prompt_tokens,
+                    completion_tokens=game_completion_tokens,
+                    episode_cost=game_total_cost,
+                    success_rate=success_rate,
+                    error_adjusted_success_rate=error_adjusted_success_rate,
+                    chat_history_s3_key=s3_key,
+                    analyst_trace=get_agent_analyst_trace_text(
+                        agent, prefer_existing=True
+                    ),
+                )
+                print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
+                print(
+                    f"Success: {success} | Actions: {agent.num_actions_taken} | Runtime: {elapsed_minutes:.2f}m"
+                )
+            except KeyboardInterrupt as exc:
+                elapsed_minutes = (time.time() - game_start_time) / 60
+                cumulative_runtime += elapsed_minutes
+                if game_no not in error_list:
+                    error_list.append(game_no)
+                success_rate = (
+                    num_successes / num_games_evaluated if num_games_evaluated else 0.0
+                )
+                num_games_no_error = num_games_evaluated - len(
+                    [g for g in error_list if g not in success_list]
+                )
+                error_adjusted_success_rate = (
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
+                )
+                total_run_usage = persist_interrupted_episode_run(
+                    db,
+                    experiment=experiment,
+                    agent=agent,
+                    game_number=game_no,
+                    s3=s3,
+                    total_run_usage=total_run_usage,
+                    elapsed_minutes=elapsed_minutes,
+                    success_rate=success_rate,
+                    error_adjusted_success_rate=error_adjusted_success_rate,
+                    error_message=f"Run interrupted: {exc}",
+                )
+                print(
+                    f"⚠️ Saved partial interrupted Game #{game_no} to PostgreSQL Database."
+                )
+                raise
+            finally:
+                env.close()
+    except KeyboardInterrupt:
+        finalize_experiment(
+            db,
+            experiment,
+            cumulative_runtime=cumulative_runtime,
+            success_rate=success_rate if num_games_evaluated else 0.0,
+            error_adjusted_success_rate=error_adjusted_success_rate,
+            error_count=len(error_list),
+            avg_actions_per_successful_game=avg_actions_taken_per_successful_game,
+            avg_chat_rounds_per_successful_game=avg_chat_rounds_per_successful_game,
+            avg_runtime_per_successful_game=avg_runtime_per_successful_game,
+            avg_actions_per_failing_game=avg_actions_taken_per_failing_game,
+            avg_chat_rounds_per_failing_game=avg_chat_rounds_per_failing_game,
+            avg_runtime_per_failing_game=avg_runtime_per_failing_game,
+            status="CANCELLED",
+        )
+        print("⚠️ WebArena experiment cancelled.")
+        raise
+
+    finalize_experiment(
+        db,
+        experiment,
+        cumulative_runtime=cumulative_runtime,
+        success_rate=success_rate if num_games_evaluated else 0.0,
+        error_adjusted_success_rate=error_adjusted_success_rate,
+        error_count=len(error_list),
+        avg_actions_per_successful_game=avg_actions_taken_per_successful_game,
+        avg_chat_rounds_per_successful_game=avg_chat_rounds_per_successful_game,
+        avg_runtime_per_successful_game=avg_runtime_per_successful_game,
+        avg_actions_per_failing_game=avg_actions_taken_per_failing_game,
+        avg_chat_rounds_per_failing_game=avg_chat_rounds_per_failing_game,
+        avg_runtime_per_failing_game=avg_runtime_per_failing_game,
+        status="CONCLUDED",
+    )
+    print("✅ WebArena experiment finalized in the database.")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
@@ -2351,6 +2735,18 @@ def main():
         db = SessionLocal()
         try:
             run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db)
+        except KeyboardInterrupt:
+            wandb.finish()
+            raise SystemExit(130)
+        finally:
+            db.close()
+        wandb.finish()
+        return
+
+    if args.env_type == "webarena":
+        db = SessionLocal()
+        try:
+            run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db)
         except KeyboardInterrupt:
             wandb.finish()
             raise SystemExit(130)

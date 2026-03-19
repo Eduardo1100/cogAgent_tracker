@@ -318,7 +318,215 @@ def test_controller_revises_before_act_after_repeated_contradiction():
 
     step = controller.step(world_model)
 
-    assert step.planner_directive.stop_reason == "revise_before_act"
+    assert step.planner_directive.stop_reason == "local_repair_selected"
     assert step.planner_directive.option is not None
     assert step.planner_directive.option.family == "recover_from_failure"
-    assert step.execution_step.action_label != "move north"
+    assert step.execution_step.action_label == "search"
+
+
+def test_controller_escalates_after_bounded_repair_attempts_fail():
+    capabilities = AdapterCapabilities(
+        adapter_name="nethack",
+        observation_mode="grid",
+        supports_spatial_context=True,
+        supports_status_delta=True,
+    )
+    world_model = WorldModel(capabilities=capabilities, task_text="Explore the dungeon")
+    controller = V2Controller()
+
+    for step_index in (1, 2):
+        controller.observe(
+            world_model,
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="It's a wall.",
+                normalized_observation="It's a wall.",
+                action_result=ActionResult(
+                    action_text="move north",
+                    action_executed=True,
+                    operator_family="relocation",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="move-north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["east", "north"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north", "west"],
+                ),
+            ),
+        )
+
+    first_step = controller.step(world_model)
+    assert first_step.planner_directive.stop_reason == "local_repair_selected"
+    assert first_step.execution_step.action_label == "search"
+
+    for step_index in (3, 4):
+        controller.observe(
+            world_model,
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="Nothing happens.",
+                normalized_observation="Nothing happens.",
+                action_result=ActionResult(
+                    action_text="search",
+                    action_executed=True,
+                    operator_family="inspect",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                    OperatorCandidate(
+                        operator_id="move-east",
+                        family="relocation",
+                        action_label="move east",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["east"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north"],
+                ),
+            ),
+        )
+
+    final_step = controller.step(world_model)
+
+    assert final_step.planner_directive.stop_reason == "semantic_escalation_required"
+    assert final_step.planner_directive.option is not None
+    assert final_step.planner_directive.option.family == "recover_from_failure"
+    assert final_step.execution_step.action_label is None
+
+
+def test_controller_prefers_local_ui_repair_before_semantic_escalation():
+    capabilities = AdapterCapabilities(
+        adapter_name="webarena",
+        observation_mode="ui",
+        supports_ui_context=True,
+        supports_status_delta=True,
+    )
+    world_model = WorldModel(capabilities=capabilities, task_text="Complete checkout")
+    controller = V2Controller()
+
+    controller.observe(
+        world_model,
+        AdapterEvent(
+            step_index=1,
+            task_text="Complete checkout",
+            raw_observation="Checkout page.",
+            normalized_observation="Checkout page.",
+            action_result=ActionResult(
+                action_text="click submit",
+                action_executed=True,
+                operator_family="ui_click",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="click-submit",
+                    family="ui_click",
+                    action_label="click submit",
+                    target_ids=["submit"],
+                ),
+                OperatorCandidate(
+                    operator_id="scroll-down",
+                    family="ui_navigation",
+                    action_label="scroll down",
+                ),
+            ],
+            ui_context=UIContext(
+                page_url="https://example.test/checkout",
+                page_title="Checkout",
+                focused_element_id="submit",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="submit",
+                        role="button",
+                        text="Place order",
+                    )
+                ],
+                action_scope=["click", "scroll"],
+            ),
+        ),
+    )
+    controller.observe(
+        world_model,
+        AdapterEvent(
+            step_index=2,
+            task_text="Complete checkout",
+            raw_observation="Element submit is not visible anymore.",
+            normalized_observation="Element submit is not visible anymore.",
+            action_result=ActionResult(
+                action_text="click submit",
+                action_executed=True,
+                operator_family="ui_click",
+                failure_reason="element not visible",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="scroll-down",
+                    family="ui_navigation",
+                    action_label="scroll down",
+                ),
+                OperatorCandidate(
+                    operator_id="click-cart",
+                    family="ui_click",
+                    action_label="click cart",
+                    target_ids=["cart"],
+                ),
+                OperatorCandidate(
+                    operator_id="type-search",
+                    family="ui_type",
+                    action_label="type search",
+                    target_ids=["search"],
+                ),
+            ],
+            ui_context=UIContext(
+                page_url="https://example.test/checkout",
+                page_title="Checkout",
+                focused_element_id="cart",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="cart",
+                        role="button",
+                        text="Cart",
+                    ),
+                    UIElementRecord(
+                        element_id="search",
+                        role="textbox",
+                        name="Search",
+                    ),
+                ],
+                action_scope=["click", "type", "scroll"],
+            ),
+        ),
+    )
+
+    step = controller.step(world_model)
+
+    assert step.planner_directive.stop_reason == "local_repair_selected"
+    assert step.planner_directive.reasoning_tier == "none"
+    assert step.execution_step.action_label == "scroll down"

@@ -16,6 +16,7 @@ from src.agent.v2.types import (
     OperatorCandidate,
     OptionContract,
     RelationRecord,
+    RepairDirective,
     UIContext,
     UncertaintyRecord,
     WorldModelSnapshot,
@@ -23,6 +24,10 @@ from src.agent.v2.types import (
 
 _OBS_BLOCKED_RE = re.compile(
     r"(?:it's a wall|you can't|you cannot|blocked|nothing happens|no effect)",
+    re.IGNORECASE,
+)
+_UI_BINDING_FAILURE_RE = re.compile(
+    r"(?:not found|not visible|not interactable|stale|detached|unknown element|missing element|no such element|disabled)",
     re.IGNORECASE,
 )
 _NON_PROGRESS_STATUS_KEYS = {"T", "time", "turn", "turns"}
@@ -41,17 +46,68 @@ def _extract_direction_from_action(action_text: str | None) -> str | None:
     return None
 
 
-def _meaningful_status_delta(
+def _extract_ui_target_from_action(action_text: str | None) -> str | None:
+    if not action_text:
+        return None
+    normalized = action_text.strip().lower()
+    for prefix in (
+        "click ",
+        "tap ",
+        "press ",
+        "select ",
+        "choose ",
+        "type ",
+        "fill ",
+        "enter ",
+        "focus ",
+    ):
+        if normalized.startswith(prefix):
+            target = normalized.removeprefix(prefix).strip()
+            return target or None
+    return None
+
+
+def _ui_target_visible(target: str | None, ui_context: UIContext | None) -> bool:
+    if not target or ui_context is None:
+        return False
+    normalized_target = target.strip().lower()
+    if not normalized_target:
+        return False
+    for element in ui_context.visible_elements:
+        for candidate in (
+            element.element_id,
+            element.name,
+            element.text,
+            element.selector,
+        ):
+            if candidate and normalized_target in str(candidate).lower():
+                return True
+    return False
+
+
+def _partition_status_delta(
     status_delta: dict[str, Any],
-) -> dict[str, Any]:
-    meaningful: dict[str, Any] = {}
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    beneficial: dict[str, Any] = {}
+    harmful: dict[str, Any] = {}
+    neutral: dict[str, Any] = {}
     for key, value in status_delta.items():
         if key in _NON_PROGRESS_STATUS_KEYS:
             continue
-        if value in (None, "", 0, 0.0, False):
+        if value in (None, "", 0, 0.0):
             continue
-        meaningful[key] = value
-    return meaningful
+        if isinstance(value, bool):
+            if value:
+                beneficial[key] = value
+            continue
+        if isinstance(value, (int, float)):
+            if value > 0:
+                beneficial[key] = value
+            elif value < 0:
+                harmful[key] = value
+            continue
+        neutral[key] = value
+    return beneficial, harmful, neutral
 
 
 @dataclass(frozen=True)
@@ -325,8 +381,14 @@ class WorldModel:
         self.no_progress_streak = 0
         self.revision_required = False
         self.revision_reason: str | None = None
+        self.repair_pending = False
+        self.escalation_required = False
+        self.repair_directive: RepairDirective | None = None
         self.blocked_action_counts: dict[str, int] = {}
         self.recent_contradiction_actions: list[str] = []
+        self.repair_cycle_active = False
+        self.repair_attempt_count = 0
+        self.max_repair_attempts = 2
 
     @classmethod
     def from_event(
@@ -343,7 +405,10 @@ class WorldModel:
         self.active_option = option
 
     def _derive_feedback_state(
-        self, event: AdapterEvent
+        self,
+        event: AdapterEvent,
+        *,
+        previous_ui_context: UIContext | None = None,
     ) -> tuple[list[ActionOutcomeRecord], list[ContradictionRecord]]:
         outcomes: list[ActionOutcomeRecord] = []
         contradictions: list[ContradictionRecord] = []
@@ -352,10 +417,30 @@ class WorldModel:
         observation = event.normalized_observation or event.raw_observation
         observation_lower = observation.lower()
         direction = _extract_direction_from_action(action_text)
-        meaningful_status = _meaningful_status_delta(event.status_delta)
+        ui_target = _extract_ui_target_from_action(action_text)
+        beneficial_status, harmful_status, _neutral_status = _partition_status_delta(
+            event.status_delta
+        )
+        new_entity_ids = [
+            str(update.get("entity_id"))
+            for update in event.entity_updates
+            if update.get("entity_id")
+            and str(update.get("entity_id")) not in self.entities
+        ]
+        new_relation_keys = [
+            (relation.relation_type, relation.source_id, relation.target_id)
+            for relation in event.relation_updates
+            if (
+                relation.relation_type,
+                relation.source_id,
+                relation.target_id,
+            )
+            not in self.relations
+        ]
 
         progress_signals: list[str] = []
-        if float(event.reward_delta or 0.0) != 0.0:
+        reward_delta = float(event.reward_delta or 0.0)
+        if reward_delta > 0.0:
             outcomes.append(
                 ActionOutcomeRecord(
                     outcome_type="resource_change",
@@ -364,15 +449,53 @@ class WorldModel:
                 )
             )
             progress_signals.append("reward_delta")
-        if meaningful_status:
+        elif reward_delta < 0.0:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="contradiction",
+                    signals=["negative_reward_delta"],
+                    rationale="Reward decreased after the action.",
+                )
+            )
+            contradictions.append(
+                ContradictionRecord(
+                    category="negative_reward_change",
+                    step_index=event.step_index,
+                    severity=0.75,
+                    action_text=action_text,
+                    evidence=str(reward_delta),
+                )
+            )
+        if beneficial_status:
             outcomes.append(
                 ActionOutcomeRecord(
                     outcome_type="status_change",
-                    signals=sorted(meaningful_status.keys()),
-                    rationale="Meaningful status fields changed after the action.",
+                    signals=sorted(beneficial_status.keys()),
+                    rationale="Meaningful status fields improved after the action.",
                 )
             )
-            progress_signals.extend(sorted(meaningful_status.keys()))
+            progress_signals.extend(sorted(beneficial_status.keys()))
+        if harmful_status:
+            outcomes.append(
+                ActionOutcomeRecord(
+                    outcome_type="contradiction",
+                    signals=sorted(harmful_status.keys()),
+                    rationale=("Meaningful status fields worsened after the action."),
+                )
+            )
+            contradictions.append(
+                ContradictionRecord(
+                    category="negative_status_change",
+                    step_index=event.step_index,
+                    severity=0.75,
+                    action_text=action_text,
+                    evidence=", ".join(
+                        f"{key}={value}"
+                        for key, value in sorted(harmful_status.items())
+                    )
+                    or None,
+                )
+            )
         novelty_signals = list(event.novelty_signals or [])
         if novelty_signals:
             outcomes.append(
@@ -382,21 +505,13 @@ class WorldModel:
                     rationale="New novelty signals were emitted by the adapter.",
                 )
             )
-            progress_signals.extend(novelty_signals[:4])
-        if (
-            event.frontier_delta.opened
-            or event.entity_updates
-            or event.relation_updates
-        ):
+        if event.frontier_delta.opened or new_entity_ids or new_relation_keys:
             signals = (
                 [f"frontier:{node}" for node in event.frontier_delta.opened[:3]]
+                or [f"entity:{entity_id}" for entity_id in new_entity_ids[:3]]
                 or [
-                    f"entity:{update.get('entity_id')}"
-                    for update in event.entity_updates[:3]
-                ]
-                or [
-                    f"relation:{relation.relation_type}"
-                    for relation in event.relation_updates[:3]
+                    f"relation:{relation_type}"
+                    for relation_type, _, _ in new_relation_keys[:3]
                 ]
             )
             outcomes.append(
@@ -407,6 +522,66 @@ class WorldModel:
                 )
             )
             progress_signals.extend(signals)
+
+        ui_binding_failure = False
+        if event.ui_context is not None and action_text:
+            explicit_failure = str(event.action_result.failure_reason or "")
+            binding_evidence = " ".join(
+                part for part in (explicit_failure, observation) if part
+            ).strip()
+            action_family = event.action_result.operator_family or ""
+            if action_family.startswith("ui_") or action_text.lower().startswith(
+                ("click ", "tap ", "press ", "select ", "choose ", "type ", "fill ")
+            ):
+                missing_target = ui_target is not None and not _ui_target_visible(
+                    ui_target, event.ui_context
+                )
+                if _UI_BINDING_FAILURE_RE.search(binding_evidence) or missing_target:
+                    ui_binding_failure = True
+
+        if event.ui_context is not None and not ui_binding_failure:
+            ui_progress_signals: list[str] = []
+            previous_visible = (
+                {element.element_id for element in previous_ui_context.visible_elements}
+                if previous_ui_context is not None
+                else set()
+            )
+            current_visible = {
+                element.element_id for element in event.ui_context.visible_elements
+            }
+            if (
+                previous_ui_context is not None
+                and event.ui_context.page_url
+                and event.ui_context.page_url != previous_ui_context.page_url
+            ):
+                ui_progress_signals.append("page_url_changed")
+            if (
+                previous_ui_context is not None
+                and event.ui_context.page_title
+                and event.ui_context.page_title != previous_ui_context.page_title
+            ):
+                ui_progress_signals.append("page_title_changed")
+            if (
+                previous_ui_context is not None
+                and event.ui_context.focused_element_id
+                and event.ui_context.focused_element_id
+                != previous_ui_context.focused_element_id
+            ):
+                ui_progress_signals.append("focus_changed")
+            newly_visible = sorted(current_visible - previous_visible)
+            if newly_visible:
+                ui_progress_signals.extend(
+                    f"visible:{element_id}" for element_id in newly_visible[:3]
+                )
+            if ui_progress_signals:
+                outcomes.append(
+                    ActionOutcomeRecord(
+                        outcome_type="progress",
+                        signals=ui_progress_signals[:4],
+                        rationale="The UI state changed in a structured way after the action.",
+                    )
+                )
+                progress_signals.extend(ui_progress_signals)
 
         blocked = False
         if direction and event.spatial_context is not None:
@@ -431,6 +606,32 @@ class WorldModel:
                 )
             )
 
+        if event.ui_context is not None and action_text:
+            explicit_failure = str(event.action_result.failure_reason or "")
+            binding_evidence = " ".join(
+                part for part in (explicit_failure, observation) if part
+            ).strip()
+            if ui_binding_failure:
+                outcomes.append(
+                    ActionOutcomeRecord(
+                        outcome_type="contradiction",
+                        signals=["ui_target_binding"],
+                        rationale=(
+                            "The intended UI target appears stale, unavailable, or no longer actionable."
+                        ),
+                    )
+                )
+                contradictions.append(
+                    ContradictionRecord(
+                        category="ui_target_binding",
+                        step_index=event.step_index,
+                        severity=1.0,
+                        subject=ui_target,
+                        action_text=action_text,
+                        evidence=binding_evidence[:160] if binding_evidence else None,
+                    )
+                )
+
         if event.action_result.failure_reason:
             outcomes.append(
                 ActionOutcomeRecord(
@@ -449,7 +650,12 @@ class WorldModel:
                 )
             )
 
-        if action_text and not progress_signals and not blocked:
+        if (
+            action_text
+            and not progress_signals
+            and not blocked
+            and not ui_binding_failure
+        ):
             outcomes.append(
                 ActionOutcomeRecord(
                     outcome_type="no_effect",
@@ -474,15 +680,23 @@ class WorldModel:
         outcomes: list[ActionOutcomeRecord],
         contradictions: list[ContradictionRecord],
     ) -> None:
+        was_repair_cycle_active = self.repair_cycle_active
+        repair_step_executed = (
+            self.active_option is not None
+            and self.active_option.family == "recover_from_failure"
+            and bool(event.action_result.action_text)
+        )
         progress_hit = any(
-            outcome.outcome_type
-            in {"progress", "resource_change", "status_change", "novelty_gain"}
+            outcome.outcome_type in {"progress", "resource_change", "status_change"}
             for outcome in outcomes
         )
         contradiction_hit = any(
             outcome.outcome_type in {"blocked", "contradiction"} for outcome in outcomes
         )
         no_effect_hit = any(outcome.outcome_type == "no_effect" for outcome in outcomes)
+        structural_progress_hit = (
+            progress_hit and not contradiction_hit and not no_effect_hit
+        )
 
         self.action_outcomes = (self.action_outcomes + list(outcomes))[-8:]
         self.contradictions = (self.contradictions + list(contradictions))[-8:]
@@ -497,9 +711,11 @@ class WorldModel:
                 self.recent_contradiction_actions + [normalized_action]
             )[-6:]
 
-        if progress_hit:
+        if structural_progress_hit:
             self.no_progress_streak = 0
             self.contradiction_debt = max(0, self.contradiction_debt - 1)
+            self.repair_cycle_active = False
+            self.repair_attempt_count = 0
         else:
             if event.action_result.action_text:
                 self.no_progress_streak += 1
@@ -507,24 +723,155 @@ class WorldModel:
                 self.contradiction_debt += 2
             elif no_effect_hit:
                 self.contradiction_debt += 1
+            if repair_step_executed:
+                self.repair_attempt_count += 1
 
         repeated_contradiction = False
+        ui_binding_hit = any(
+            contradiction.category == "ui_target_binding"
+            for contradiction in contradictions
+        )
         if action_text:
             repeated_contradiction = (
                 self.blocked_action_counts.get(action_text.strip().lower(), 0) >= 2
             )
 
+        trigger_reason: str | None = None
+        if ui_binding_hit:
+            trigger_reason = "ui_target_binding"
+        elif repeated_contradiction:
+            trigger_reason = "repeated_contradiction"
+        elif self.contradiction_debt >= 3:
+            trigger_reason = "contradiction_debt_exceeded"
+        elif self.no_progress_streak >= 4:
+            trigger_reason = "nonprogress_streak"
+
+        if structural_progress_hit:
+            self.repair_pending = False
+            self.escalation_required = False
+        elif was_repair_cycle_active:
+            self.repair_cycle_active = True
+            if (
+                repair_step_executed
+                and self.repair_attempt_count >= self.max_repair_attempts
+            ):
+                self.repair_pending = False
+                self.escalation_required = True
+                trigger_reason = "repair_budget_exhausted"
+            else:
+                self.repair_pending = True
+                self.escalation_required = False
+                if repair_step_executed:
+                    trigger_reason = "repair_incomplete"
+                elif trigger_reason is None:
+                    trigger_reason = "repair_incomplete"
+        elif trigger_reason is not None:
+            self.repair_cycle_active = True
+            self.repair_attempt_count = 0
+            self.repair_pending = True
+            self.escalation_required = False
+        else:
+            self.repair_cycle_active = False
+            self.repair_pending = False
+            self.escalation_required = False
+
         self.revision_required = False
         self.revision_reason = None
-        if repeated_contradiction:
+        if self.repair_pending or self.escalation_required:
             self.revision_required = True
-            self.revision_reason = "repeated_contradiction"
-        elif self.contradiction_debt >= 3:
-            self.revision_required = True
-            self.revision_reason = "contradiction_debt_exceeded"
-        elif self.no_progress_streak >= 4:
-            self.revision_required = True
-            self.revision_reason = "nonprogress_streak"
+            self.revision_reason = trigger_reason
+        self.repair_directive = self._build_repair_directive()
+
+    def _build_repair_directive(self) -> RepairDirective | None:
+        if not self.revision_required:
+            return None
+
+        invalidated_actions = sorted(
+            action for action, count in self.blocked_action_counts.items() if count > 0
+        )[:6]
+        recent_categories = [
+            contradiction.category for contradiction in self.contradictions[-3:]
+        ]
+
+        if self.ui_context is not None:
+            if "ui_target_binding" in recent_categories:
+                return RepairDirective(
+                    operator="repair_target_binding",
+                    rationale=(
+                        "The current UI target appears stale or unavailable; refresh target binding before continuing."
+                    ),
+                    preferred_families=[
+                        "inspect",
+                        "ui_navigation",
+                        "ui_select",
+                        "ui_click",
+                        "ui_type",
+                    ],
+                    invalidated_actions=invalidated_actions,
+                    metadata={"recent_categories": recent_categories},
+                )
+            if "execution_failure" in recent_categories:
+                return RepairDirective(
+                    operator="repair_operator_set",
+                    rationale=(
+                        "The current UI action surface may be stale; refresh available operators before continuing."
+                    ),
+                    preferred_families=[
+                        "inspect",
+                        "ui_navigation",
+                        "ui_click",
+                        "ui_type",
+                    ],
+                    invalidated_actions=invalidated_actions,
+                    metadata={"recent_categories": recent_categories},
+                )
+            return RepairDirective(
+                operator="repair_target_binding",
+                rationale=(
+                    "The current UI target or action scope may be stale; refresh the "
+                    "binding before continuing."
+                ),
+                preferred_families=["inspect", "ui_select", "ui_click", "ui_type"],
+                invalidated_actions=invalidated_actions,
+                metadata={"recent_categories": recent_categories},
+            )
+
+        if any(action in {"go up", "go down"} for action in invalidated_actions) or (
+            "execution_failure" in recent_categories
+        ):
+            return RepairDirective(
+                operator="repair_transition_model",
+                rationale=(
+                    "The attempted transition or operator preconditions were contradicted; "
+                    "refresh local transition assumptions before continuing."
+                ),
+                preferred_families=["inspect", "interaction", "relocation"],
+                invalidated_actions=invalidated_actions,
+                metadata={"recent_categories": recent_categories},
+            )
+
+        if not self.operator_candidates:
+            return RepairDirective(
+                operator="repair_operator_set",
+                rationale=(
+                    "The local operator set is unstable or empty; refresh admissible "
+                    "affordances before continuing."
+                ),
+                preferred_families=["inspect", "interaction"],
+                invalidated_actions=invalidated_actions,
+                metadata={"recent_categories": recent_categories},
+            )
+
+        return RepairDirective(
+            operator="repair_topology",
+            rationale=(
+                "Recent blocked or contradictory outcomes indicate the local topology "
+                "model is stale and should be repaired before continuing."
+            ),
+            preferred_families=["inspect", "relocation", "interaction"],
+            invalidated_actions=invalidated_actions,
+            metadata={"recent_categories": recent_categories},
+        )
 
     def apply_event(self, event: AdapterEvent) -> None:
         self.step_index = event.step_index
@@ -534,6 +881,7 @@ class WorldModel:
         self.last_event_metadata = dict(event.metadata)
         self.operator_candidates = list(event.operator_candidates)
         self.total_reward += float(event.reward_delta or 0.0)
+        previous_ui_context = self.ui_context
         if event.status_delta:
             self.status_snapshot.update(event.status_delta)
             self.last_status_delta = dict(event.status_delta)
@@ -578,7 +926,10 @@ class WorldModel:
             self.observation_mode = self.capabilities.observation_mode
         if event.novelty_signals:
             self.novelty_events += len(event.novelty_signals)
-        outcomes, contradictions = self._derive_feedback_state(event)
+        outcomes, contradictions = self._derive_feedback_state(
+            event,
+            previous_ui_context=previous_ui_context,
+        )
         self._update_feedback_memory(
             event=event,
             outcomes=outcomes,
@@ -660,6 +1011,11 @@ class WorldModel:
             "contradiction_debt": self.contradiction_debt,
             "no_progress_streak": self.no_progress_streak,
             "revision_reason": self.revision_reason,
+            "repair_cycle_active": self.repair_cycle_active,
+            "repair_pending": self.repair_pending,
+            "escalation_required": self.escalation_required,
+            "repair_attempt_count": self.repair_attempt_count,
+            "max_repair_attempts": self.max_repair_attempts,
             "blocked_action_labels": sorted(
                 action
                 for action, count in self.blocked_action_counts.items()
@@ -688,6 +1044,7 @@ class WorldModel:
             action_outcomes=list(self.action_outcomes),
             contradictions=list(self.contradictions),
             revision_required=self.revision_required,
+            repair_directive=self.repair_directive,
             metadata=metadata,
         )
 
@@ -708,6 +1065,15 @@ class WorldModel:
             "revision_required": snapshot.revision_required,
             "revision_reason": snapshot.metadata.get("revision_reason"),
             "contradiction_debt": snapshot.metadata.get("contradiction_debt", 0),
+            "repair_operator": (
+                snapshot.repair_directive.operator
+                if snapshot.repair_directive is not None
+                else None
+            ),
+            "repair_cycle_active": snapshot.metadata.get("repair_cycle_active", False),
+            "repair_pending": snapshot.metadata.get("repair_pending", False),
+            "escalation_required": snapshot.metadata.get("escalation_required", False),
+            "repair_attempt_count": snapshot.metadata.get("repair_attempt_count", 0),
             "recent_outcomes": [
                 outcome.outcome_type for outcome in snapshot.action_outcomes[-3:]
             ],

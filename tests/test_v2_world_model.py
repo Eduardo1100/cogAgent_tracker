@@ -258,6 +258,14 @@ def test_world_model_marks_revision_required_after_repeated_blocked_action():
                         action_label="search",
                     ),
                 ],
+                entity_updates=[
+                    {
+                        "entity_id": "adjacent:north",
+                        "label": "wall",
+                        "entity_type": "adjacent_tile",
+                        "properties": {"direction": "north"},
+                    }
+                ],
                 status_delta={"T": step_index},
                 spatial_context=SpatialContext(
                     topology="grid",
@@ -274,10 +282,335 @@ def test_world_model_marks_revision_required_after_repeated_blocked_action():
     snapshot = model.to_snapshot()
 
     assert snapshot.revision_required is True
+    assert snapshot.repair_directive is not None
+    assert snapshot.repair_directive.operator == "repair_topology"
     assert snapshot.metadata["revision_reason"] == "repeated_contradiction"
-    assert snapshot.metadata["contradiction_debt"] >= 3
+    assert snapshot.metadata["contradiction_debt"] >= 2
+    assert snapshot.metadata["repair_pending"] is True
+    assert snapshot.metadata["escalation_required"] is False
     assert "move north" in snapshot.metadata["blocked_action_labels"]
     assert any(
         contradiction.category == "blocked_path"
+        for contradiction in snapshot.contradictions
+    )
+
+
+def test_world_model_keeps_repair_cycle_active_until_structural_progress_returns():
+    capabilities = AdapterCapabilities(
+        adapter_name="nethack",
+        observation_mode="grid",
+        supports_spatial_context=True,
+        supports_status_delta=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Explore the dungeon")
+
+    for step_index in (1, 2):
+        model.apply_event(
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="It's a wall.",
+                normalized_observation="It's a wall.",
+                action_result=ActionResult(
+                    action_text="move north",
+                    action_executed=True,
+                    operator_family="relocation",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="move-north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["north", "east"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north"],
+                ),
+            )
+        )
+
+    blocked_snapshot = model.to_snapshot()
+    blocked_debt = blocked_snapshot.metadata["contradiction_debt"]
+    assert blocked_snapshot.revision_required is True
+    assert blocked_snapshot.metadata["repair_cycle_active"] is True
+
+    model.set_active_option(
+        OptionContract(
+            family="recover_from_failure",
+            objective="Explore the dungeon",
+            reasoning_budget="none",
+        )
+    )
+    model.apply_event(
+        AdapterEvent(
+            step_index=3,
+            task_text="Explore the dungeon",
+            raw_observation="The goblin throws a crude dagger! You are hit.",
+            normalized_observation="The goblin throws a crude dagger! You are hit.",
+            action_result=ActionResult(
+                action_text="search",
+                action_executed=True,
+                operator_family="inspect",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="search",
+                    family="inspect",
+                    action_label="search",
+                ),
+                OperatorCandidate(
+                    operator_id="move-east",
+                    family="relocation",
+                    action_label="move east",
+                ),
+            ],
+            status_delta={"HP": -3, "T": 3},
+            spatial_context=SpatialContext(
+                topology="grid",
+                current_region="Dlvl:1",
+                current_node_id="Dlvl:1:T:3",
+                visible_nodes=["east"],
+                frontier_nodes=["east"],
+                passable_directions=["east"],
+                blocked_directions=["north"],
+            ),
+        )
+    )
+
+    repair_snapshot = model.to_snapshot()
+
+    assert repair_snapshot.revision_required is True
+    assert repair_snapshot.metadata["revision_reason"] == "repair_incomplete"
+    assert repair_snapshot.metadata["repair_cycle_active"] is True
+    assert repair_snapshot.metadata["repair_pending"] is True
+    assert repair_snapshot.metadata["escalation_required"] is False
+    assert repair_snapshot.metadata["repair_attempt_count"] == 1
+    assert repair_snapshot.metadata["contradiction_debt"] > blocked_debt
+    assert any(
+        contradiction.category == "negative_status_change"
+        for contradiction in repair_snapshot.contradictions
+    )
+
+
+def test_world_model_escalates_after_bounded_repair_attempts_are_exhausted():
+    capabilities = AdapterCapabilities(
+        adapter_name="nethack",
+        observation_mode="grid",
+        supports_spatial_context=True,
+        supports_status_delta=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Explore the dungeon")
+
+    for step_index in (1, 2):
+        model.apply_event(
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="It's a wall.",
+                normalized_observation="It's a wall.",
+                action_result=ActionResult(
+                    action_text="move north",
+                    action_executed=True,
+                    operator_family="relocation",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="move-north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["north", "east"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north"],
+                ),
+            )
+        )
+
+    model.set_active_option(
+        OptionContract(
+            family="recover_from_failure",
+            objective="Explore the dungeon",
+            reasoning_budget="none",
+        )
+    )
+    for step_index in (3, 4):
+        model.apply_event(
+            AdapterEvent(
+                step_index=step_index,
+                task_text="Explore the dungeon",
+                raw_observation="Nothing happens.",
+                normalized_observation="Nothing happens.",
+                action_result=ActionResult(
+                    action_text="search",
+                    action_executed=True,
+                    operator_family="inspect",
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="search",
+                        family="inspect",
+                        action_label="search",
+                    ),
+                    OperatorCandidate(
+                        operator_id="move-east",
+                        family="relocation",
+                        action_label="move east",
+                    ),
+                ],
+                status_delta={"T": step_index},
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id=f"Dlvl:1:T:{step_index}",
+                    visible_nodes=["east"],
+                    frontier_nodes=["east"],
+                    passable_directions=["east"],
+                    blocked_directions=["north"],
+                ),
+            )
+        )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.revision_required is True
+    assert snapshot.metadata["repair_pending"] is False
+    assert snapshot.metadata["escalation_required"] is True
+    assert snapshot.metadata["revision_reason"] == "repair_budget_exhausted"
+    assert snapshot.metadata["repair_attempt_count"] == 2
+
+
+def test_world_model_detects_ui_target_binding_contradiction_and_requests_repair():
+    capabilities = AdapterCapabilities(
+        adapter_name="webarena",
+        observation_mode="ui",
+        supports_ui_context=True,
+        supports_status_delta=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Complete checkout")
+
+    model.apply_event(
+        AdapterEvent(
+            step_index=1,
+            task_text="Complete checkout",
+            raw_observation="Checkout page.",
+            normalized_observation="Checkout page.",
+            action_result=ActionResult(
+                action_text="click submit",
+                action_executed=True,
+                operator_family="ui_click",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="click-submit",
+                    family="ui_click",
+                    action_label="click submit",
+                    target_ids=["submit"],
+                ),
+                OperatorCandidate(
+                    operator_id="scroll-down",
+                    family="ui_navigation",
+                    action_label="scroll down",
+                ),
+            ],
+            ui_context=UIContext(
+                page_url="https://example.test/checkout",
+                page_title="Checkout",
+                focused_element_id="submit",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="submit",
+                        role="button",
+                        text="Place order",
+                    )
+                ],
+                action_scope=["click", "scroll"],
+            ),
+        )
+    )
+    model.apply_event(
+        AdapterEvent(
+            step_index=2,
+            task_text="Complete checkout",
+            raw_observation="Element submit is not visible anymore.",
+            normalized_observation="Element submit is not visible anymore.",
+            action_result=ActionResult(
+                action_text="click submit",
+                action_executed=True,
+                operator_family="ui_click",
+                failure_reason="element not visible",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="click-cart",
+                    family="ui_click",
+                    action_label="click cart",
+                    target_ids=["cart"],
+                ),
+                OperatorCandidate(
+                    operator_id="scroll-down",
+                    family="ui_navigation",
+                    action_label="scroll down",
+                ),
+                OperatorCandidate(
+                    operator_id="type-search",
+                    family="ui_type",
+                    action_label="type search",
+                    target_ids=["search"],
+                ),
+            ],
+            ui_context=UIContext(
+                page_url="https://example.test/checkout",
+                page_title="Checkout",
+                focused_element_id="cart",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="cart",
+                        role="button",
+                        text="Cart",
+                    ),
+                    UIElementRecord(
+                        element_id="search",
+                        role="textbox",
+                        name="Search",
+                    ),
+                ],
+                action_scope=["click", "type", "scroll"],
+            ),
+        )
+    )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.revision_required is True
+    assert snapshot.repair_directive is not None
+    assert snapshot.repair_directive.operator == "repair_target_binding"
+    assert snapshot.metadata["repair_pending"] is True
+    assert snapshot.metadata["escalation_required"] is False
+    assert any(
+        contradiction.category == "ui_target_binding"
         for contradiction in snapshot.contradictions
     )

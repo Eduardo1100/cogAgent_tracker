@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug iterate-agent ablate-agent format lint test ci clean build-docker benchmark up down nuke sanity bootstrap-alfworld db-upgrade db-revision db-current
+.PHONY: help setup dev train eval debug iterate-agent ablate-agent format lint test ci clean build-docker benchmark up down nuke sanity bootstrap-alfworld bootstrap-webarena db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -26,10 +26,11 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; exec env PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
 
-debug: ## Debug a single game. AGENT=gwt(default)|baseline. SHOW_RUNTIME_SUMMARY=1 prints a compact controller hint each step. ENV=alfworld(default)|scienceworld|tales|nethack. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS. MAX_ACTIONS=N MAX_CHATROUNDS=N.
+debug: ## Debug a single game. AGENT=gwt(default)|baseline. SHOW_RUNTIME_SUMMARY=1 prints a compact controller hint each step. ENV=alfworld(default)|scienceworld|tales|nethack|webarena. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS. WebArena: WEBARENA_TASK_IDS WEBARENA_ENV_ID. MAX_ACTIONS=N MAX_CHATROUNDS=N.
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; \
-	$(if $(filter scienceworld tales nethack,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) \
+	$(if $(filter scienceworld tales nethack webarena,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) \
+	$(if $(filter webarena,$(ENV)),bash scripts/bootstrap_webarena.sh;) \
 	exec env WANDB_MODE=offline PYTHONPATH=/app uv run python scripts/run_agent.py \
 	$(if $(filter scienceworld,$(ENV)), \
 	  src/agent/configs/scienceworld.yaml --env-type scienceworld --num_games 1 $(if $(SW_TASKS),--sw-tasks $(SW_TASKS),) $(if $(SW_VARS),--sw-variations $(SW_VARS),--sw-variations 1), \
@@ -37,6 +38,8 @@ debug: ## Debug a single game. AGENT=gwt(default)|baseline. SHOW_RUNTIME_SUMMARY
 	  src/agent/configs/tales.yaml --env-type tales --num_games 1 $(if $(TALES_ENVS),--tales-envs $(TALES_ENVS),), \
 	$(if $(filter nethack,$(ENV)), \
 	  src/agent/configs/nethack.yaml --env-type nethack --num_games 1 $(if $(NH_VARIANT),--nethack-variant $(NH_VARIANT),) $(if $(NH_SEEDS),--nethack-seeds $(NH_SEEDS),) $(if $(RENDER),--render,), \
+	$(if $(filter webarena,$(ENV)), \
+	  src/agent/configs/webarena.yaml --env-type webarena --num_games 1 $(if $(WEBARENA_TASK_IDS),--webarena-task-ids $(WEBARENA_TASK_IDS),) $(if $(WEBARENA_ENV_ID),--webarena-env-id $(WEBARENA_ENV_ID),) $(if $(RENDER),--render,), \
 	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))))) \
 	$(if $(MAX_ACTIONS),--max_actions $(MAX_ACTIONS),) \
 	$(if $(MAX_CHATROUNDS),--max_chat_rounds $(MAX_CHATROUNDS),) \
@@ -105,6 +108,10 @@ sanity:
 bootstrap-alfworld:
 	docker compose run --rm app \
 	sh -lc 'set -eux; bash scripts/bootstrap_alfworld.sh'
+
+bootstrap-webarena:
+	docker compose run --rm app \
+	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_webarena.sh'
 
 benchmark: eval ## Alias for eval (backwards compat)
 
