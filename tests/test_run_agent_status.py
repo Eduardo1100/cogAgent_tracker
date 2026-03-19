@@ -640,3 +640,62 @@ def test_configure_live_analyst_trace_persists_existing_trace(tmp_db, tmp_path):
         assert persisted.current_analyst_trace.startswith(
             "T1 | locate_primary_target | INCOMPLETE"
         )
+
+
+def test_get_agent_usage_totals_prefers_agent_runtime_hook():
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    agent = types.SimpleNamespace(
+        get_usage_totals=lambda: {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "total_tokens": 18,
+            "total_cost": 0.125,
+        },
+        group_chat=types.SimpleNamespace(agents=["ignored"]),
+    )
+
+    totals = run_agent.get_agent_usage_totals(agent)
+
+    assert totals == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "total_cost": 0.125,
+    }
+
+
+def test_parse_arguments_accepts_runtime_summary_flag(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_agent.py", "config.yaml", "--gwt", "--show_runtime_summary"],
+    )
+
+    args = run_agent.parse_arguments()
+
+    assert args.gwt is True
+    assert args.show_runtime_summary is True
+
+
+def test_aggregate_architecture_metrics_counts_terminal_status_reasons():
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    aggregated = run_agent.aggregate_architecture_metrics(
+        [
+            {"version": 7, "terminal_status_reason": "budget_exhausted"},
+            {"version": 7, "terminal_status_reason": "success"},
+            {"version": 7, "terminal_status_reason": "budget_exhausted"},
+        ]
+    )
+
+    assert aggregated["version"] == 7
+    assert aggregated["terminal_status_reasons"] == {
+        "budget_exhausted": 2,
+        "success": 1,
+    }

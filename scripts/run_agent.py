@@ -655,6 +655,21 @@ def ensure_chat_artifacts(
 
 
 def get_agent_usage_totals(agent) -> dict[str, float]:
+    usage_getter = getattr(agent, "get_usage_totals", None)
+    if callable(usage_getter):
+        try:
+            candidate = usage_getter()
+            if isinstance(candidate, dict):
+                return {
+                    "prompt_tokens": int(candidate.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(
+                        candidate.get("completion_tokens", 0) or 0
+                    ),
+                    "total_tokens": int(candidate.get("total_tokens", 0) or 0),
+                    "total_cost": float(candidate.get("total_cost", 0.0) or 0.0),
+                }
+        except Exception as exc:
+            print(f"⚠️ Usage collection failed from agent runtime: {exc}")
     group_chat = getattr(agent, "group_chat", None)
     agents = getattr(group_chat, "agents", None) or []
     return get_usage_totals(agents)
@@ -741,6 +756,7 @@ def _build_fallback_architecture_metrics(
         "thinking_count": thinking_count,
         "belief_update_count": belief_update_count,
         "deliberation_count": thinking_count + belief_update_count,
+        "terminal_status_reason": getattr(agent, "task_status_reason", None),
         "repeated_action_density": (
             repeated_action_count / len(actions) if actions else None
         ),
@@ -825,6 +841,7 @@ def aggregate_architecture_metrics(
     hist_burst_lengths: Counter[str] = Counter()
     hist_option_stop_reasons: Counter[str] = Counter()
     hist_option_interrupt_reasons: Counter[str] = Counter()
+    hist_terminal_status_reasons: Counter[str] = Counter()
     for metrics in valid_metrics:
         hist_stop_reasons.update(metrics.get("burst_stop_reasons") or {})
         hist_burst_lengths.update(metrics.get("burst_length_histogram") or {})
@@ -832,6 +849,9 @@ def aggregate_architecture_metrics(
         hist_option_interrupt_reasons.update(
             metrics.get("option_interrupt_reasons") or {}
         )
+        terminal_reason = metrics.get("terminal_status_reason")
+        if terminal_reason:
+            hist_terminal_status_reasons.update([str(terminal_reason)])
 
     def _sum_int(key: str) -> int:
         return sum(int(metrics.get(key) or 0) for metrics in valid_metrics)
@@ -854,6 +874,7 @@ def aggregate_architecture_metrics(
         "belief_update_count": _sum_int("belief_update_count"),
         "deliberation_count": _sum_int("deliberation_count"),
         "burst_count": _sum_int("burst_count"),
+        "v2_direct_action_count": _sum_int("v2_direct_action_count"),
         "mean_tokens_per_action": _mean_float("tokens_per_action"),
         "mean_tokens_per_deliberation": _mean_float("tokens_per_deliberation"),
         "mean_repeated_action_density": _mean_float("repeated_action_density"),
@@ -872,6 +893,7 @@ def aggregate_architecture_metrics(
         "option_stop_reasons": dict(sorted(hist_option_stop_reasons.items())),
         "option_interrupt_count": _sum_int("option_interrupt_count"),
         "option_interrupt_reasons": dict(sorted(hist_option_interrupt_reasons.items())),
+        "terminal_status_reasons": dict(sorted(hist_terminal_status_reasons.items())),
     }
 
 
@@ -1183,6 +1205,12 @@ def parse_arguments():
     )
     parser.add_argument(
         "--max_chat_rounds", type=int, default=75, help="Max chat rounds per game"
+    )
+    parser.add_argument(
+        "--show_runtime_summary",
+        action="store_true",
+        default=False,
+        help="Print a compact live runtime summary each step.",
     )
     parser.add_argument(
         "--rag_episode_k",

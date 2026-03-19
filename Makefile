@@ -26,7 +26,7 @@ eval: ## Run eval on valid_unseen split. GAMES=N to limit (default: all)
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_alfworld.sh; exec env PYTHONPATH=/app uv run python scripts/run_agent.py src/agent/configs/eval_config.yaml --gwt --splits valid_unseen $(if $(GAMES),--num_games $(GAMES),)'
 
-debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS. MAX_ACTIONS=N MAX_CHATROUNDS=N.
+debug: ## Debug a single game. AGENT=gwt(default)|baseline. SHOW_RUNTIME_SUMMARY=1 prints a compact controller hint each step. ENV=alfworld(default)|scienceworld|tales|nethack. ALFWorld: GAMES=1,2,3 | TASK=1-6 | N=k random. ScienceWorld: SW_TASKS SW_VARS. TALES: TALES_ENVS. NetHack: NH_VARIANT NH_SEEDS. MAX_ACTIONS=N MAX_CHATROUNDS=N.
 	docker compose run --rm app \
 	sh -lc 'set -eux; uv sync --frozen; \
 	$(if $(filter scienceworld tales nethack,$(ENV)),,bash scripts/bootstrap_alfworld.sh;) \
@@ -40,7 +40,8 @@ debug: ## Debug a single game. ENV=alfworld(default)|scienceworld|tales|nethack.
 	  src/agent/configs/ALFworld.yaml --splits valid_unseen --max_chat_rounds 150 $(if $(GAMES),--game_ids $(GAMES),$(if $(TASK),--task_type $(TASK),--num_games $(or $(N),1)))))) \
 	$(if $(MAX_ACTIONS),--max_actions $(MAX_ACTIONS),) \
 	$(if $(MAX_CHATROUNDS),--max_chat_rounds $(MAX_CHATROUNDS),) \
-	--gwt'
+	$(if $(SHOW_RUNTIME_SUMMARY),--show_runtime_summary,$(if $(and $(filter nethack,$(ENV)),$(filter-out baseline,$(AGENT))),--show_runtime_summary,)) \
+	$(if $(filter baseline,$(AGENT)),--baseline,--gwt)'
 
 iterate-agent: ## Run one debug episode then hand to agent. ENV=tales|nethack (default: random for debug, latest for skip-debug). GAMES=N AGENT=claudecode|codex SKIP_DEBUG=1 ALLOW_DIRTY=1 PROMPT_ONLY=1 DANGEROUS=1 MAX_ACTIONS=N MAX_CHATROUNDS=N
 	uv run python scripts/iterate_agent.py \

@@ -44,6 +44,8 @@ from src.agent.helpers import (
     sentence_transformer_model,
 )
 from src.agent.rag_memory import retrieve_relevant_concepts, retrieve_relevant_episodes
+from src.agent.v2.controller import V2Controller
+from src.agent.v2.world_model import WorldModel
 
 
 class GWTAutogenAgent(AutogenAgent):
@@ -595,6 +597,7 @@ class GWTAutogenAgent(AutogenAgent):
         ("conditional_branch_tracking", 3),
         ("relation_frontier", 3),
         ("remote_room_signal", 3),
+        ("v2_runtime_advisory", 3),
         ("episode_hypothesis_ledger", 2),
         ("referent_resolution", 3),
         ("ambiguity_resolution", 3),
@@ -1379,12 +1382,19 @@ class GWTAutogenAgent(AutogenAgent):
         self.prev_episodic_memories = []
         self.knowledge = []
         self.task_status = "INCOMPLETE"
+        self.task_status_reason: str | None = None
         self.initial_message = ""
         self.memory = ""
         self._episodic_rag_cache: dict = {}
         self._concept_rag_cache: dict = {}
         self._task_contract: dict = {}
         self._task_contract_source = ""
+        self._v2_controller = V2Controller()
+        self._v2_world_model: WorldModel | None = None
+        self._v2_runtime_advisory: dict = {}
+        self._v2_bridge_update_count = 0
+        self._v2_bridge_error_count = 0
+        self._v2_direct_action_count = 0
         self._reset_episode_reasoning_state()
 
     def _get_memory_environment_name(self) -> str:
@@ -1405,6 +1415,19 @@ class GWTAutogenAgent(AutogenAgent):
         return self._MEMORY_ROOT / self._get_memory_environment_name()
 
     def _reset_episode_reasoning_state(self) -> None:
+        retained_v2_memory = getattr(
+            getattr(self, "_v2_controller", None), "memory", None
+        )
+        self._v2_controller = (
+            V2Controller(memory=retained_v2_memory)
+            if retained_v2_memory is not None
+            else V2Controller()
+        )
+        self._v2_world_model = None
+        self._v2_runtime_advisory = {}
+        self._v2_bridge_update_count = 0
+        self._v2_bridge_error_count = 0
+        self._v2_direct_action_count = 0
         self.episode_hypothesis_ledger: dict[str, dict] = {}
         self.recent_hypothesis_tests: list[dict] = []
         self._provider_fallbacks_applied: set[str] = set()
@@ -1476,6 +1499,135 @@ class GWTAutogenAgent(AutogenAgent):
         # remain in this set are unconditionally valid at any sequence position.
         self._persistent_admissible: set[str] | None = None
         self._burst_history: list[dict[str, object]] = []
+        self.task_status_reason = None
+
+    def _compute_task_status_and_reason(self) -> tuple[str, str | None]:
+        if self.success:
+            return "COMPLETED", "success"
+        if self.task_status_reason in {"environment_failure", "agent_error"}:
+            return "FAILED", self.task_status_reason
+        if self.num_actions_taken >= self.max_actions:
+            return "FAILED", "budget_exhausted"
+        return "INCOMPLETE", None
+
+    def _get_failure_reflection(self, reason: str | None) -> str:
+        if reason == "budget_exhausted":
+            return (
+                "\nTask stopped because the action budget was exhausted before the "
+                "environment was solved. Reflect on which actions advanced progress "
+                "versus which consumed budget without enough value. Have "
+                "Learning_Agent extract any generalizable efficiency insights. "
+                "Action_Agent will close the session automatically."
+            )
+        if reason == "agent_error":
+            return (
+                "\nTask stopped because the runtime encountered an unrecoverable "
+                "agent-side execution issue. Reflect on what evidence was available "
+                "before the interruption and what lower-risk recovery path would have "
+                "been better. Have Learning_Agent extract any generalizable "
+                "reliability insights. Action_Agent will close the session "
+                "automatically."
+            )
+        if reason == "environment_failure":
+            return (
+                "\nTask FAILED due to an environment-level terminal outcome. Reflect "
+                "on what state transitions or commitments likely caused the failure. "
+                "Have Learning_Agent extract any generalizable insights. Action_Agent "
+                "will close the session automatically."
+            )
+        return (
+            "\nTask FAILED. Reflect on your actions and reasoning. Identify what "
+            "went wrong and what mistakes led to failure. Have Learning_Agent "
+            "extract any generalizable insights. Action_Agent will close the "
+            "session automatically."
+        )
+
+    def _write_result_artifact(self) -> None:
+        with open(self.log_paths["result_path"], "w") as f:
+            f.write(f"Success: {self.success}\n")
+            if self.task_status_reason:
+                f.write(f"Terminal Reason: {self.task_status_reason}\n")
+
+    @staticmethod
+    def _get_v2_preferred_families(option_family: str) -> set[str]:
+        mapping = {
+            "explore_frontier": {"relocation"},
+            "inspect_novelty": {"inspect"},
+            "manipulate_target": {
+                "interaction",
+                "manipulation",
+                "tool_application",
+                "device_control",
+                "transfer_or_transform",
+                "focus",
+            },
+            "verify_outcome": {"inspect", "interaction", "tool_application"},
+            "pursue_reward": {
+                "interaction",
+                "inventory",
+                "relocation",
+                "manipulation",
+                "transfer_or_transform",
+            },
+            "commit_transition": {"relocation"},
+            "recover_from_failure": {
+                "inspect",
+                "relocation",
+                "interaction",
+                "tool_application",
+            },
+        }
+        return mapping.get(option_family or "", set())
+
+    def _get_v2_direct_execution_action(
+        self,
+        *,
+        admissible_commands: list[str],
+        requested_action: str | None = None,
+    ) -> str | None:
+        advisory = self._get_v2_runtime_advisory_snapshot()
+        if not advisory or advisory.get("planner_stop_reason") == "v2_bridge_error":
+            return None
+        if self.task_status != "INCOMPLETE":
+            return None
+        if int(advisory.get("uncertainty_count") or 0) > 0:
+            return None
+
+        option_family = str(advisory.get("option_family") or "")
+        if option_family not in {
+            "explore_frontier",
+            "inspect_novelty",
+            "verify_outcome",
+            "commit_transition",
+            "pursue_reward",
+        }:
+            return None
+
+        suggested_action = str(advisory.get("suggested_action") or "").strip()
+        if not suggested_action:
+            return None
+
+        direct_family = self._classify_action_family(suggested_action)
+        if direct_family not in {"relocation", "inspect", "interaction"}:
+            return None
+        if direct_family not in self._LOW_RISK_FAMILIES:
+            return None
+
+        resolved_action = self._canonicalize_suggested_action(
+            suggested_action,
+            admissible_commands,
+        )
+        if self._normalize_runtime_text(resolved_action) not in {
+            self._normalize_runtime_text(command) for command in admissible_commands
+        }:
+            return None
+
+        requested_norm = self._normalize_runtime_text(requested_action or "")
+        resolved_norm = self._normalize_runtime_text(resolved_action)
+        if requested_norm and requested_norm == resolved_norm:
+            return resolved_action
+
+        return resolved_action
 
     def _build_task_contract(self, task: str) -> dict:
         task_lower = (task or "").lower()
@@ -10921,10 +11073,81 @@ class GWTAutogenAgent(AutogenAgent):
             elif family not in {"device_control", "relocation"}:
                 score -= 6
 
+        score += self._score_v2_runtime_alignment(
+            action=action,
+            family=family,
+            normalized=normalized,
+            content_token_set=content_token_set,
+            scoring_context=scoring_context,
+        )
+
         if normalized.startswith("wait"):
             score -= 10
 
         return score, grounded_hits, family_priority
+
+    def _score_v2_runtime_alignment(
+        self,
+        *,
+        action: str,
+        family: str,
+        normalized: str,
+        content_token_set: set[str],
+        scoring_context: dict,
+    ) -> int:
+        advisory = scoring_context.get("v2_runtime_advisory") or {}
+        if not advisory or advisory.get("planner_stop_reason") == "v2_bridge_error":
+            return 0
+
+        score = 0
+        option_family = str(advisory.get("option_family") or "")
+        suggested_action = self._normalize_runtime_text(
+            str(advisory.get("suggested_action") or "")
+        )
+        target_signature = self._normalize_runtime_text(
+            str(advisory.get("target_signature") or "")
+        )
+        continue_current_option = bool(advisory.get("continue_current_option"))
+        preferred_families = self._get_v2_preferred_families(option_family)
+        recent_actions = {
+            self._normalize_runtime_text(item)
+            for item in self._recently_executed_actions[-3:]
+            if item
+        }
+
+        if suggested_action:
+            if normalized == suggested_action:
+                score += 18
+            elif (
+                normalized in recent_actions and suggested_action not in recent_actions
+            ):
+                score -= 6
+
+        if preferred_families:
+            if family in preferred_families:
+                score += 8
+            elif continue_current_option:
+                score -= 5
+
+        if target_signature:
+            target_tokens = set(self._extract_runtime_tokens(target_signature))
+            referent_signature = self._normalize_runtime_text(
+                self._get_action_referent_signature(action, family=family)
+            )
+            if normalized == target_signature:
+                score += 14
+            elif target_signature and target_signature in normalized:
+                score += 8
+            if target_tokens and (content_token_set & target_tokens):
+                score += 6
+            if (
+                referent_signature
+                and target_signature
+                and target_signature in referent_signature
+            ):
+                score += 6
+
+        return score
 
     def _build_shortlist_scoring_context(
         self,
@@ -11066,6 +11289,7 @@ class GWTAutogenAgent(AutogenAgent):
             "next_expected_stage": self._get_next_expected_stage_label()
             if lifecycle_task
             else None,
+            "v2_runtime_advisory": self._get_v2_runtime_advisory_snapshot(),
         }
 
     def _summarize_admissible_actions_uncached(
@@ -11454,6 +11678,141 @@ class GWTAutogenAgent(AutogenAgent):
                 for key, limit in self._RUNTIME_PERCEPT_KEYS
             }
         )
+
+    def _get_v2_runtime_advisory_snapshot(self) -> dict:
+        return self._prune_empty_runtime_fields(
+            self._limit_runtime_payload(self._v2_runtime_advisory, list_limit=4)
+        )
+
+    def _print_live_runtime_summary(self) -> None:
+        if not getattr(self.args, "show_runtime_summary", False):
+            return
+        advisory = self._get_v2_runtime_advisory_snapshot()
+        if not advisory:
+            return
+        status_line = advisory.get("status_summary") or ""
+        parts = [
+            f"[GWT-v2] t={self.percept.get('timestep', self.num_actions_taken)}",
+            f"phase={advisory.get('phase', 'act')}",
+        ]
+        if advisory.get("option_family"):
+            parts.append(f"option={advisory['option_family']}")
+        if advisory.get("target_signature"):
+            parts.append(f"target={advisory['target_signature']}")
+        if advisory.get("suggested_action"):
+            parts.append(f"hint={advisory['suggested_action']}")
+        if advisory.get("planner_stop_reason"):
+            parts.append(f"reason={advisory['planner_stop_reason']}")
+        if status_line:
+            parts.append(status_line)
+        print(" | ".join(parts), flush=True)
+        observation = self.percept.get("resulting_observation", "")
+        if observation:
+            first_line = next(
+                (
+                    line.strip()
+                    for line in str(observation).splitlines()
+                    if line.strip()
+                ),
+                "",
+            )
+            if first_line:
+                print(f"      obs: {first_line[:140]}", flush=True)
+
+    def _refresh_v2_runtime_advisory(
+        self,
+        *,
+        action: str,
+        executed: bool,
+        summary: dict,
+    ) -> None:
+        adapter = getattr(self, "adapter", None)
+        if adapter is None:
+            self._v2_runtime_advisory = {}
+            return
+        build_event = getattr(adapter, "build_v2_event", None)
+        get_capabilities = getattr(adapter, "get_v2_capabilities", None)
+        if not callable(build_event) or not callable(get_capabilities):
+            self._v2_runtime_advisory = {}
+            return
+
+        action_text = None if action in (None, "", "None") else str(action)
+        try:
+            event = build_event(
+                step_index=self.num_actions_taken,
+                action_text=action_text,
+                action_executed=(executed if action_text else None),
+                metadata={
+                    "source": "gwt_loop",
+                    "current_phase": summary.get("current_phase"),
+                    "referent_resolution": self.percept.get("referent_resolution", {}),
+                    "ambiguity_resolution": self.percept.get(
+                        "ambiguity_resolution", {}
+                    ),
+                },
+            )
+            if self._v2_world_model is None:
+                self._v2_world_model = WorldModel.from_event(
+                    event,
+                    capabilities=get_capabilities(),
+                )
+                self._v2_controller.memory.record_event(
+                    self._v2_world_model.to_snapshot(),
+                    event,
+                    current_option=None,
+                )
+            else:
+                self._v2_controller.observe(self._v2_world_model, event)
+
+            controller_step = self._v2_controller.step(self._v2_world_model)
+            snapshot = self._v2_world_model.to_snapshot()
+            memory_cues = [
+                cue.summary
+                for cue in list(snapshot.memory_cues or [])[:2]
+                if cue.summary
+            ]
+            frontier_nodes = snapshot.frontier_summary.get("frontier_nodes", [])
+            status_snapshot = snapshot.metadata.get("status_snapshot", {})
+            status_parts = [
+                f"{key}={status_snapshot[key]}"
+                for key in ("Dlvl", "T", "S", "$", "HP", "Xp")
+                if key in status_snapshot
+            ]
+            self._v2_runtime_advisory = self._prune_empty_runtime_fields(
+                {
+                    "phase": summary.get("current_phase", "act"),
+                    "option_family": (
+                        controller_step.planner_directive.option.family
+                        if controller_step.planner_directive.option is not None
+                        else None
+                    ),
+                    "target_signature": (
+                        controller_step.planner_directive.option.target_signature
+                        if controller_step.planner_directive.option is not None
+                        else None
+                    ),
+                    "planner_stop_reason": controller_step.planner_directive.stop_reason,
+                    "continue_current_option": (
+                        controller_step.planner_directive.continue_current_option
+                    ),
+                    "suggested_action": controller_step.execution_step.action_label,
+                    "planner_notes": list(
+                        controller_step.planner_directive.planner_notes[:2]
+                    ),
+                    "memory_cues": memory_cues,
+                    "entity_count": len(snapshot.entities),
+                    "frontier_count": len(frontier_nodes),
+                    "uncertainty_count": len(snapshot.uncertainty),
+                    "status_summary": " ".join(status_parts),
+                }
+            )
+            self._v2_bridge_update_count += 1
+        except Exception:
+            self._v2_bridge_error_count += 1
+            self._v2_runtime_advisory = {
+                "phase": summary.get("current_phase", "act"),
+                "planner_stop_reason": "v2_bridge_error",
+            }
 
     def _get_agent_facing_percept_snapshot(self) -> dict:
         percept_snapshot = self._snapshot_analyst_payload(self.percept)
@@ -12157,7 +12516,11 @@ class GWTAutogenAgent(AutogenAgent):
         return self._build_decision_state(summary).to_compact_dict()
 
     def _get_action_agent_runtime_snapshots(self, summary: dict) -> dict:
-        return build_action_runtime_snapshot(self._build_decision_state(summary))
+        snapshots = build_action_runtime_snapshot(self._build_decision_state(summary))
+        v2_advisory = self._get_v2_runtime_advisory_snapshot()
+        if v2_advisory:
+            snapshots["v2_runtime_advisory"] = v2_advisory
+        return snapshots
 
     def _get_focus_agent_action_summary(self, summary: dict | None) -> dict:
         summary = summary if isinstance(summary, dict) else {}
@@ -12289,6 +12652,9 @@ class GWTAutogenAgent(AutogenAgent):
         thinking_hints = self._get_thinking_agent_entity_hints()
         if thinking_hints:
             snapshots["thinking_agent_entity_hints"] = thinking_hints
+        v2_advisory = self._get_v2_runtime_advisory_snapshot()
+        if v2_advisory:
+            snapshots["v2_runtime_advisory"] = v2_advisory
 
         return self._limit_runtime_payload(snapshots, list_limit=5)
 
@@ -12754,10 +13120,11 @@ class GWTAutogenAgent(AutogenAgent):
         )
 
         return {
-            "version": 4,
+            "version": 7,
             "thinking_count": thinking_count,
             "belief_update_count": belief_update_count,
             "deliberation_count": thinking_count + belief_update_count,
+            "terminal_status_reason": self.task_status_reason,
             "repeated_action_density": (
                 repeated_action_count / len(normalized_actions)
                 if normalized_actions
@@ -12813,6 +13180,12 @@ class GWTAutogenAgent(AutogenAgent):
                 ]
             ),
             "option_interrupt_reasons": dict(sorted(option_interrupt_reasons.items())),
+            "v2_bridge_update_count": int(self._v2_bridge_update_count or 0),
+            "v2_bridge_error_count": int(self._v2_bridge_error_count or 0),
+            "v2_direct_action_count": int(self._v2_direct_action_count or 0),
+            "v2_bridge_last_option_family": self._v2_runtime_advisory.get(
+                "option_family"
+            ),
         }
 
     def _refresh_action_agent_runtime_context(
@@ -13207,6 +13580,7 @@ class GWTAutogenAgent(AutogenAgent):
         self._task_contract_source = self.task
         self.admissible_actions = self.adapter.admissible_actions
         self.task_status = "INCOMPLETE"
+        self.task_status_reason = None
         self.curr_episodic_memory = []
         self.retrieve_memory()
 
@@ -13249,6 +13623,8 @@ class GWTAutogenAgent(AutogenAgent):
             "resulting_observation": self.adapter.observation,
             "task_status": self.task_status,
         }
+        if self.task_status_reason:
+            self.percept["task_status_reason"] = self.task_status_reason
         self._update_state_change_search_tracking(
             action=action,
             observation=self.adapter.observation,
@@ -13385,8 +13761,19 @@ class GWTAutogenAgent(AutogenAgent):
                 shared_action_context["task_relevant_action_shortlist"]
             )
         )
+        self._refresh_v2_runtime_advisory(
+            action=action,
+            executed=executed,
+            summary=shared_action_context,
+        )
+        v2_advisory = self._get_v2_runtime_advisory_snapshot()
+        if v2_advisory:
+            self.percept["v2_runtime_advisory"] = v2_advisory
+        else:
+            self.percept.pop("v2_runtime_advisory", None)
         self._persist_analyst_trace(summary=shared_action_context)
         self._refresh_action_agent_runtime_context(summary=action_runtime_summary)
+        self._print_live_runtime_summary()
 
         keys_to_extract = ["timestep", "attempted_action", "resulting_observation"]
         summary_json = json.dumps(
@@ -13840,21 +14227,21 @@ class GWTAutogenAgent(AutogenAgent):
     ) -> str:
         """Run full post-action state update. Returns reflection string (empty if task ongoing)."""
         reflection = ""
-        self.task_status = (
-            "COMPLETED"
-            if self.success
-            else "FAILED"
-            if self.num_actions_taken >= self.max_actions
-            else "INCOMPLETE"
+        self.task_status, self.task_status_reason = (
+            self._compute_task_status_and_reason()
         )
         if self.task_status == "COMPLETED":
             self.task_success = True
             self.rounds_left -= 1
+            self.result_dict[self.game_no] = "SUCCESS"
+            self._write_result_artifact()
             reflection = "\nTask COMPLETED. Reflect on your actions and reasoning. Identify what went right and what good decisions led to success. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
         elif self.task_status == "FAILED":
             self.task_failed = True
             self.rounds_left -= 1
-            reflection = "\nTask FAILED. Reflect on your actions and reasoning. Identify what went wrong and what mistakes led to failure. Have Learning_Agent extract any generalizable insights. Action_Agent will close the session automatically."
+            self.result_dict[self.game_no] = "FAILURE"
+            self._write_result_artifact()
+            reflection = self._get_failure_reflection(self.task_status_reason)
 
         reasoning_action = executed_action or canonical_suggested_action
         ambiguity_resolution = None
@@ -13924,14 +14311,13 @@ class GWTAutogenAgent(AutogenAgent):
             # empty/text calls after task completion still emit the stop signal.
             if self.task_success:
                 self.result_dict[self.game_no] = "SUCCESS"
-                with open(self.log_paths["result_path"], "w") as f:
-                    f.write(f"Success: {self.success}\n")
+                self.task_status_reason = "success"
+                self._write_result_artifact()
                 return "STRAWBERRY"
 
             if self.task_failed and self.rounds_left == 0:
                 self.result_dict[self.game_no] = "FAILURE"
-                with open(self.log_paths["result_path"], "w") as f:
-                    f.write(f"Success: {self.success}\n")
+                self._write_result_artifact()
                 return "FLEECE"
 
             if not suggested_action or suggested_action == "do nothing":
@@ -13948,6 +14334,7 @@ class GWTAutogenAgent(AutogenAgent):
             if self.task_failed:
                 self.max_actions += self.max_round_actions
                 self.task_failed = False
+                self.task_status_reason = None
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
 
             admissible_commands = self.adapter.admissible_actions
@@ -13964,8 +14351,10 @@ class GWTAutogenAgent(AutogenAgent):
                 self._empty_admissible_streak += 1
                 if self._empty_admissible_streak >= 2:
                     self.result_dict[self.game_no] = "FAILURE"
-                    with open(self.log_paths["result_path"], "w") as f:
-                        f.write("Success: False\n")
+                    self.task_status = "FAILED"
+                    self.task_failed = True
+                    self.task_status_reason = "environment_failure"
+                    self._write_result_artifact()
                     return "FLEECE"
                 return (
                     "NO ACTION EXECUTED — admissible action list is empty "
@@ -13975,8 +14364,18 @@ class GWTAutogenAgent(AutogenAgent):
             self._empty_admissible_streak = 0
 
             previous_observation = self.percept.get("resulting_observation", "")
+            effective_suggested_action = (
+                self._get_v2_direct_execution_action(
+                    admissible_commands=admissible_commands,
+                    requested_action=suggested_action,
+                )
+                or suggested_action
+            )
+            direct_execution_used = self._normalize_runtime_text(
+                effective_suggested_action
+            ) != self._normalize_runtime_text(suggested_action)
             canonical_suggested_action = self._canonicalize_suggested_action(
-                suggested_action, admissible_commands
+                effective_suggested_action, admissible_commands
             )
             action, action_score = get_best_candidate(
                 canonical_suggested_action, admissible_commands
@@ -13995,6 +14394,8 @@ class GWTAutogenAgent(AutogenAgent):
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
+                if direct_execution_used:
+                    self._v2_direct_action_count += 1
                 self._recently_executed_actions = (
                     self._recently_executed_actions + [action]
                 )[-5:]
@@ -14006,10 +14407,10 @@ class GWTAutogenAgent(AutogenAgent):
                 suggested_action=suggested_action,
                 previous_observation=previous_observation,
             )
-            self._record_burst_history(
-                planned_actions=1,
-                actions_executed=1 if executed_action is not None else 0,
-                stop_reason=(
+            self._last_burst_stop_reason = (
+                "v2_direct_execution"
+                if direct_execution_used and executed_action is not None
+                else (
                     "task_completed"
                     if self.task_status == "COMPLETED"
                     else (
@@ -14021,7 +14422,12 @@ class GWTAutogenAgent(AutogenAgent):
                             else "action_failed"
                         )
                     )
-                ),
+                )
+            )
+            self._record_burst_history(
+                planned_actions=1,
+                actions_executed=1 if executed_action is not None else 0,
+                stop_reason=self._last_burst_stop_reason,
             )
 
             return json.dumps(self._get_agent_facing_percept_snapshot()) + reflection
@@ -14041,19 +14447,19 @@ class GWTAutogenAgent(AutogenAgent):
             # Terminal state pre-checks (same as execute_action1)
             if self.task_success:
                 self.result_dict[self.game_no] = "SUCCESS"
-                with open(self.log_paths["result_path"], "w") as f:
-                    f.write(f"Success: {self.success}\n")
+                self.task_status_reason = "success"
+                self._write_result_artifact()
                 return "STRAWBERRY"
 
             if self.task_failed and self.rounds_left == 0:
                 self.result_dict[self.game_no] = "FAILURE"
-                with open(self.log_paths["result_path"], "w") as f:
-                    f.write(f"Success: {self.success}\n")
+                self._write_result_artifact()
                 return "FLEECE"
 
             if self.task_failed:
                 self.max_actions += self.max_round_actions
                 self.task_failed = False
+                self.task_status_reason = None
                 return "YOU GET ONE MORE CHANCE! DON'T GIVE UP! " + focus()
 
             # Normalize: accept list directly, JSON string, or comma-separated string
@@ -14157,6 +14563,13 @@ class GWTAutogenAgent(AutogenAgent):
 
                 previous_observation = self.percept.get("resulting_observation", "")
                 previous_state = self._build_decision_state()
+                direct_execution_action = self._get_v2_direct_execution_action(
+                    admissible_commands=admissible_commands,
+                    requested_action=suggested_action,
+                )
+                direct_execution_used = direct_execution_action is not None
+                if direct_execution_action is not None:
+                    suggested_action = direct_execution_action
                 canonical_suggested_action = self._canonicalize_suggested_action(
                     suggested_action, admissible_commands
                 )
@@ -14182,6 +14595,8 @@ class GWTAutogenAgent(AutogenAgent):
                 self.adapter.step(action)
                 self.success = self.adapter.has_won
                 self.num_actions_taken += 1
+                if direct_execution_used:
+                    self._v2_direct_action_count += 1
                 self._recently_executed_actions = (
                     self._recently_executed_actions + [action]
                 )[-5:]
@@ -14223,6 +14638,10 @@ class GWTAutogenAgent(AutogenAgent):
                 )
                 if _invalid_after > _invalid_before:
                     stop_reason = "action_failed"
+                    break
+
+                if direct_execution_used:
+                    stop_reason = "v2_direct_execution"
                     break
 
                 interrupt_decision = self._get_sequence_interrupt_decision(
@@ -14656,7 +15075,8 @@ class GWTAutogenAgent(AutogenAgent):
             #  - we've self-looped _MAX_ACTION_SELFLOOPS times in a row
             #    (force a belief update to avoid context drift on long sequences)
             if (
-                self._last_burst_stop_reason == "sequence_complete"
+                self._last_burst_stop_reason
+                in {"sequence_complete", "v2_direct_execution"}
                 and not self.task_success
                 and not self.task_failed
                 and self._stale_action_count == 0

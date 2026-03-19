@@ -5,6 +5,14 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.agent.v2.types import (
+    ActionResult,
+    AdapterCapabilities,
+    AdapterEvent,
+    OperatorCandidate,
+    SpatialContext,
+)
+
 
 def _install_gwt_import_stubs() -> None:
     matplotlib_module = types.ModuleType("matplotlib")
@@ -607,11 +615,14 @@ def test_get_architecture_metrics_reports_option_interrupts(tmp_path):
 
     metrics = agent.get_architecture_metrics()
 
-    assert metrics["version"] == 4
+    assert metrics["version"] == 7
     assert metrics["option_count"] == 1
     assert metrics["option_interrupt_count"] == 1
     assert metrics["option_stop_reasons"] == {"expected_progress_missing": 1}
     assert metrics["option_interrupt_reasons"] == {"expected_progress_missing": 1}
+    assert metrics["v2_bridge_update_count"] == 0
+    assert metrics["v2_direct_action_count"] == 0
+    assert metrics["terminal_status_reason"] is None
 
 
 def test_start_option_contract_infers_transition_family_for_stair_actions(tmp_path):
@@ -953,6 +964,107 @@ def test_update_percept_adds_action_summary_and_refreshes_private_shortlist(tmp_
     assert "connect aluminum foil to battery" in agent.action_agent.system_message
 
 
+def test_v2_runtime_advisory_is_wired_into_gwt_runtime_context(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task = "Explore the area and find a path forward."
+    agent.task_status = "INCOMPLETE"
+    agent.curr_episodic_memory = []
+    agent.num_actions_taken = 1
+    agent.max_actions = 35
+    agent.action_agent = SimpleNamespace(system_message="")
+    agent._action_agent_base_prompt = "BASE ACTION PROMPT"
+    agent._reset_episode_reasoning_state()
+    agent.admissible_actions = ["wait"]
+
+    class _Adapter:
+        admissible_actions = ["move north", "wait", "search"]
+        observation = (
+            "You are standing in a corridor.\n"
+            "[Surroundings]\n"
+            "  north: floor\n"
+            "  south: wall\n"
+            "  passable: north"
+        )
+
+        def get_v2_capabilities(self):
+            return AdapterCapabilities(
+                adapter_name="nethack",
+                observation_mode="grid",
+                supports_spatial_context=True,
+                supports_operator_candidates=True,
+            )
+
+        def build_v2_event(
+            self,
+            *,
+            step_index: int,
+            action_text: str | None = None,
+            action_executed: bool | None = None,
+            reward_delta: float | None = None,
+            status_delta: dict | None = None,
+            metadata: dict | None = None,
+        ):
+            return AdapterEvent(
+                step_index=step_index,
+                task_text=agent.task,
+                raw_observation=self.observation,
+                normalized_observation=self.observation,
+                action_result=ActionResult(
+                    action_text=action_text,
+                    action_executed=action_executed,
+                    operator_family="relocation" if action_text else None,
+                ),
+                operator_candidates=[
+                    OperatorCandidate(
+                        operator_id="north",
+                        family="relocation",
+                        action_label="move north",
+                    ),
+                    OperatorCandidate(
+                        operator_id="wait",
+                        family="inspect",
+                        action_label="wait",
+                    ),
+                ],
+                spatial_context=SpatialContext(
+                    topology="grid",
+                    current_region="Dlvl:1",
+                    current_node_id="Dlvl:1:T:1",
+                    visible_nodes=["north", "south"],
+                    frontier_nodes=["north"],
+                    passable_directions=["north"],
+                    blocked_directions=["south"],
+                ),
+                status_delta=status_delta or {"Dlvl": 1, "T": step_index},
+                metadata=metadata or {},
+            )
+
+    agent.adapter = _Adapter()
+    agent.percept = {
+        "resulting_observation": agent.adapter.observation,
+        "referent_resolution": {},
+        "ambiguity_resolution": {},
+    }
+
+    agent._refresh_v2_runtime_advisory(
+        action="move north",
+        executed=True,
+        summary={"current_phase": "gather_evidence"},
+    )
+
+    assert agent._v2_runtime_advisory["option_family"] == "explore_frontier"
+    assert agent._v2_runtime_advisory["target_signature"] == "north"
+    assert agent._v2_runtime_advisory["suggested_action"] == "move north"
+    assert agent._v2_bridge_update_count == 1
+
+    runtime_snapshots = agent._get_action_agent_runtime_snapshots(
+        {"current_phase": "gather_evidence"}
+    )
+    assert (
+        runtime_snapshots["v2_runtime_advisory"]["option_family"] == "explore_frontier"
+    )
+
+
 def test_focus_payload_uses_compact_action_summary(tmp_path):
     agent, _ = _build_agent(tmp_path, env_type="scienceworld")
     agent.task = "Focus on the red object after comparing the visible materials."
@@ -1206,6 +1318,28 @@ def test_custom_speaker_selection_routes_to_belief_state_when_progress_is_missin
 
     assert next_speaker is agent.belief_state_agent
     assert agent._consecutive_lightweight_option_updates == 0
+
+
+def test_custom_speaker_selection_self_loops_after_v2_direct_execution(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.echo_agent = object()
+    agent.action_agent = object()
+    agent.belief_state_agent = object()
+    agent.task_success = False
+    agent.task_failed = False
+    agent._reset_episode_reasoning_state()
+    agent._last_seen_actions_taken = 0
+    agent.num_actions_taken = 1
+    agent._last_burst_size = 1
+    agent._last_burst_stop_reason = "v2_direct_execution"
+
+    groupchat = SimpleNamespace(
+        messages=[{"content": '{"burst_stopped_reason": "..."}'}]
+    )
+
+    next_speaker = agent.custom_speaker_selection(agent.echo_agent, groupchat)
+
+    assert next_speaker is agent.action_agent
 
 
 def test_generate_initial_message_omits_numeric_budget_counts(tmp_path):
@@ -6070,3 +6204,107 @@ def test_recipe_doc_shortlist_penalty_applied(tmp_path):
         f"pick up sugar ({pick_up_score}) should outscore recipe doc "
         f"({recipe_doc_score}) after the recipe is consumed"
     )
+
+
+def test_compute_task_status_and_reason_marks_budget_exhausted(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+
+    agent.success = False
+    agent.task_status_reason = None
+    agent.num_actions_taken = agent.max_actions
+
+    assert agent._compute_task_status_and_reason() == (
+        "FAILED",
+        "budget_exhausted",
+    )
+
+
+def test_compute_task_status_and_reason_preserves_environment_failure(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+
+    agent.success = False
+    agent.task_status_reason = "environment_failure"
+    agent.num_actions_taken = 0
+
+    assert agent._compute_task_status_and_reason() == (
+        "FAILED",
+        "environment_failure",
+    )
+
+
+def test_v2_runtime_advisory_biases_shortlist_toward_option_aligned_action(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task = "Maximize your score by exploring the dungeon."
+    agent.admissible_actions = ["move north", "move south"]
+    agent.percept = {
+        "task_status": "INCOMPLETE",
+        "resulting_observation": (
+            "Dlvl:1 T:1\n"
+            "[Surroundings]\n"
+            "  north: floor\n"
+            "  south: floor\n"
+            "  passable: north, south\n"
+        ),
+    }
+    agent._v2_runtime_advisory = {
+        "phase": "act",
+        "option_family": "explore_frontier",
+        "target_signature": "north",
+        "planner_stop_reason": "frontier_available",
+        "continue_current_option": True,
+        "suggested_action": "move north",
+    }
+
+    scoring_context = agent._build_shortlist_scoring_context(
+        current_phase="act",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+    )
+    kwargs = dict(
+        available_actions=agent.admissible_actions,
+        current_phase="act",
+        task_keywords=agent._extract_task_keywords(),
+        grounded_tokens=[],
+        scoring_context=scoring_context,
+    )
+
+    score_north, _, _ = agent._score_action_for_shortlist("move north", **kwargs)
+    score_south, _, _ = agent._score_action_for_shortlist("move south", **kwargs)
+
+    assert score_north > score_south
+
+
+def test_get_v2_direct_execution_action_returns_grounded_low_uncertainty_move(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task_status = "INCOMPLETE"
+    agent._v2_runtime_advisory = {
+        "option_family": "explore_frontier",
+        "suggested_action": "move northwest",
+        "planner_stop_reason": "frontier_available",
+        "uncertainty_count": 0,
+    }
+
+    chosen = agent._get_v2_direct_execution_action(
+        admissible_commands=["move north", "move northwest", "search"],
+        requested_action="move south",
+    )
+
+    assert chosen == "move northwest"
+
+
+def test_get_v2_direct_execution_action_skips_when_uncertain(tmp_path):
+    agent, _ = _build_agent(tmp_path, env_type="nethack")
+    agent.task_status = "INCOMPLETE"
+    agent._v2_runtime_advisory = {
+        "option_family": "explore_frontier",
+        "suggested_action": "move northwest",
+        "planner_stop_reason": "frontier_available",
+        "uncertainty_count": 2,
+    }
+
+    chosen = agent._get_v2_direct_execution_action(
+        admissible_commands=["move northwest", "search"],
+        requested_action="move south",
+    )
+
+    assert chosen is None
