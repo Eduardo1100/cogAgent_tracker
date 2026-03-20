@@ -6,6 +6,7 @@ from src.agent.v2.types import (
     AdapterCapabilities,
     AdapterEvent,
     FrontierDelta,
+    InputState,
     OperatorCandidate,
     SpatialContext,
     UIContext,
@@ -116,6 +117,112 @@ def test_executor_selects_matching_operator_and_avoids_failed_actions():
 
     assert step.action_label == "move east"
     assert step.stop_reason == "operator_selected"
+
+
+def test_executor_prefers_focus_first_click_over_unfocused_ui_type():
+    executor = DeterministicExecutor()
+    option = build_option_contract(
+        family="manipulate_target",
+        objective="Create a contact",
+        target_signature="ui-4",
+    )
+    snapshot = WorldModelSnapshot(
+        observation_mode="ui",
+        operator_candidates=[
+            OperatorCandidate(
+                operator_id="tap-4",
+                family="ui_click",
+                action_label="tap [4]",
+                target_ids=["ui-4"],
+            ),
+            OperatorCandidate(
+                operator_id="type-4",
+                family="ui_type",
+                action_label='type "..." into [4]',
+                target_ids=["ui-4"],
+                preconditions=["target_focused"],
+            ),
+        ],
+        metadata={
+            "ui_context": UIContext(
+                page_title="Create contact",
+                focused_element_id="ui-7",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-4",
+                        role="EditText",
+                        text="First name",
+                        attributes={"index": 4, "editable": True},
+                    ),
+                    UIElementRecord(
+                        element_id="ui-7",
+                        role="EditText",
+                        text="Last name",
+                        attributes={"index": 7, "editable": True, "focused": True},
+                    ),
+                ],
+            ).to_dict()
+        },
+    )
+
+    step = executor.select_next_step(snapshot, option)
+
+    assert step.action_label == "tap [4]"
+
+
+def test_executor_prefers_recovering_task_surface_from_input_detour():
+    executor = DeterministicExecutor()
+    option = build_option_contract(
+        family="recover_from_failure",
+        objective="Return to contact form",
+    )
+    snapshot = WorldModelSnapshot(
+        observation_mode="ui",
+        operator_candidates=[
+            OperatorCandidate(
+                operator_id="nav-back",
+                family="ui_navigation",
+                action_label="navigate back",
+            ),
+            OperatorCandidate(
+                operator_id="tap-1",
+                family="ui_click",
+                action_label="tap [1]",
+                target_ids=["ui-1"],
+            ),
+        ],
+        metadata={
+            "ui_context": UIContext(
+                page_title="Choose input method",
+                active_dialog="input_method_picker",
+                input_state=InputState(
+                    input_surface="system_input_picker",
+                    input_surface_state="visible",
+                    overlay_kind="input_method_picker",
+                    input_detour=True,
+                    escape_actions=["navigate back"],
+                ),
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-1",
+                        role="TextView",
+                        text="Show virtual keyboard",
+                    )
+                ],
+            ).to_dict(),
+            "input_state": InputState(
+                input_surface="system_input_picker",
+                input_surface_state="visible",
+                overlay_kind="input_method_picker",
+                input_detour=True,
+                escape_actions=["navigate back"],
+            ).to_dict(),
+        },
+    )
+
+    step = executor.select_next_step(snapshot, option)
+
+    assert step.action_label == "navigate back"
 
 
 def test_controller_continues_active_option_without_replanning():

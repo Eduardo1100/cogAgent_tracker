@@ -23,6 +23,16 @@ def _has_family(operator_candidates: list[OperatorCandidate], *families: str) ->
 
 
 def _pick_ui_target(snapshot: WorldModelSnapshot) -> str | None:
+    input_state = snapshot.metadata.get("input_state", {})
+    if not input_state:
+        ui_context = snapshot.metadata.get("ui_context", {})
+        if isinstance(ui_context, dict):
+            input_state = ui_context.get("input_state", {})
+    if not isinstance(input_state, dict):
+        input_state = {}
+    active_input_target = input_state.get("active_input_target")
+    if active_input_target:
+        return str(active_input_target)
     ui_context = snapshot.metadata.get("ui_context", {})
     focused = ui_context.get("focused_element_id")
     if focused:
@@ -144,6 +154,18 @@ def can_continue_option(
         target = option.target_signature
         if not target:
             return False, "target_missing"
+        input_state = snapshot.metadata.get("input_state", {})
+        if not input_state:
+            ui_context = snapshot.metadata.get("ui_context", {})
+            if isinstance(ui_context, dict):
+                input_state = ui_context.get("input_state", {})
+        if not isinstance(input_state, dict):
+            input_state = {}
+        if not isinstance(input_state, dict):
+            input_state = {}
+        if not isinstance(input_state, dict):
+            input_state = {}
+        active_input_target = input_state.get("active_input_target")
         ui_context = snapshot.metadata.get("ui_context", {})
         focused = ui_context.get("focused_element_id")
         visible_elements = ui_context.get("visible_elements", [])
@@ -152,7 +174,7 @@ def can_continue_option(
             for element in visible_elements
             if element.get("element_id")
         }
-        if target == focused or target in visible_ids:
+        if target == active_input_target or target == focused or target in visible_ids:
             return True, "target_still_visible"
         return False, "target_unavailable"
     if option.family in {"inspect_novelty", "verify_outcome"}:
@@ -191,6 +213,13 @@ class SparsePlanner:
         notes: list[str] = []
         goal_text = _goal_text(snapshot.goals)
         memory_preference = _preferred_family_from_memory(snapshot)
+        input_state = snapshot.metadata.get("input_state", {})
+        if not input_state:
+            ui_context = snapshot.metadata.get("ui_context", {})
+            if isinstance(ui_context, dict):
+                input_state = ui_context.get("input_state", {})
+        if not isinstance(input_state, dict):
+            input_state = {}
 
         if snapshot.revision_required:
             option_family = "recover_from_failure"
@@ -201,6 +230,21 @@ class SparsePlanner:
                 notes.append(
                     f"Revision trigger: {snapshot.metadata['revision_reason']}."
                 )
+        elif input_state.get("input_detour"):
+            option_family = "recover_from_failure"
+            notes.append(
+                "The current UI appears to be a system overlay or input detour; recover the task surface before manipulating targets."
+            )
+        elif (
+            input_state.get("active_input_target")
+            and input_state.get("text_entry_admissible")
+            and _has_family(snapshot.operator_candidates, "ui_type", "ui_submit")
+        ):
+            option_family = "manipulate_target"
+            target_signature = str(input_state.get("active_input_target"))
+            notes.append(
+                "Input state is stable; continue with the active editable target."
+            )
         elif memory_preference == "manipulate_target" and snapshot.metadata.get(
             "ui_context"
         ):

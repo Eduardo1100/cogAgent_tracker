@@ -10,6 +10,78 @@ from src.agent.v2.types import (
 )
 
 
+def _ui_context_maps(
+    snapshot: WorldModelSnapshot,
+) -> tuple[str | None, dict[str, dict[str, object]]]:
+    ui_context = snapshot.metadata.get("ui_context", {})
+    focused_element_id = ui_context.get("focused_element_id")
+    visible_elements = ui_context.get("visible_elements", [])
+    element_map: dict[str, dict[str, object]] = {}
+    for element in visible_elements:
+        element_id = element.get("element_id")
+        if element_id:
+            element_map[str(element_id)] = dict(element)
+    return (
+        str(focused_element_id) if focused_element_id else None,
+        element_map,
+    )
+
+
+def _input_state_map(snapshot: WorldModelSnapshot) -> dict[str, object]:
+    input_state = snapshot.metadata.get("input_state", {})
+    if not input_state:
+        ui_context = snapshot.metadata.get("ui_context", {})
+        if isinstance(ui_context, dict):
+            input_state = ui_context.get("input_state", {})
+    return dict(input_state) if isinstance(input_state, dict) else {}
+
+
+def _score_ui_preconditions(
+    candidate: OperatorCandidate,
+    snapshot: WorldModelSnapshot,
+) -> int:
+    focused_element_id, element_map = _ui_context_maps(snapshot)
+    input_state = _input_state_map(snapshot)
+    active_input_target = input_state.get("active_input_target")
+    text_entry_admissible = bool(input_state.get("text_entry_admissible"))
+    submit_action_available = bool(input_state.get("submit_action_available"))
+    input_detour = bool(input_state.get("input_detour"))
+    escape_actions = {
+        str(action) for action in input_state.get("escape_actions", []) if action
+    }
+    if candidate.family == "ui_type":
+        if not candidate.target_ids:
+            return -90
+        target_id = candidate.target_ids[0]
+        if not text_entry_admissible:
+            return -140
+        if active_input_target == target_id or focused_element_id == target_id:
+            return 35
+        return -120
+    if candidate.family == "ui_click" and candidate.target_ids:
+        target_id = candidate.target_ids[0]
+        element = element_map.get(target_id, {})
+        attrs = element.get("attributes", {}) if isinstance(element, dict) else {}
+        if input_detour and candidate.action_label in escape_actions:
+            return 35
+        if bool(attrs.get("editable")) and focused_element_id != target_id:
+            return 20
+        if (
+            bool(attrs.get("editable"))
+            and text_entry_admissible
+            and (active_input_target == target_id or focused_element_id == target_id)
+        ):
+            return -10
+    if candidate.family == "ui_navigation":
+        if input_detour and candidate.action_label in escape_actions:
+            return 40
+    if candidate.family == "ui_submit":
+        if submit_action_available:
+            return 18
+        return -20
+    return 0
+
+
 def _score_operator(
     candidate: OperatorCandidate,
     option: OptionContract,
@@ -70,6 +142,8 @@ def _score_operator(
             score += 25
         if option.target_signature in candidate.action_label:
             score += 12
+    if snapshot.metadata.get("ui_context"):
+        score += _score_ui_preconditions(candidate, snapshot)
     if candidate.action_label in blocked_actions:
         score -= 120
     if candidate.action_label in contradiction_actions:
@@ -117,6 +191,9 @@ class DeterministicExecutor:
             if candidate.family in preferred:
                 score += 18
 
+            if snapshot.metadata.get("ui_context"):
+                score += _score_ui_preconditions(candidate, snapshot)
+
             if operator == "repair_topology":
                 if candidate.action_label in {"search", "look"}:
                     score += 30
@@ -147,6 +224,23 @@ class DeterministicExecutor:
                     score += 18
                 elif candidate.family == "interaction":
                     score += 16
+            elif operator == "repair_input_focus":
+                if candidate.family == "ui_click":
+                    score += 28
+                elif candidate.family == "ui_select":
+                    score += 20
+            elif operator == "repair_input_surface":
+                if candidate.family == "ui_navigation":
+                    score += 28
+                elif candidate.family == "ui_click":
+                    score += 22
+                elif candidate.family == "ui_submit":
+                    score += 14
+            elif operator == "recover_task_surface":
+                if candidate.family == "ui_navigation":
+                    score += 32
+                elif candidate.family == "inspect":
+                    score += 14
 
             blocked_actions = {
                 str(action)

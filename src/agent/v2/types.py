@@ -11,6 +11,9 @@ RepairOperator = Literal[
     "repair_transition_model",
     "repair_target_binding",
     "repair_operator_set",
+    "repair_input_focus",
+    "repair_input_surface",
+    "recover_task_surface",
 ]
 OutcomeType = Literal[
     "progress",
@@ -113,11 +116,26 @@ class UIElementRecord(_CompactSerializable):
 
 
 @dataclass(frozen=True)
+class InputState(_CompactSerializable):
+    active_input_target: str | None = None
+    input_modality: str | None = None
+    input_surface: str | None = None
+    input_surface_state: str | None = None
+    overlay_kind: str | None = None
+    text_entry_admissible: bool = False
+    submit_action_available: bool = False
+    input_detour: bool = False
+    escape_actions: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class UIContext(_CompactSerializable):
     page_url: str | None = None
     page_title: str | None = None
     focused_element_id: str | None = None
     active_dialog: str | None = None
+    input_state: InputState | None = None
     visible_elements: list[UIElementRecord] = field(default_factory=list)
     action_scope: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

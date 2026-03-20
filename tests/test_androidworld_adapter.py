@@ -26,6 +26,7 @@ class _Element:
         enabled=True,
         selected=False,
         checked=False,
+        focused=False,
         bbox=None,
     ):
         self.text = text
@@ -38,7 +39,7 @@ class _Element:
         self.is_clickable = clickable
         self.is_editable = editable
         self.is_enabled = enabled
-        self.is_focused = False
+        self.is_focused = focused
         self.is_focusable = True
         self.is_long_clickable = long_clickable
         self.is_scrollable = scrollable
@@ -64,7 +65,10 @@ class _Env:
             [
                 _Element(text="Wi-Fi"),
                 _Element(
-                    text="Search", editable=True, class_name="android.widget.EditText"
+                    text="Search",
+                    editable=True,
+                    focused=True,
+                    class_name="android.widget.EditText",
                 ),
             ]
         )
@@ -94,8 +98,71 @@ def test_androidworld_adapter_formats_observation_and_actions():
 
     assert "[Task Name] BrowserOpenUrl" in adapter.observation
     assert "[0] role=Button label=Wi-Fi" in adapter.observation
+    assert "focused: ui-1" in adapter.observation
+    assert "input_target: ui-1" in adapter.observation
+    assert "text_entry_admissible: true" in adapter.observation
     assert "tap [0]" in adapter.admissible_actions
     assert 'type "..." into [1]' in adapter.admissible_actions
+
+
+def test_androidworld_adapter_only_exposes_type_for_focused_field():
+    env = _Env()
+    env._state = _State(
+        [
+            _Element(
+                text="First name",
+                editable=True,
+                focused=False,
+                class_name="android.widget.EditText",
+            ),
+            _Element(
+                text="Last name",
+                editable=True,
+                focused=True,
+                class_name="android.widget.EditText",
+            ),
+        ]
+    )
+    adapter = AndroidWorldAdapter(
+        env,
+        env.get_state(),
+        task_name="ContactsAddContact",
+        goal="Create a contact.",
+        score_provider=lambda: 0.0,
+    )
+
+    assert 'type "..." into [0]' not in adapter.admissible_actions
+    assert 'type "..." into [1]' in adapter.admissible_actions
+
+
+def test_androidworld_adapter_detects_input_method_detour():
+    env = _Env()
+    env._state = _State(
+        [
+            _Element(text="Choose input method", class_name="android.widget.TextView"),
+            _Element(
+                text="Show virtual keyboard",
+                class_name="android.widget.TextView",
+            ),
+            _Element(
+                text=None,
+                class_name="android.widget.Switch",
+                clickable=True,
+                checked=True,
+            ),
+        ]
+    )
+    adapter = AndroidWorldAdapter(
+        env,
+        env.get_state(),
+        task_name="ContactsAddContact",
+        goal="Create a contact.",
+        score_provider=lambda: 0.0,
+    )
+
+    assert "overlay: input_method_picker" in adapter.observation
+    assert "text_entry_admissible: false" in adapter.observation
+    assert "navigate back" in adapter.admissible_actions
 
 
 def test_androidworld_adapter_executes_indexed_action(monkeypatch):

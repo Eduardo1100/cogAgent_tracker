@@ -7,6 +7,7 @@ from src.agent.v2.types import (
     AdapterCapabilities,
     AdapterEvent,
     FrontierDelta,
+    InputState,
     OperatorCandidate,
     SpatialContext,
     UIContext,
@@ -707,6 +708,49 @@ def _extract_webarena_visible_elements(
     return records
 
 
+def _editable_element_ids(visible_elements: list[UIElementRecord]) -> set[str]:
+    return {
+        element.element_id
+        for element in visible_elements
+        if bool((element.attributes or {}).get("editable"))
+    }
+
+
+def _infer_webarena_input_state(
+    *,
+    visible_elements: list[UIElementRecord],
+    focused_element_id: str | None,
+    active_dialog: str | None,
+    action_scope: list[str],
+) -> InputState:
+    editable_ids = _editable_element_ids(visible_elements)
+    active_input_target = (
+        focused_element_id if focused_element_id in editable_ids else None
+    )
+    input_detour = bool(active_dialog)
+    input_surface = "dialog" if input_detour else None
+    input_surface_state = "visible" if input_detour else "hidden"
+    input_modality = None
+    if active_input_target is not None:
+        input_modality = "text"
+    text_entry_admissible = active_input_target is not None and (
+        "type" in action_scope or not action_scope
+    )
+    escape_actions = ["go back"] if input_detour else []
+    return InputState(
+        active_input_target=active_input_target,
+        input_modality=input_modality,
+        input_surface=input_surface,
+        input_surface_state=input_surface_state,
+        overlay_kind=active_dialog,
+        text_entry_admissible=text_entry_admissible,
+        submit_action_available=False,
+        input_detour=input_detour,
+        escape_actions=escape_actions,
+        metadata={"editable_target_count": len(editable_ids)},
+    )
+
+
 def _extract_webarena_ui_context(observation: Any, info: dict[str, Any]) -> UIContext:
     visible_elements = _extract_webarena_visible_elements(observation, info)
     page_url = ""
@@ -756,11 +800,18 @@ def _extract_webarena_ui_context(observation: Any, info: dict[str, Any]) -> UICo
         ):
             inferred_scope.append("type")
         action_scope = inferred_scope
+    input_state = _infer_webarena_input_state(
+        visible_elements=visible_elements,
+        focused_element_id=focused_element_id,
+        active_dialog=active_dialog,
+        action_scope=action_scope,
+    )
     return UIContext(
         page_url=page_url or None,
         page_title=page_title or None,
         focused_element_id=focused_element_id,
         active_dialog=active_dialog,
+        input_state=input_state,
         visible_elements=visible_elements,
         action_scope=action_scope,
         metadata={
@@ -835,6 +886,14 @@ def _format_webarena_observation(
             lines.append(f"  focused: {ui_context.focused_element_id}")
         if ui_context.active_dialog:
             lines.append(f"  dialog: {ui_context.active_dialog}")
+        if ui_context.input_state is not None:
+            input_state = ui_context.input_state
+            if input_state.active_input_target:
+                lines.append(f"  input_target: {input_state.active_input_target}")
+            if input_state.input_surface:
+                lines.append(f"  input_surface: {input_state.input_surface}")
+            if input_state.overlay_kind:
+                lines.append(f"  overlay: {input_state.overlay_kind}")
     if ui_context.visible_elements:
         lines.append("[Visible Elements]")
         for element in ui_context.visible_elements[:12]:
@@ -859,9 +918,108 @@ def _extract_androidworld_task_text(
     return "Complete the assigned Android task."
 
 
+def _infer_androidworld_input_state(
+    *,
+    page_title: str | None,
+    visible_elements: list[UIElementRecord],
+    focused_element_id: str | None,
+) -> InputState:
+    lowered_title = _coerce_text(page_title).lower()
+    labels = [
+        (element.name or element.text or "").strip().lower()
+        for element in visible_elements
+    ]
+    label_blob = " ".join(label for label in labels if label)
+    editable_ids = _editable_element_ids(visible_elements)
+    active_input_target = (
+        focused_element_id if focused_element_id in editable_ids else None
+    )
+
+    overlay_kind: str | None = None
+    input_surface: str | None = None
+    input_surface_state = "hidden"
+    input_detour = False
+    input_modality: str | None = None
+    submit_action_available = False
+    escape_actions: list[str] = []
+
+    if "choose input method" in label_blob:
+        overlay_kind = "input_method_picker"
+        input_surface = "system_input_picker"
+        input_surface_state = "visible"
+        input_detour = True
+        escape_actions = ["navigate back"]
+    elif "permission" in label_blob and any(
+        "allow" in label or "deny" in label for label in labels
+    ):
+        overlay_kind = "permission_dialog"
+        input_surface = "system_dialog"
+        input_surface_state = "visible"
+        input_detour = True
+        escape_actions = ["navigate back"]
+    elif active_input_target is not None:
+        input_surface_state = "visible"
+        escape_actions = ["navigate back"]
+        if any(
+            "switch input method" in label
+            or "show virtual keyboard" in label
+            or "gboard" in label
+            or "voice typing" in label
+            for label in labels
+        ):
+            input_surface = "system_keyboard_controls"
+        elif any(
+            label.isdigit() or "delete mobile phone" in label or label == "delete"
+            for label in labels
+        ):
+            input_surface = "virtual_keyboard"
+            input_modality = "numeric"
+        else:
+            input_surface = "inline_editor"
+            role_lookup = {
+                element.element_id: element.role.lower() for element in visible_elements
+            }
+            role = role_lookup.get(active_input_target, "")
+            if "edittext" in role or "text" in role:
+                input_modality = "text"
+
+    if input_modality is None and active_input_target is not None:
+        role_lookup = {
+            element.element_id: element.role.lower() for element in visible_elements
+        }
+        role = role_lookup.get(active_input_target, "")
+        input_modality = "text" if "edittext" in role or "text" in role else "unknown"
+
+    text_entry_admissible = (
+        active_input_target is not None
+        and not input_detour
+        and input_surface != "system_input_picker"
+    )
+    if active_input_target is not None and not input_detour:
+        submit_action_available = True
+
+    return InputState(
+        active_input_target=active_input_target,
+        input_modality=input_modality,
+        input_surface=input_surface,
+        input_surface_state=input_surface_state,
+        overlay_kind=overlay_kind,
+        text_entry_admissible=text_entry_admissible,
+        submit_action_available=submit_action_available,
+        input_detour=input_detour,
+        escape_actions=escape_actions,
+        metadata={
+            "editable_target_count": len(editable_ids),
+            "page_title": page_title or "",
+            "title_is_launcher": "nexuslauncher" in lowered_title,
+        },
+    )
+
+
 def _extract_androidworld_ui_context(env: Any, state: Any) -> UIContext:
     raw_elements = list(getattr(state, "ui_elements", []) or [])
     visible_elements: list[UIElementRecord] = []
+    focused_element_id: str | None = None
     for idx, element in enumerate(raw_elements):
         bbox = getattr(element, "bbox", None)
         bounds = {}
@@ -882,9 +1040,12 @@ def _extract_androidworld_ui_context(env: Any, state: Any) -> UIContext:
             _coerce_text(getattr(element, "class_name", None)).strip()
             or "android.widget.View"
         )
+        element_id = f"ui-{idx}"
+        if bool(getattr(element, "is_focused", False)):
+            focused_element_id = element_id
         visible_elements.append(
             UIElementRecord(
-                element_id=f"ui-{idx}",
+                element_id=element_id,
                 role=role,
                 name=label or None,
                 text=(_coerce_text(getattr(element, "text", None)).strip() or None),
@@ -921,13 +1082,17 @@ def _extract_androidworld_ui_context(env: Any, state: Any) -> UIContext:
             )
         )
 
+    input_state = _infer_androidworld_input_state(
+        page_title=_coerce_text(getattr(env, "foreground_activity_name", "")).strip()
+        or None,
+        visible_elements=visible_elements,
+        focused_element_id=focused_element_id,
+    )
     action_scope = ["tap", "long_press", "scroll", "navigate_back", "navigate_home"]
-    if any(
-        bool(record.attributes.get("editable"))
-        for record in visible_elements
-        if record.attributes
-    ):
+    if input_state.text_entry_admissible:
         action_scope.append("type")
+    if input_state.submit_action_available:
+        action_scope.append("keyboard_enter")
 
     page_title = _coerce_text(getattr(env, "foreground_activity_name", "")).strip()
     metadata = {
@@ -937,6 +1102,9 @@ def _extract_androidworld_ui_context(env: Any, state: Any) -> UIContext:
     return UIContext(
         page_url=None,
         page_title=page_title or None,
+        focused_element_id=focused_element_id,
+        active_dialog=input_state.overlay_kind,
+        input_state=input_state,
         visible_elements=visible_elements,
         action_scope=action_scope,
         metadata=metadata,
@@ -962,6 +1130,8 @@ def _format_androidworld_element(
         flags.append("scrollable")
     if attrs.get("checked"):
         flags.append("checked")
+    if attrs.get("focused"):
+        flags.append("focused")
     if element.selected:
         flags.append("selected")
     if element.disabled:
@@ -996,6 +1166,22 @@ def _format_androidworld_observation(
         orientation = (ui_context.metadata or {}).get("orientation")
         if orientation is not None:
             lines.append(f"  orientation: {orientation}")
+        if ui_context.focused_element_id:
+            lines.append(f"  focused: {ui_context.focused_element_id}")
+        if ui_context.input_state is not None:
+            input_state = ui_context.input_state
+            if input_state.active_input_target:
+                lines.append(f"  input_target: {input_state.active_input_target}")
+            if input_state.input_modality:
+                lines.append(f"  input_modality: {input_state.input_modality}")
+            if input_state.input_surface:
+                lines.append(f"  input_surface: {input_state.input_surface}")
+            if input_state.overlay_kind:
+                lines.append(f"  overlay: {input_state.overlay_kind}")
+            lines.append(
+                "  text_entry_admissible: "
+                + ("true" if input_state.text_entry_admissible else "false")
+            )
     if ui_context.visible_elements:
         lines.append("[Visible Elements]")
         for element in ui_context.visible_elements[:18]:
@@ -1006,7 +1192,7 @@ def _format_androidworld_observation(
     lines.append("[Action Syntax]")
     lines.append("  - tap [index]")
     lines.append("  - long press [index]")
-    lines.append('  - type "text" into [index]')
+    lines.append('  - type "text" into [index]  # focused editable field only')
     lines.append("  - scroll up|down|left|right")
     lines.append("  - scroll up|down|left|right [index]")
     lines.append("  - navigate back")
@@ -1034,6 +1220,114 @@ def _extract_androidworld_index(action: str) -> int:
     if not match:
         raise ValueError(f"Expected an indexed AndroidWorld action, got: {action!r}")
     return int(match.group(1))
+
+
+def _build_androidworld_action_surface(
+    ui_context: UIContext,
+) -> tuple[list[str], list[OperatorCandidate]]:
+    actions: list[str] = []
+    candidates: list[OperatorCandidate] = []
+    input_state = ui_context.input_state or InputState()
+    focused_element_id = ui_context.focused_element_id
+    active_input_target = input_state.active_input_target
+
+    def _add_candidate(
+        action_label: str,
+        family: str,
+        *,
+        target_id: str | None = None,
+        preconditions: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if action_label in actions:
+            return
+        actions.append(action_label)
+        candidates.append(
+            OperatorCandidate(
+                operator_id=f"androidworld:{family}:{len(candidates)}",
+                family=family,
+                action_label=action_label,
+                target_ids=[target_id] if target_id else [],
+                preconditions=list(preconditions or []),
+                metadata=dict(metadata or {}),
+            )
+        )
+
+    for element in ui_context.visible_elements[:18]:
+        attrs = element.attributes or {}
+        idx = int(attrs.get("index", 0))
+        _add_candidate(
+            f"tap [{idx}]",
+            "ui_click",
+            target_id=element.element_id,
+            preconditions=["visible"],
+            metadata={
+                "editable": bool(attrs.get("editable")),
+                "focused": bool(attrs.get("focused")),
+            },
+        )
+        if attrs.get("long_clickable"):
+            _add_candidate(
+                f"long press [{idx}]",
+                "ui_click",
+                target_id=element.element_id,
+                preconditions=["visible"],
+                metadata={"long_click": True},
+            )
+        if attrs.get("editable") and element.element_id == focused_element_id:
+            _add_candidate(
+                f'type "..." into [{idx}]',
+                "ui_type",
+                target_id=element.element_id,
+                preconditions=["target_focused", "text_entry_admissible"],
+                metadata={
+                    "editable": True,
+                    "focused": True,
+                    "input_operator": "enter_text",
+                    "input_modality": input_state.input_modality,
+                },
+            )
+        if attrs.get("scrollable"):
+            _add_candidate(
+                f"scroll down [{idx}]",
+                "ui_navigation",
+                target_id=element.element_id,
+                preconditions=["visible"],
+            )
+            _add_candidate(
+                f"scroll up [{idx}]",
+                "ui_navigation",
+                target_id=element.element_id,
+                preconditions=["visible"],
+            )
+
+    _add_candidate("scroll down", "ui_navigation")
+    _add_candidate("scroll up", "ui_navigation")
+    _add_candidate(
+        "navigate back",
+        "ui_navigation",
+        preconditions=(["input_detour"] if input_state.input_detour else []),
+        metadata={
+            "recovery_operator": (
+                "recover_task_surface" if input_state.input_detour else None
+            )
+        },
+    )
+    _add_candidate("navigate home", "ui_navigation")
+    _add_candidate(
+        "keyboard enter",
+        "ui_submit",
+        target_id=active_input_target,
+        preconditions=(
+            ["input_surface_visible"] if input_state.submit_action_available else []
+        ),
+        metadata={
+            "input_operator": "submit_input",
+            "submit_action_available": input_state.submit_action_available,
+        },
+    )
+    _add_candidate("wait", "inspect")
+    return actions, candidates
 
 
 class AndroidWorldAdapter:
@@ -1093,36 +1387,8 @@ class AndroidWorldAdapter:
 
     @property
     def admissible_actions(self) -> list[str]:
-        actions: list[str] = []
-        for element in self._ui_context.visible_elements[:18]:
-            idx = int((element.attributes or {}).get("index", 0))
-            actions.append(f"tap [{idx}]")
-            if (element.attributes or {}).get("long_clickable"):
-                actions.append(f"long press [{idx}]")
-            if (element.attributes or {}).get("editable"):
-                actions.append(f'type "..." into [{idx}]')
-            if (element.attributes or {}).get("scrollable"):
-                actions.extend(
-                    [
-                        f"scroll down [{idx}]",
-                        f"scroll up [{idx}]",
-                    ]
-                )
-        actions.extend(
-            [
-                "scroll down",
-                "scroll up",
-                "navigate back",
-                "navigate home",
-                "keyboard enter",
-                "wait",
-            ]
-        )
-        deduped: list[str] = []
-        for action in actions:
-            if action not in deduped:
-                deduped.append(action)
-        return deduped
+        actions, _ = _build_androidworld_action_surface(self._ui_context)
+        return actions
 
     @property
     def has_won(self) -> bool:
@@ -1258,9 +1524,7 @@ class AndroidWorldAdapter:
                     else None
                 ),
             ),
-            operator_candidates=_build_operator_candidates(
-                "androidworld", self.admissible_actions
-            ),
+            operator_candidates=_build_androidworld_action_surface(self._ui_context)[1],
             reward_delta=(
                 reward_delta if reward_delta is not None else self._reward_delta
             ),

@@ -12,6 +12,7 @@ from src.agent.v2.types import (
     AdapterCapabilities,
     AdapterEvent,
     FrontierDelta,
+    InputState,
     MemoryCue,
     OperatorCandidate,
     OptionContract,
@@ -614,3 +615,302 @@ def test_world_model_detects_ui_target_binding_contradiction_and_requests_repair
         contradiction.category == "ui_target_binding"
         for contradiction in snapshot.contradictions
     )
+
+
+def test_world_model_treats_unfocused_text_entry_as_ui_target_binding():
+    capabilities = AdapterCapabilities(
+        adapter_name="androidworld",
+        observation_mode="ui",
+        supports_ui_context=True,
+        supports_status_delta=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Create a contact")
+
+    model.apply_event(
+        AdapterEvent(
+            step_index=1,
+            task_text="Create a contact",
+            raw_observation="Contact editor",
+            normalized_observation="Contact editor",
+            action_result=ActionResult(
+                action_text='type "Hugo" into [4]',
+                action_executed=False,
+                operator_family="ui_type",
+                failure_reason="not in the list of admissible actions",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="tap-4",
+                    family="ui_click",
+                    action_label="tap [4]",
+                    target_ids=["ui-4"],
+                ),
+                OperatorCandidate(
+                    operator_id="type-4",
+                    family="ui_type",
+                    action_label='type "..." into [4]',
+                    target_ids=["ui-4"],
+                    preconditions=["target_focused"],
+                ),
+            ],
+            ui_context=UIContext(
+                page_title="Create contact",
+                focused_element_id="ui-7",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-4",
+                        role="EditText",
+                        text="First name",
+                        attributes={"index": 4, "editable": True},
+                    ),
+                    UIElementRecord(
+                        element_id="ui-7",
+                        role="EditText",
+                        text="Last name",
+                        attributes={"index": 7, "editable": True, "focused": True},
+                    ),
+                ],
+                action_scope=["tap", "type"],
+            ),
+        )
+    )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.revision_required is True
+    assert snapshot.repair_directive is not None
+    assert snapshot.repair_directive.operator == "repair_input_focus"
+    assert any(
+        contradiction.category == "input_focus_missing"
+        for contradiction in snapshot.contradictions
+    )
+
+
+def test_world_model_invalidates_stale_indexed_ui_bindings_after_focus_change():
+    capabilities = AdapterCapabilities(
+        adapter_name="androidworld",
+        observation_mode="ui",
+        supports_ui_context=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Create a contact")
+
+    model.apply_event(
+        AdapterEvent(
+            step_index=1,
+            task_text="Create a contact",
+            raw_observation="Field visible.",
+            normalized_observation="Field visible.",
+            action_result=ActionResult(
+                action_text='type "Hugo" into [4]',
+                action_executed=False,
+                operator_family="ui_type",
+                failure_reason="not in the list of admissible actions",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="type-4",
+                    family="ui_type",
+                    action_label='type "..." into [4]',
+                    target_ids=["ui-4"],
+                )
+            ],
+            ui_context=UIContext(
+                page_title="Create contact",
+                focused_element_id="ui-7",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-4",
+                        role="EditText",
+                        text="First name",
+                        attributes={"index": 4, "editable": True},
+                    ),
+                    UIElementRecord(
+                        element_id="ui-7",
+                        role="EditText",
+                        text="Last name",
+                        attributes={"index": 7, "editable": True, "focused": True},
+                    ),
+                ],
+            ),
+        )
+    )
+    model.apply_event(
+        AdapterEvent(
+            step_index=2,
+            task_text="Create a contact",
+            raw_observation="Focused field changed.",
+            normalized_observation="Focused field changed.",
+            action_result=ActionResult(
+                action_text="tap [4]",
+                action_executed=True,
+                operator_family="ui_click",
+            ),
+            operator_candidates=[
+                OperatorCandidate(
+                    operator_id="tap-4",
+                    family="ui_click",
+                    action_label="tap [4]",
+                    target_ids=["ui-4"],
+                ),
+                OperatorCandidate(
+                    operator_id="type-4",
+                    family="ui_type",
+                    action_label='type "..." into [4]',
+                    target_ids=["ui-4"],
+                ),
+            ],
+            ui_context=UIContext(
+                page_title="Create contact",
+                focused_element_id="ui-4",
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-4",
+                        role="EditText",
+                        text="First name",
+                        attributes={"index": 4, "editable": True, "focused": True},
+                    ),
+                    UIElementRecord(
+                        element_id="ui-7",
+                        role="EditText",
+                        text="Last name",
+                        attributes={"index": 7, "editable": True},
+                    ),
+                ],
+            ),
+        )
+    )
+
+    snapshot = model.to_snapshot()
+
+    assert 'type "hugo" into [4]' not in snapshot.metadata["blocked_action_labels"]
+    assert 'type "hugo" into [4]' in snapshot.metadata["invalidated_action_labels"]
+
+
+def test_world_model_emits_input_focus_repair_directive():
+    capabilities = AdapterCapabilities(
+        adapter_name="androidworld",
+        observation_mode="ui",
+        supports_ui_context=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Create a contact")
+
+    model.apply_event(
+        AdapterEvent(
+            step_index=1,
+            task_text="Create a contact",
+            raw_observation="Field visible.",
+            normalized_observation="Field visible.",
+            action_result=ActionResult(
+                action_text='type "Hugo" into [4]',
+                action_executed=False,
+                operator_family="ui_type",
+                failure_reason="not in the list of admissible actions",
+            ),
+            ui_context=UIContext(
+                page_title="Create contact",
+                focused_element_id="ui-7",
+                input_state=InputState(
+                    active_input_target="ui-7",
+                    input_modality="text",
+                    input_surface="inline_editor",
+                    input_surface_state="visible",
+                    text_entry_admissible=True,
+                ),
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-4",
+                        role="EditText",
+                        text="First name",
+                        attributes={"index": 4, "editable": True},
+                    ),
+                    UIElementRecord(
+                        element_id="ui-7",
+                        role="EditText",
+                        text="Last name",
+                        attributes={"index": 7, "editable": True, "focused": True},
+                    ),
+                ],
+            ),
+        )
+    )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.repair_directive is not None
+    assert snapshot.repair_directive.operator == "repair_input_focus"
+
+
+def test_world_model_emits_task_surface_recovery_for_input_detour():
+    capabilities = AdapterCapabilities(
+        adapter_name="androidworld",
+        observation_mode="ui",
+        supports_ui_context=True,
+    )
+    model = WorldModel(capabilities=capabilities, task_text="Create a contact")
+
+    model.apply_event(
+        AdapterEvent(
+            step_index=1,
+            task_text="Create a contact",
+            raw_observation="Contact editor.",
+            normalized_observation="Contact editor.",
+            action_result=ActionResult(
+                action_text="tap [17]",
+                action_executed=True,
+                operator_family="ui_click",
+            ),
+            ui_context=UIContext(
+                page_title="Create contact",
+                input_state=InputState(
+                    input_surface="inline_editor",
+                    input_surface_state="hidden",
+                    text_entry_admissible=False,
+                ),
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-17",
+                        role="ImageView",
+                        text="Switch input method",
+                        attributes={"index": 17, "clickable": True},
+                    )
+                ],
+            ),
+        )
+    )
+    model.apply_event(
+        AdapterEvent(
+            step_index=2,
+            task_text="Create a contact",
+            raw_observation="Choose input method.",
+            normalized_observation="Choose input method.",
+            action_result=ActionResult(
+                action_text="tap [17]",
+                action_executed=True,
+                operator_family="ui_click",
+            ),
+            ui_context=UIContext(
+                page_title="Choose input method",
+                active_dialog="input_method_picker",
+                input_state=InputState(
+                    input_surface="system_input_picker",
+                    input_surface_state="visible",
+                    overlay_kind="input_method_picker",
+                    input_detour=True,
+                    escape_actions=["navigate back"],
+                ),
+                visible_elements=[
+                    UIElementRecord(
+                        element_id="ui-1",
+                        role="TextView",
+                        text="Show virtual keyboard",
+                        attributes={"index": 1, "clickable": True},
+                    )
+                ],
+            ),
+        )
+    )
+
+    snapshot = model.to_snapshot()
+
+    assert snapshot.repair_directive is not None
+    assert snapshot.repair_directive.operator == "recover_task_surface"

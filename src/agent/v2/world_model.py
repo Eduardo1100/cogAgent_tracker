@@ -30,7 +30,12 @@ _UI_BINDING_FAILURE_RE = re.compile(
     r"(?:not found|not visible|not interactable|stale|detached|unknown element|missing element|no such element|disabled)",
     re.IGNORECASE,
 )
+_INADMISSIBLE_ACTION_RE = re.compile(
+    r"(?:not in the list of admissible actions|is not admissible)",
+    re.IGNORECASE,
+)
 _NON_PROGRESS_STATUS_KEYS = {"T", "time", "turn", "turns"}
+_INDEXED_UI_ACTION_RE = re.compile(r"\[(\d+)\]")
 
 
 def _extract_direction_from_action(action_text: str | None) -> str | None:
@@ -50,15 +55,19 @@ def _extract_ui_target_from_action(action_text: str | None) -> str | None:
     if not action_text:
         return None
     normalized = action_text.strip().lower()
+    if normalized.startswith(("type ", "fill ", "enter ")):
+        match = _INDEXED_UI_ACTION_RE.search(normalized)
+        if match:
+            return f"ui-{match.group(1)}"
+        if " into " in normalized:
+            target = normalized.rsplit(" into ", 1)[-1].strip()
+            return target or None
     for prefix in (
         "click ",
         "tap ",
         "press ",
         "select ",
         "choose ",
-        "type ",
-        "fill ",
-        "enter ",
         "focus ",
     ):
         if normalized.startswith(prefix):
@@ -83,6 +92,64 @@ def _ui_target_visible(target: str | None, ui_context: UIContext | None) -> bool
             if candidate and normalized_target in str(candidate).lower():
                 return True
     return False
+
+
+def _extract_indexed_ui_target_id(
+    action_text: str | None,
+    ui_context: UIContext | None,
+) -> str | None:
+    if not action_text or ui_context is None:
+        return None
+    match = _INDEXED_UI_ACTION_RE.search(action_text)
+    if not match:
+        return None
+    index = int(match.group(1))
+    for element in ui_context.visible_elements:
+        attrs = element.attributes or {}
+        if int(attrs.get("index", -1)) == index:
+            return element.element_id
+    return None
+
+
+def _ui_focus_mismatch(
+    action_text: str | None,
+    ui_context: UIContext | None,
+) -> bool:
+    if not action_text or ui_context is None:
+        return False
+    normalized = action_text.strip().lower()
+    if not normalized.startswith(("type ", "fill ", "enter ")):
+        return False
+    target_id = _extract_indexed_ui_target_id(action_text, ui_context)
+    if target_id is None:
+        return False
+    return ui_context.focused_element_id != target_id
+
+
+def _ui_input_state_value(
+    ui_context: UIContext | None,
+    field: str,
+) -> Any:
+    if ui_context is None or ui_context.input_state is None:
+        return None
+    return getattr(ui_context.input_state, field, None)
+
+
+def _ui_input_surface_unavailable(
+    action_text: str | None,
+    ui_context: UIContext | None,
+) -> bool:
+    if not action_text or ui_context is None:
+        return False
+    normalized = action_text.strip().lower()
+    if not normalized.startswith(("type ", "fill ", "enter ")):
+        return False
+    input_state = ui_context.input_state
+    if input_state is None:
+        return False
+    if input_state.input_detour:
+        return True
+    return not bool(input_state.text_entry_admissible)
 
 
 def _partition_status_delta(
@@ -364,6 +431,7 @@ class WorldModel:
         self.memory_cues: list[MemoryCue] = []
         self.active_option: OptionContract | None = None
         self.ui_context: UIContext | None = None
+        self.input_state: dict[str, Any] = {}
         self.step_index = 0
         self.total_reward = 0.0
         self.status_snapshot: dict[str, Any] = {}
@@ -386,6 +454,7 @@ class WorldModel:
         self.repair_directive: RepairDirective | None = None
         self.blocked_action_counts: dict[str, int] = {}
         self.recent_contradiction_actions: list[str] = []
+        self.invalidated_action_labels: list[str] = []
         self.repair_cycle_active = False
         self.repair_attempt_count = 0
         self.max_repair_attempts = 2
@@ -524,19 +593,34 @@ class WorldModel:
             progress_signals.extend(signals)
 
         ui_binding_failure = False
+        input_focus_failure = False
+        input_surface_failure = False
+        input_detour = bool(_ui_input_state_value(event.ui_context, "input_detour"))
         if event.ui_context is not None and action_text:
             explicit_failure = str(event.action_result.failure_reason or "")
             binding_evidence = " ".join(
                 part for part in (explicit_failure, observation) if part
             ).strip()
             action_family = event.action_result.operator_family or ""
+            focus_mismatch = _ui_focus_mismatch(action_text, event.ui_context)
+            input_surface_unavailable = _ui_input_surface_unavailable(
+                action_text, event.ui_context
+            )
+            input_focus_failure = action_family == "ui_type" and focus_mismatch
+            input_surface_failure = (
+                action_family == "ui_type" and input_surface_unavailable
+            )
             if action_family.startswith("ui_") or action_text.lower().startswith(
                 ("click ", "tap ", "press ", "select ", "choose ", "type ", "fill ")
             ):
                 missing_target = ui_target is not None and not _ui_target_visible(
                     ui_target, event.ui_context
                 )
-                if _UI_BINDING_FAILURE_RE.search(binding_evidence) or missing_target:
+                if (
+                    _UI_BINDING_FAILURE_RE.search(binding_evidence)
+                    or _INADMISSIBLE_ACTION_RE.search(binding_evidence)
+                    or missing_target
+                ):
                     ui_binding_failure = True
 
         if event.ui_context is not None and not ui_binding_failure:
@@ -582,6 +666,30 @@ class WorldModel:
                     )
                 )
                 progress_signals.extend(ui_progress_signals)
+            previous_input_detour = bool(
+                _ui_input_state_value(previous_ui_context, "input_detour")
+            )
+            if input_detour and not previous_input_detour and action_text:
+                outcomes.append(
+                    ActionOutcomeRecord(
+                        outcome_type="contradiction",
+                        signals=["task_surface_detour"],
+                        rationale=(
+                            "The action transitioned into a system overlay or input detour instead of the task surface."
+                        ),
+                    )
+                )
+                contradictions.append(
+                    ContradictionRecord(
+                        category="task_surface_detour",
+                        step_index=event.step_index,
+                        severity=0.9,
+                        action_text=action_text,
+                        evidence=observation.splitlines()[0][:160]
+                        if observation
+                        else None,
+                    )
+                )
 
         blocked = False
         if direction and event.spatial_context is not None:
@@ -611,7 +719,51 @@ class WorldModel:
             binding_evidence = " ".join(
                 part for part in (explicit_failure, observation) if part
             ).strip()
-            if ui_binding_failure:
+            if input_focus_failure:
+                outcomes.append(
+                    ActionOutcomeRecord(
+                        outcome_type="contradiction",
+                        signals=["input_focus_missing"],
+                        rationale=(
+                            "Text entry was attempted before the intended editable target was focused."
+                        ),
+                    )
+                )
+                contradictions.append(
+                    ContradictionRecord(
+                        category="input_focus_missing",
+                        step_index=event.step_index,
+                        severity=1.0,
+                        subject=ui_target,
+                        action_text=action_text,
+                        evidence=binding_evidence[:160] if binding_evidence else None,
+                    )
+                )
+            elif input_surface_failure or input_detour:
+                outcomes.append(
+                    ActionOutcomeRecord(
+                        outcome_type="contradiction",
+                        signals=["input_surface_unavailable"],
+                        rationale=(
+                            "Text entry is blocked by the current input surface or overlay state."
+                        ),
+                    )
+                )
+                contradictions.append(
+                    ContradictionRecord(
+                        category=(
+                            "task_surface_detour"
+                            if input_detour
+                            else "input_surface_unavailable"
+                        ),
+                        step_index=event.step_index,
+                        severity=1.0,
+                        subject=ui_target,
+                        action_text=action_text,
+                        evidence=binding_evidence[:160] if binding_evidence else None,
+                    )
+                )
+            elif ui_binding_failure:
                 outcomes.append(
                     ActionOutcomeRecord(
                         outcome_type="contradiction",
@@ -728,7 +880,13 @@ class WorldModel:
 
         repeated_contradiction = False
         ui_binding_hit = any(
-            contradiction.category == "ui_target_binding"
+            contradiction.category
+            in {
+                "ui_target_binding",
+                "input_focus_missing",
+                "input_surface_unavailable",
+                "task_surface_detour",
+            }
             for contradiction in contradictions
         )
         if action_text:
@@ -782,6 +940,69 @@ class WorldModel:
             self.revision_reason = trigger_reason
         self.repair_directive = self._build_repair_directive()
 
+    def _invalidate_stale_ui_actions(
+        self,
+        *,
+        previous_ui_context: UIContext | None,
+        current_ui_context: UIContext | None,
+    ) -> None:
+        self.invalidated_action_labels = []
+        if previous_ui_context is None or current_ui_context is None:
+            return
+        previous_visible_ids = {
+            element.element_id for element in previous_ui_context.visible_elements
+        }
+        current_visible_ids = {
+            element.element_id for element in current_ui_context.visible_elements
+        }
+        ui_changed = (
+            previous_ui_context.page_url != current_ui_context.page_url
+            or previous_ui_context.page_title != current_ui_context.page_title
+            or previous_ui_context.focused_element_id
+            != current_ui_context.focused_element_id
+            or _ui_input_state_value(previous_ui_context, "input_surface")
+            != _ui_input_state_value(current_ui_context, "input_surface")
+            or _ui_input_state_value(previous_ui_context, "overlay_kind")
+            != _ui_input_state_value(current_ui_context, "overlay_kind")
+            or _ui_input_state_value(previous_ui_context, "text_entry_admissible")
+            != _ui_input_state_value(current_ui_context, "text_entry_admissible")
+            or previous_visible_ids != current_visible_ids
+        )
+        if not ui_changed:
+            return
+
+        stale_actions: list[str] = []
+        tracked_actions = list(self.blocked_action_counts) + list(
+            self.recent_contradiction_actions
+        )
+        for action in tracked_actions:
+            target_id = _extract_indexed_ui_target_id(action, previous_ui_context)
+            if target_id is None:
+                continue
+            normalized = action.strip().lower()
+            if normalized.startswith(("type ", "fill ", "enter ")):
+                # Text-entry admissibility is focus-dependent. Once the focus
+                # changes, previously blocked indexed type actions must be
+                # rebound against the current UI instead of persisting as
+                # still-blocked actions.
+                stale_actions.append(action)
+            elif target_id not in current_visible_ids:
+                stale_actions.append(action)
+
+        if not stale_actions:
+            return
+
+        unique_stale = list(dict.fromkeys(stale_actions))[:6]
+        self.invalidated_action_labels = unique_stale
+        for action in unique_stale:
+            self.blocked_action_counts.pop(action, None)
+        stale_set = set(unique_stale)
+        self.recent_contradiction_actions = [
+            action
+            for action in self.recent_contradiction_actions
+            if action not in stale_set
+        ]
+
     def _build_repair_directive(self) -> RepairDirective | None:
         if not self.revision_required:
             return None
@@ -789,11 +1010,53 @@ class WorldModel:
         invalidated_actions = sorted(
             action for action, count in self.blocked_action_counts.items() if count > 0
         )[:6]
+        invalidated_actions = list(
+            dict.fromkeys(invalidated_actions + self.invalidated_action_labels)
+        )[:6]
         recent_categories = [
             contradiction.category for contradiction in self.contradictions[-3:]
         ]
 
         if self.ui_context is not None:
+            if "task_surface_detour" in recent_categories:
+                return RepairDirective(
+                    operator="recover_task_surface",
+                    rationale=(
+                        "The current UI is a system overlay or detour rather than the task surface; return before continuing."
+                    ),
+                    preferred_families=["ui_navigation", "ui_click", "inspect"],
+                    invalidated_actions=invalidated_actions,
+                    metadata={
+                        "recent_categories": recent_categories,
+                        "input_state": self.input_state,
+                    },
+                )
+            if "input_focus_missing" in recent_categories:
+                return RepairDirective(
+                    operator="repair_input_focus",
+                    rationale=(
+                        "Text entry was attempted without a focused editable target; focus the intended field before entering text."
+                    ),
+                    preferred_families=["ui_click", "ui_select", "inspect"],
+                    invalidated_actions=invalidated_actions,
+                    metadata={
+                        "recent_categories": recent_categories,
+                        "input_state": self.input_state,
+                    },
+                )
+            if "input_surface_unavailable" in recent_categories:
+                return RepairDirective(
+                    operator="repair_input_surface",
+                    rationale=(
+                        "The current input surface does not support text entry yet; reveal or stabilize the correct keyboard/editor before continuing."
+                    ),
+                    preferred_families=["ui_navigation", "ui_click", "ui_submit"],
+                    invalidated_actions=invalidated_actions,
+                    metadata={
+                        "recent_categories": recent_categories,
+                        "input_state": self.input_state,
+                    },
+                )
             if "ui_target_binding" in recent_categories:
                 return RepairDirective(
                     operator="repair_target_binding",
@@ -808,7 +1071,10 @@ class WorldModel:
                         "ui_type",
                     ],
                     invalidated_actions=invalidated_actions,
-                    metadata={"recent_categories": recent_categories},
+                    metadata={
+                        "recent_categories": recent_categories,
+                        "input_state": self.input_state,
+                    },
                 )
             if "execution_failure" in recent_categories:
                 return RepairDirective(
@@ -823,7 +1089,10 @@ class WorldModel:
                         "ui_type",
                     ],
                     invalidated_actions=invalidated_actions,
-                    metadata={"recent_categories": recent_categories},
+                    metadata={
+                        "recent_categories": recent_categories,
+                        "input_state": self.input_state,
+                    },
                 )
             return RepairDirective(
                 operator="repair_target_binding",
@@ -833,7 +1102,10 @@ class WorldModel:
                 ),
                 preferred_families=["inspect", "ui_select", "ui_click", "ui_type"],
                 invalidated_actions=invalidated_actions,
-                metadata={"recent_categories": recent_categories},
+                metadata={
+                    "recent_categories": recent_categories,
+                    "input_state": self.input_state,
+                },
             )
 
         if any(action in {"go up", "go down"} for action in invalidated_actions) or (
@@ -889,6 +1161,11 @@ class WorldModel:
             self.last_status_delta = {}
         if event.ui_context is not None:
             self.ui_context = event.ui_context
+            self.input_state = (
+                event.ui_context.input_state.to_dict()
+                if event.ui_context.input_state is not None
+                else {}
+            )
             self.observation_mode = "ui"
         elif event.spatial_context is not None:
             self.observation_mode = "grid"
@@ -926,6 +1203,10 @@ class WorldModel:
             self.observation_mode = self.capabilities.observation_mode
         if event.novelty_signals:
             self.novelty_events += len(event.novelty_signals)
+        self._invalidate_stale_ui_actions(
+            previous_ui_context=previous_ui_context,
+            current_ui_context=self.ui_context,
+        )
         outcomes, contradictions = self._derive_feedback_state(
             event,
             previous_ui_context=previous_ui_context,
@@ -1021,6 +1302,7 @@ class WorldModel:
                 for action, count in self.blocked_action_counts.items()
                 if count > 0
             )[:6],
+            "invalidated_action_labels": list(self.invalidated_action_labels),
             "recent_contradiction_actions": list(
                 self.recent_contradiction_actions[-4:]
             ),
@@ -1028,6 +1310,7 @@ class WorldModel:
         }
         if self.ui_context is not None:
             metadata["ui_context"] = self.ui_context.to_dict()
+            metadata["input_state"] = dict(self.input_state)
         elif self.frontier_state.current_region or self.frontier_state.frontier_nodes:
             metadata["frontier_state"] = self.frontier_state.to_dict()
         return WorldModelSnapshot(
