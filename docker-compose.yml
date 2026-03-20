@@ -29,6 +29,8 @@ services:
       - uv_python:/opt/uv-python
       - alfworld_data:/datasets/alfworld
       - wandb_data:/wandb
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     ports:
       - "8000:8000"

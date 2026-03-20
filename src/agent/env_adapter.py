@@ -14,13 +14,6 @@ from src.agent.v2.types import (
 )
 
 try:
-    import tales as _tales
-
-    _TALES_ENV2TASK: dict[str, str] = _tales.env2task
-except ImportError:
-    _TALES_ENV2TASK = {}
-
-try:
     from nethack import ACTIONS as _NLE_ACTIONS
 
     _HAS_NLE = True
@@ -82,6 +75,22 @@ class V2EnvironmentAdapter(Protocol):
         status_delta: dict[str, float | int | str | bool] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AdapterEvent: ...
+
+
+_TALES_ENV2TASK_CACHE: dict[str, str] | None = None
+
+
+def _get_tales_env2task() -> dict[str, str]:
+    global _TALES_ENV2TASK_CACHE
+    if _TALES_ENV2TASK_CACHE is not None:
+        return _TALES_ENV2TASK_CACHE
+    try:
+        import tales as _tales
+
+        _TALES_ENV2TASK_CACHE = dict(_tales.env2task)
+    except ImportError:
+        _TALES_ENV2TASK_CACHE = {}
+    return _TALES_ENV2TASK_CACHE
 
 
 def _infer_operator_family(action_label: str) -> str:
@@ -391,7 +400,7 @@ class TalesAdapter:
     def __init__(self, env, obs: str, info: dict, env_name: str = ""):
         self._env = env
         self._env_name = env_name
-        self._family = _TALES_ENV2TASK.get(env_name, "unknown")
+        self._family = _get_tales_env2task().get(env_name, "unknown")
         self._info = info
         self._terminated = False
         self._obs = self._normalize_obs(obs)
@@ -838,6 +847,430 @@ def _format_webarena_observation(
         lines.append("[Observation]")
         lines.append(text)
     return "\n".join(lines).strip()
+
+
+def _extract_androidworld_task_text(
+    goal: str | None, template: str | None, task_name: str | None
+) -> str:
+    for candidate in (goal, template, task_name):
+        text = _coerce_text(candidate).strip()
+        if text:
+            return text
+    return "Complete the assigned Android task."
+
+
+def _extract_androidworld_ui_context(env: Any, state: Any) -> UIContext:
+    raw_elements = list(getattr(state, "ui_elements", []) or [])
+    visible_elements: list[UIElementRecord] = []
+    for idx, element in enumerate(raw_elements):
+        bbox = getattr(element, "bbox", None)
+        bounds = {}
+        if bbox is not None:
+            bounds = {
+                "x_min": getattr(bbox, "x_min", None),
+                "x_max": getattr(bbox, "x_max", None),
+                "y_min": getattr(bbox, "y_min", None),
+                "y_max": getattr(bbox, "y_max", None),
+            }
+
+        label = (
+            _coerce_text(getattr(element, "text", None)).strip()
+            or _coerce_text(getattr(element, "content_description", None)).strip()
+            or _coerce_text(getattr(element, "hint_text", None)).strip()
+        )
+        role = (
+            _coerce_text(getattr(element, "class_name", None)).strip()
+            or "android.widget.View"
+        )
+        visible_elements.append(
+            UIElementRecord(
+                element_id=f"ui-{idx}",
+                role=role,
+                name=label or None,
+                text=(_coerce_text(getattr(element, "text", None)).strip() or None),
+                interactable=bool(
+                    getattr(element, "is_clickable", False)
+                    or getattr(element, "is_editable", False)
+                    or getattr(element, "is_long_clickable", False)
+                    or getattr(element, "is_scrollable", False)
+                ),
+                disabled=not bool(getattr(element, "is_enabled", True)),
+                selected=bool(getattr(element, "is_selected", False)),
+                bounds={k: v for k, v in bounds.items() if v is not None},
+                attributes={
+                    "index": idx,
+                    "editable": bool(getattr(element, "is_editable", False)),
+                    "clickable": bool(getattr(element, "is_clickable", False)),
+                    "long_clickable": bool(
+                        getattr(element, "is_long_clickable", False)
+                    ),
+                    "scrollable": bool(getattr(element, "is_scrollable", False)),
+                    "checkable": bool(getattr(element, "is_checkable", False)),
+                    "checked": bool(getattr(element, "is_checked", False)),
+                    "focused": bool(getattr(element, "is_focused", False)),
+                    "visible": bool(getattr(element, "is_visible", True)),
+                    "resource_id": _coerce_text(
+                        getattr(element, "resource_id", None)
+                    ).strip()
+                    or None,
+                    "package_name": _coerce_text(
+                        getattr(element, "package_name", None)
+                    ).strip()
+                    or None,
+                },
+            )
+        )
+
+    action_scope = ["tap", "long_press", "scroll", "navigate_back", "navigate_home"]
+    if any(
+        bool(record.attributes.get("editable"))
+        for record in visible_elements
+        if record.attributes
+    ):
+        action_scope.append("type")
+
+    page_title = _coerce_text(getattr(env, "foreground_activity_name", "")).strip()
+    metadata = {
+        "orientation": getattr(env, "orientation", None),
+        "screen_size": getattr(env, "logical_screen_size", None),
+    }
+    return UIContext(
+        page_url=None,
+        page_title=page_title or None,
+        visible_elements=visible_elements,
+        action_scope=action_scope,
+        metadata=metadata,
+    )
+
+
+def _format_androidworld_element(
+    element: UIElementRecord, *, max_label_chars: int = 80
+) -> str:
+    label = element.name or element.text or ""
+    label = label.replace("\n", " ").strip()
+    if len(label) > max_label_chars:
+        label = f"{label[: max_label_chars - 3]}..."
+    attrs = element.attributes or {}
+    flags: list[str] = []
+    if attrs.get("editable"):
+        flags.append("editable")
+    if attrs.get("clickable"):
+        flags.append("clickable")
+    if attrs.get("long_clickable"):
+        flags.append("long")
+    if attrs.get("scrollable"):
+        flags.append("scrollable")
+    if attrs.get("checked"):
+        flags.append("checked")
+    if element.selected:
+        flags.append("selected")
+    if element.disabled:
+        flags.append("disabled")
+    flags_text = f" flags={','.join(flags)}" if flags else ""
+    role = element.role.rsplit(".", 1)[-1]
+    return (
+        f"[{attrs.get('index', '?')}] role={role} label={label or '<none>'}{flags_text}"
+    )
+
+
+def _format_androidworld_observation(
+    ui_context: UIContext,
+    *,
+    task_text: str,
+    task_name: str | None,
+    template: str | None,
+) -> str:
+    lines: list[str] = []
+    if task_name:
+        lines.append(f"[Task Name] {task_name}")
+    lines.append(f"[Task] {task_text}")
+    if template:
+        lines.append(f"[Template] {_coerce_text(template).strip()}")
+    if ui_context.page_title or ui_context.metadata:
+        lines.append("[Screen]")
+        if ui_context.page_title:
+            lines.append(f"  activity: {ui_context.page_title}")
+        screen_size = (ui_context.metadata or {}).get("screen_size")
+        if screen_size:
+            lines.append(f"  logical_size: {screen_size}")
+        orientation = (ui_context.metadata or {}).get("orientation")
+        if orientation is not None:
+            lines.append(f"  orientation: {orientation}")
+    if ui_context.visible_elements:
+        lines.append("[Visible Elements]")
+        for element in ui_context.visible_elements[:18]:
+            lines.append(f"  - {_format_androidworld_element(element)}")
+    else:
+        lines.append("[Visible Elements]")
+        lines.append("  - <none>")
+    lines.append("[Action Syntax]")
+    lines.append("  - tap [index]")
+    lines.append("  - long press [index]")
+    lines.append('  - type "text" into [index]')
+    lines.append("  - scroll up|down|left|right")
+    lines.append("  - scroll up|down|left|right [index]")
+    lines.append("  - navigate back")
+    lines.append("  - navigate home")
+    lines.append("  - keyboard enter")
+    lines.append("  - wait")
+    return "\n".join(lines).strip()
+
+
+_ANDROIDWORLD_INDEX_RE = re.compile(r"\[(\d+)\]")
+_ANDROIDWORLD_TYPE_RE = re.compile(
+    r'^(?:type|input_text)\s+"(?P<text>.*)"\s+into\s+\[(?P<index>\d+)\]\s*$',
+    re.IGNORECASE,
+)
+_ANDROIDWORLD_SCROLL_RE = re.compile(
+    r"^(?:scroll|swipe)\s+"
+    r"(?P<direction>up|down|left|right)"
+    r"(?:\s+\[(?P<index>\d+)\])?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_androidworld_index(action: str) -> int:
+    match = _ANDROIDWORLD_INDEX_RE.search(action)
+    if not match:
+        raise ValueError(f"Expected an indexed AndroidWorld action, got: {action!r}")
+    return int(match.group(1))
+
+
+class AndroidWorldAdapter:
+    def __init__(
+        self,
+        env: Any,
+        state: Any,
+        *,
+        task_name: str,
+        goal: str,
+        template: str | None = None,
+        score_provider: Any | None = None,
+    ):
+        self._env = env
+        self._state = state
+        self._task_name = task_name
+        self._goal = goal
+        self._template = template
+        self._score_provider = score_provider
+        self._current_score = self._read_score()
+        self._reward_delta = 0.0
+        self._last_action_text: str | None = None
+        self._last_action_executed: bool | None = None
+        self._terminated = False
+        self._ui_context = _extract_androidworld_ui_context(self._env, self._state)
+        self._task_text = _extract_androidworld_task_text(
+            self._goal, self._template, self._task_name
+        )
+        self._observation_text = _format_androidworld_observation(
+            self._ui_context,
+            task_text=self._task_text,
+            task_name=self._task_name,
+            template=self._template,
+        )
+        self._initial_observation = self._observation_text
+
+    def _read_score(self) -> float:
+        if self._score_provider is None:
+            return 0.0
+        try:
+            return float(self._score_provider() or 0.0)
+        except Exception:
+            return 0.0
+
+    def _refresh_cached_state(self) -> None:
+        self._ui_context = _extract_androidworld_ui_context(self._env, self._state)
+        self._observation_text = _format_androidworld_observation(
+            self._ui_context,
+            task_text=self._task_text,
+            task_name=self._task_name,
+            template=self._template,
+        )
+
+    @property
+    def observation(self) -> str:
+        return self._observation_text
+
+    @property
+    def admissible_actions(self) -> list[str]:
+        actions: list[str] = []
+        for element in self._ui_context.visible_elements[:18]:
+            idx = int((element.attributes or {}).get("index", 0))
+            actions.append(f"tap [{idx}]")
+            if (element.attributes or {}).get("long_clickable"):
+                actions.append(f"long press [{idx}]")
+            if (element.attributes or {}).get("editable"):
+                actions.append(f'type "..." into [{idx}]')
+            if (element.attributes or {}).get("scrollable"):
+                actions.extend(
+                    [
+                        f"scroll down [{idx}]",
+                        f"scroll up [{idx}]",
+                    ]
+                )
+        actions.extend(
+            [
+                "scroll down",
+                "scroll up",
+                "navigate back",
+                "navigate home",
+                "keyboard enter",
+                "wait",
+            ]
+        )
+        deduped: list[str] = []
+        for action in actions:
+            if action not in deduped:
+                deduped.append(action)
+        return deduped
+
+    @property
+    def has_won(self) -> bool:
+        return self._current_score >= 1.0
+
+    @property
+    def task(self) -> str:
+        return self._task_text
+
+    @property
+    def initial_observation(self) -> str:
+        return self._initial_observation
+
+    def _parse_action(self, action: str) -> Any:
+        normalized = action.strip()
+        lowered = normalized.lower()
+        from android_world.env import json_action as aw_json_action
+
+        type_match = _ANDROIDWORLD_TYPE_RE.match(normalized)
+        if type_match:
+            return aw_json_action.JSONAction(
+                action_type=aw_json_action.INPUT_TEXT,
+                index=int(type_match.group("index")),
+                text=type_match.group("text"),
+            )
+        scroll_match = _ANDROIDWORLD_SCROLL_RE.match(normalized)
+        if scroll_match:
+            index = scroll_match.group("index")
+            return aw_json_action.JSONAction(
+                action_type=aw_json_action.SCROLL,
+                direction=scroll_match.group("direction").lower(),
+                index=int(index) if index is not None else None,
+            )
+        if lowered.startswith(("tap ", "click ")):
+            return aw_json_action.JSONAction(
+                action_type=aw_json_action.CLICK,
+                index=_extract_androidworld_index(normalized),
+            )
+        if lowered.startswith("long press "):
+            return aw_json_action.JSONAction(
+                action_type=aw_json_action.LONG_PRESS,
+                index=_extract_androidworld_index(normalized),
+            )
+        if lowered == "navigate back":
+            return aw_json_action.JSONAction(action_type=aw_json_action.NAVIGATE_BACK)
+        if lowered == "navigate home":
+            return aw_json_action.JSONAction(action_type=aw_json_action.NAVIGATE_HOME)
+        if lowered == "keyboard enter":
+            return aw_json_action.JSONAction(action_type=aw_json_action.KEYBOARD_ENTER)
+        if lowered == "wait":
+            return aw_json_action.JSONAction(action_type=aw_json_action.WAIT)
+        raise ValueError(f"Unsupported AndroidWorld action: {action!r}")
+
+    def step(self, action: str) -> str:
+        parsed_action = self._parse_action(action)
+        self._env.execute_action(parsed_action)
+        self._state = self._env.get_state(wait_to_stabilize=True)
+        next_score = self._read_score()
+        self._reward_delta = next_score - self._current_score
+        self._current_score = next_score
+        self._last_action_text = action
+        self._last_action_executed = True
+        self._terminated = self.has_won
+        self._refresh_cached_state()
+        return self._observation_text
+
+    def set_observation(self, msg: str) -> None:
+        self._observation_text = msg
+
+    def infer_task_type(self) -> int | None:
+        return None
+
+    def count_inadmissible_actions(self, log_path: str) -> int:
+        try:
+            with open(log_path) as f:
+                return sum(
+                    1
+                    for line in f
+                    if "unsupported androidworld action" in line.lower()
+                    or "invalid element index" in line.lower()
+                )
+        except Exception:
+            return 0
+
+    def get_v2_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            adapter_name="androidworld",
+            observation_mode="ui",
+            supports_ui_context=True,
+            supports_status_delta=True,
+            supports_reward_delta=True,
+            supports_operator_candidates=True,
+        )
+
+    def build_v2_event(
+        self,
+        *,
+        step_index: int,
+        action_text: str | None = None,
+        action_executed: bool | None = None,
+        reward_delta: float | None = None,
+        status_delta: dict[str, float | int | str | bool] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AdapterEvent:
+        event_metadata = {
+            "adapter_name": "androidworld",
+            "task_name": self._task_name,
+            "template": self._template,
+            "score": self._current_score,
+            "terminated": self._terminated,
+        }
+        if metadata:
+            event_metadata.update(metadata)
+        effective_status_delta = status_delta or {
+            "score": self._current_score,
+            "activity": self._ui_context.page_title or "",
+        }
+        return AdapterEvent(
+            step_index=step_index,
+            task_text=self.task,
+            raw_observation=self.observation,
+            normalized_observation=self.observation,
+            action_result=ActionResult(
+                action_text=action_text or self._last_action_text,
+                action_executed=(
+                    action_executed
+                    if action_executed is not None
+                    else self._last_action_executed
+                ),
+                operator_family=(
+                    _infer_operator_family(action_text or self._last_action_text or "")
+                    if (action_text or self._last_action_text)
+                    else None
+                ),
+            ),
+            operator_candidates=_build_operator_candidates(
+                "androidworld", self.admissible_actions
+            ),
+            reward_delta=(
+                reward_delta if reward_delta is not None else self._reward_delta
+            ),
+            status_delta=effective_status_delta,
+            novelty_signals=[
+                element.element_id for element in self._ui_context.visible_elements[:4]
+            ],
+            ui_context=self._ui_context,
+            metadata=event_metadata,
+        )
 
 
 class WebArenaAdapter:

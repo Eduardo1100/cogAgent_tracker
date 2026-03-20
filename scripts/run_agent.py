@@ -23,6 +23,7 @@ from rich.text import Text
 import wandb
 from src.agent.baseline_agent import BaselineAutogenAgent
 from src.agent.env_adapter import (
+    AndroidWorldAdapter,
     NetHackAdapter,
     ScienceWorldAdapter,
     TalesAdapter,
@@ -30,8 +31,17 @@ from src.agent.env_adapter import (
     infer_task_type,
 )
 from src.agent.gwt_agent import GWTAutogenAgent
+from src.config.androidworld_runtime import (
+    androidworld_install_timeout_from_env,
+    prepare_androidworld_runtime,
+)
+from src.config.androidworld_validation import (
+    validate_androidworld_runtime,
+    wait_for_androidworld_device_ready,
+)
 from src.config.env_validation import require_env_vars
 from src.config.schema_health import require_current_schema
+from src.config.webarena_validation import validate_webarena_instance_urls
 from src.storage import cache
 from src.storage.database import SessionLocal
 from src.storage.models import EpisodeRun, ExperimentRun
@@ -51,6 +61,63 @@ DEEPSEEK_PRICING_PER_1M: dict[str, tuple[float, float, float]] = {
     "deepseek-reasoner": (0.028, 0.28, 0.42),
 }
 _ACTIVE_EXPERIMENT_ID: int | None = None
+
+_ANDROIDWORLD_SMOKE_TASK_GROUPS: dict[str, list[str]] = {
+    "browser": ["BrowserMaze", "BrowserDraw", "BrowserMultiply"],
+    "core": ["BrowserMaze", "MarkorCreateNote", "ContactsAddContact"],
+}
+
+
+def _coerce_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        parts = [_coerce_text(item).strip() for item in value]
+        return " ".join(part for part in parts if part)
+    return str(value)
+
+
+def _is_androidworld_device_offline_error(exc: Exception) -> bool:
+    parts = [str(exc).lower()]
+    for attr in ("output", "stdout", "stderr"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, bytes):
+            parts.append(value.decode("utf-8", errors="ignore").lower())
+        elif isinstance(value, str):
+            parts.append(value.lower())
+    return "device offline" in " ".join(parts)
+
+
+def _is_androidworld_retryable_reset_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return _is_androidworld_device_offline_error(exc) or (
+        "could not get a11y tree" in message
+    )
+
+
+def _reset_androidworld_env(
+    env,
+    *,
+    adb_path: str,
+    console_port: int,
+) -> None:
+    wait_for_androidworld_device_ready(
+        adb_path=adb_path,
+        console_port=console_port,
+    )
+    try:
+        env.reset(go_home=True)
+        return
+    except Exception as exc:
+        if not _is_androidworld_retryable_reset_error(exc):
+            raise
+    wait_for_androidworld_device_ready(
+        adb_path=adb_path,
+        console_port=console_port,
+    )
+    env.reset(go_home=True)
 
 
 def set_active_experiment(experiment_id: int | None) -> None:
@@ -1267,7 +1334,14 @@ def parse_arguments():
     )
     parser.add_argument(
         "--env-type",
-        choices=["alfworld", "scienceworld", "tales", "nethack", "webarena"],
+        choices=[
+            "alfworld",
+            "scienceworld",
+            "tales",
+            "nethack",
+            "webarena",
+            "androidworld",
+        ],
         default="alfworld",
         help="Which environment to evaluate (default: alfworld).",
     )
@@ -1316,6 +1390,74 @@ def parse_arguments():
         default="browsergym/webarena",
         dest="webarena_env_id",
         help="Gymnasium environment id to use for WebArena-style tasks.",
+    )
+    parser.add_argument(
+        "--androidworld-tasks",
+        nargs="+",
+        default=None,
+        dest="androidworld_tasks",
+        help="Specific AndroidWorld task types to run (default: all in the selected suite family).",
+    )
+    parser.add_argument(
+        "--androidworld-smoke-suite",
+        choices=sorted(_ANDROIDWORLD_SMOKE_TASK_GROUPS),
+        default=None,
+        dest="androidworld_smoke_suite",
+        help="Named AndroidWorld smoke suite of transferable CIP tasks.",
+    )
+    parser.add_argument(
+        "--androidworld-suite-family",
+        default="android_world",
+        dest="androidworld_suite_family",
+        help="AndroidWorld suite family to use (default: android_world).",
+    )
+    parser.add_argument(
+        "--androidworld-n-task-combinations",
+        type=int,
+        default=1,
+        dest="androidworld_n_task_combinations",
+        help="Number of task instances to materialize per AndroidWorld task template.",
+    )
+    parser.add_argument(
+        "--androidworld-task-random-seed",
+        type=int,
+        default=30,
+        dest="androidworld_task_random_seed",
+        help="Seed used to materialize AndroidWorld task parameterizations.",
+    )
+    parser.add_argument(
+        "--androidworld-perform-emulator-setup",
+        action="store_true",
+        default=False,
+        dest="androidworld_perform_emulator_setup",
+        help="Perform one-time AndroidWorld emulator app setup before evaluation.",
+    )
+    parser.add_argument(
+        "--androidworld-console-port",
+        type=int,
+        default=5554,
+        dest="androidworld_console_port",
+        help="Android emulator console port (default: 5554).",
+    )
+    parser.add_argument(
+        "--androidworld-grpc-port",
+        type=int,
+        default=8554,
+        dest="androidworld_grpc_port",
+        help="Android emulator gRPC port (default: 8554).",
+    )
+    parser.add_argument(
+        "--androidworld-adb-path",
+        default=None,
+        dest="androidworld_adb_path",
+        help="Explicit adb path for AndroidWorld.",
+    )
+    parser.add_argument(
+        "--androidworld-adb-install-timeout",
+        type=float,
+        default=androidworld_install_timeout_from_env(),
+        dest="androidworld_adb_install_timeout",
+        help="Extended timeout in seconds for AndroidWorld APK installs during controller startup.",
     )
     parser.add_argument(
         "--render",
@@ -2293,6 +2435,412 @@ def run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db):
     )
 
 
+def _build_androidworld_task_suite(args):
+    from android_world import registry as aw_registry_module
+    from android_world import suite_utils as aw_suite_utils
+
+    task_registry = aw_registry_module.TaskRegistry()
+    suite_family = getattr(args, "androidworld_suite_family", "android_world")
+    task_registry_for_family = task_registry.get_registry(family=suite_family)
+    requested_tasks = args.androidworld_tasks or None
+    smoke_suite = getattr(args, "androidworld_smoke_suite", None)
+    if requested_tasks and smoke_suite:
+        raise ValueError(
+            "Specify either --androidworld-tasks or --androidworld-smoke-suite, not both."
+        )
+    if smoke_suite:
+        requested_tasks = list(_ANDROIDWORLD_SMOKE_TASK_GROUPS[smoke_suite])
+    if requested_tasks:
+        available_task_names = sorted(task_registry_for_family.keys())
+        available_by_lower = {name.lower(): name for name in available_task_names}
+        normalized_requested: list[str] = []
+        unknown_requested: list[str] = []
+        for requested_task in requested_tasks:
+            canonical_name = available_by_lower.get(requested_task.lower())
+            if canonical_name is None:
+                unknown_requested.append(requested_task)
+            else:
+                normalized_requested.append(canonical_name)
+        if unknown_requested:
+            available_preview = ", ".join(available_task_names[:20])
+            raise ValueError(
+                "Unknown AndroidWorld task name(s): "
+                f"{', '.join(unknown_requested)}.\n"
+                f"Suite family: {suite_family}\n"
+                "Examples of valid task names: "
+                f"{available_preview}"
+            )
+        requested_tasks = normalized_requested
+    suite = aw_suite_utils.create_suite(
+        task_registry=task_registry_for_family,
+        n_task_combinations=max(1, args.androidworld_n_task_combinations),
+        seed=args.androidworld_task_random_seed,
+        tasks=requested_tasks,
+    )
+    task_items: list[tuple[str, int, object]] = []
+    for task_type, task_instances in suite.items():
+        for task_index, task in enumerate(task_instances):
+            task_items.append((task_type, task_index, task))
+    return suite_family, task_items
+
+
+def run_androidworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
+    from android_world.env import env_launcher
+
+    adb_path = validate_androidworld_runtime(
+        adb_path=args.androidworld_adb_path,
+        console_port=args.androidworld_console_port,
+    )
+    prepare_androidworld_runtime(
+        install_timeout_sec=args.androidworld_adb_install_timeout
+    )
+    suite_family, task_items = _build_androidworld_task_suite(args)
+    if not task_items:
+        raise FileNotFoundError("No AndroidWorld tasks were discovered.")
+
+    selected_task_items = (
+        random.sample(task_items, k=min(args.num_games, len(task_items)))
+        if args.num_games > 0
+        else task_items
+    )
+
+    chat_round_list: list[int] = []
+    error_list: list[int] = []
+    success_list: list[int] = []
+    failure_list: list[int] = []
+    cumulative_successful_actions = cumulative_failing_actions = 0
+    cumulative_successful_chat_rounds = cumulative_failing_chat_rounds = 0
+    cumulative_successful_runtime = cumulative_failing_runtime = 0
+    avg_actions_taken_per_successful_game = avg_actions_taken_per_failing_game = 0.0
+    avg_chat_rounds_per_successful_game = avg_chat_rounds_per_failing_game = 0.0
+    avg_runtime_per_successful_game = avg_runtime_per_failing_game = 0.0
+    cumulative_runtime = 0.0
+    num_games_evaluated = num_successes = 0
+    error_adjusted_success_rate = 0.0
+    success_rate = 0.0
+    total_run_usage: dict[str, float] = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
+
+    selected_labels = [
+        f"{task_type}[{task_index}]" for task_type, task_index, _ in selected_task_items
+    ]
+    experiment = ExperimentRun(
+        agent_name=agent_name,
+        llm_model=llm_profile_name,
+        eval_env_type="androidworld",
+        max_actions_per_game=args.max_actions,
+        max_chat_rounds=args.max_chat_rounds,
+        start_time=datetime.now(UTC),
+        status="RUNNING",
+        split=suite_family,
+        num_games=len(selected_task_items),
+    )
+    db.add(experiment)
+    db.commit()
+    db.refresh(experiment)
+    set_active_experiment(experiment.id)
+    print(f"✅ Started DB Experiment Run ID: {experiment.id}")
+
+    experiment.agents_config = agent.agents_info
+    experiment.git_commit = get_git_commit()
+    experiment.git_branch = get_git_branch()
+    experiment.selected_games = selected_labels
+    experiment.selected_games_display = ", ".join(selected_labels)
+    db.commit()
+
+    env = None
+    try:
+        env = env_launcher.load_and_setup_env(
+            console_port=args.androidworld_console_port,
+            emulator_setup=args.androidworld_perform_emulator_setup,
+            adb_path=adb_path,
+            grpc_port=args.androidworld_grpc_port,
+        )
+        for game_no, (task_type, task_index, task) in enumerate(
+            selected_task_items, start=1
+        ):
+            num_games_evaluated += 1
+            episode_persisted = False
+            task_label = f"{task_type}[{task_index}]"
+            episode_label = f"Game #{game_no} | {task_label}"
+            update_experiment_runtime_state(
+                db,
+                experiment,
+                current_game_number=game_no,
+                current_game_label=episode_label,
+            )
+
+            _reset_androidworld_env(
+                env,
+                adb_path=adb_path,
+                console_port=args.androidworld_console_port,
+            )
+            task.initialize_task(env)
+            state = env.get_state(wait_to_stabilize=True)
+            goal_text = _coerce_text(getattr(task, "goal", "")).strip() or task_label
+            template_text = _coerce_text(getattr(task, "template", "")).strip() or None
+            adapter = AndroidWorldAdapter(
+                env,
+                state,
+                task_name=task_type,
+                goal=goal_text,
+                template=template_text,
+                score_provider=lambda task=task, env=env: float(
+                    task.is_successful(env) or 0.0
+                ),
+            )
+            info = {
+                "task": goal_text,
+                "task_type": task_type,
+                "task_index": task_index,
+                "suite_family": suite_family,
+                "template": template_text,
+            }
+            agent.set_environment(
+                env, adapter.observation, info, game_no, adapter=adapter
+            )
+            configure_live_analyst_trace(agent, experiment.id)
+            log_paths = agent.log_paths
+
+            print(
+                f"\n[Running Game #{game_no}] "
+                f"({num_games_evaluated}/{len(selected_task_items)}) task={task_label}"
+            )
+            try:
+                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
+                chat_text = chat_artifacts["chat_text"]
+                transitions = chat_artifacts["transitions"]
+                belief_matches = chat_artifacts["belief_matches"]
+                chat_round_list.append(chat_artifacts["chat_rounds"])
+                cumulative_runtime += elapsed_minutes
+
+                current_usage_totals = get_agent_usage_totals(agent)
+                game_usage = get_usage_delta(current_usage_totals, total_run_usage)
+                game_prompt_tokens = int(game_usage["prompt_tokens"])
+                game_completion_tokens = int(game_usage["completion_tokens"])
+                game_total_tokens = int(game_usage["total_tokens"])
+                game_total_cost = float(game_usage["total_cost"])
+                total_run_usage = {
+                    key: max(total_run_usage[key], current_usage_totals[key])
+                    for key in total_run_usage
+                }
+                if any(value > 0 for value in game_usage.values()):
+                    wandb.log(
+                        {
+                            "game/total_tokens": game_total_tokens,
+                            "game/cost": game_total_cost,
+                        },
+                        step=num_games_evaluated,
+                    )
+
+                if error_message:
+                    error_list.append(game_no)
+                    _append_text_file(
+                        log_paths["error_message_path"], f"Run Chat: {error_message}\n"
+                    )
+
+                agent.prev_episodic_memories.append(
+                    {
+                        "episode_number": num_games_evaluated,
+                        "task_outcome": agent.task_status,
+                        "memory": belief_matches
+                        if belief_matches
+                        else agent.curr_episodic_memory,
+                    }
+                )
+
+                s3_key = upload_chat_history_artifact(
+                    s3,
+                    experiment_id=experiment.id,
+                    game_number=game_no,
+                    chat_text=chat_text,
+                )
+
+                success = bool(float(task.is_successful(env) or 0.0) >= 1.0)
+                if success:
+                    num_successes += 1
+                    success_list.append(game_no)
+                    cumulative_successful_actions += agent.num_actions_taken
+                    cumulative_successful_chat_rounds += chat_round_list[-1]
+                    cumulative_successful_runtime += elapsed_minutes
+                    avg_actions_taken_per_successful_game = (
+                        cumulative_successful_actions / num_successes
+                    )
+                    avg_chat_rounds_per_successful_game = (
+                        cumulative_successful_chat_rounds / num_successes
+                    )
+                    avg_runtime_per_successful_game = (
+                        cumulative_successful_runtime / num_successes
+                    )
+                else:
+                    num_failures = num_games_evaluated - num_successes
+                    failure_list.append(game_no)
+                    cumulative_failing_actions += agent.num_actions_taken
+                    cumulative_failing_chat_rounds += chat_round_list[-1]
+                    cumulative_failing_runtime += elapsed_minutes
+                    avg_actions_taken_per_failing_game = (
+                        cumulative_failing_actions / num_failures
+                    )
+                    avg_chat_rounds_per_failing_game = (
+                        cumulative_failing_chat_rounds / num_failures
+                    )
+                    avg_runtime_per_failing_game = (
+                        cumulative_failing_runtime / num_failures
+                    )
+
+                success_rate = num_successes / num_games_evaluated
+                num_games_no_error = num_games_evaluated - len(
+                    [g for g in error_list if g not in success_list]
+                )
+                error_adjusted_success_rate = (
+                    num_successes / num_games_no_error
+                    if num_games_no_error > 0
+                    else 0.0
+                )
+
+                wandb.log(
+                    {
+                        "game_no": game_no,
+                        "success": int(success),
+                        "actions_taken": agent.num_actions_taken,
+                        "success_rate": success_rate,
+                        "runtime": elapsed_minutes,
+                        "cumulative_runtime": cumulative_runtime,
+                        "chat_rounds": chat_round_list[-1],
+                        "error_adjusted_success_rate": error_adjusted_success_rate,
+                        "androidworld/task": task_label,
+                        "androidworld/task_goal": goal_text,
+                        "final/total_tokens": total_run_usage["total_tokens"],
+                        "final/total_cost": total_run_usage["total_cost"],
+                    },
+                    step=num_games_evaluated,
+                )
+
+                persist_experiment_usage_snapshot(db, experiment, total_run_usage)
+                agent.task = f"AndroidWorld ({task_label})"
+                persist_episode_run(
+                    db,
+                    experiment=experiment,
+                    game_number=game_no,
+                    agent=agent,
+                    log_paths=log_paths,
+                    success=success,
+                    chat_rounds=chat_round_list[-1],
+                    runtime_minutes=elapsed_minutes,
+                    error_message=str(error_message) if error_message else None,
+                    transitions=transitions,
+                    belief_matches=belief_matches,
+                    chat_text=chat_text,
+                    prompt_tokens=game_prompt_tokens,
+                    completion_tokens=game_completion_tokens,
+                    episode_cost=game_total_cost,
+                    success_rate=success_rate,
+                    error_adjusted_success_rate=error_adjusted_success_rate,
+                    chat_history_s3_key=s3_key,
+                    analyst_trace=get_agent_analyst_trace_text(
+                        agent, prefer_existing=True
+                    ),
+                )
+                episode_persisted = True
+                print(f"✅ Saved Game #{game_no} to PostgreSQL Database!")
+            except Exception as exc:
+                if game_no not in error_list:
+                    error_list.append(game_no)
+                if (
+                    not episode_persisted
+                    and getattr(agent, "adapter", None) is not None
+                ):
+                    try:
+                        total_run_usage = persist_interrupted_episode_run(
+                            db,
+                            experiment=experiment,
+                            agent=agent,
+                            game_number=game_no,
+                            s3=s3,
+                            total_run_usage=total_run_usage,
+                            elapsed_minutes=0.0,
+                            success_rate=success_rate if num_games_evaluated else 0.0,
+                            error_adjusted_success_rate=error_adjusted_success_rate,
+                            error_message=str(exc),
+                        )
+                    except Exception as persist_exc:
+                        print(
+                            "⚠️ Failed to persist interrupted AndroidWorld episode "
+                            f"{game_no}: {persist_exc}"
+                        )
+                raise
+            finally:
+                try:
+                    task.tear_down(env)
+                except Exception:
+                    pass
+                try:
+                    env.reset(go_home=True)
+                except Exception:
+                    pass
+    except KeyboardInterrupt:
+        finalize_experiment(
+            db,
+            experiment,
+            cumulative_runtime=cumulative_runtime,
+            success_rate=success_rate if num_games_evaluated else 0.0,
+            error_adjusted_success_rate=error_adjusted_success_rate,
+            error_count=len(error_list),
+            avg_actions_per_successful_game=avg_actions_taken_per_successful_game,
+            avg_chat_rounds_per_successful_game=avg_chat_rounds_per_successful_game,
+            avg_runtime_per_successful_game=avg_runtime_per_successful_game,
+            avg_actions_per_failing_game=avg_actions_taken_per_failing_game,
+            avg_chat_rounds_per_failing_game=avg_chat_rounds_per_failing_game,
+            avg_runtime_per_failing_game=avg_runtime_per_failing_game,
+            status="CANCELLED",
+        )
+        print("⚠️ AndroidWorld experiment cancelled.")
+        raise
+    except Exception as exc:
+        finalize_experiment(
+            db,
+            experiment,
+            cumulative_runtime=cumulative_runtime,
+            success_rate=success_rate if num_games_evaluated else 0.0,
+            error_adjusted_success_rate=error_adjusted_success_rate,
+            error_count=len(error_list) or 1,
+            avg_actions_per_successful_game=avg_actions_taken_per_successful_game,
+            avg_chat_rounds_per_successful_game=avg_chat_rounds_per_successful_game,
+            avg_runtime_per_successful_game=avg_runtime_per_successful_game,
+            avg_actions_per_failing_game=avg_actions_taken_per_failing_game,
+            avg_chat_rounds_per_failing_game=avg_chat_rounds_per_failing_game,
+            avg_runtime_per_failing_game=avg_runtime_per_failing_game,
+            status="FAILED",
+        )
+        print(f"⚠️ AndroidWorld experiment failed: {exc}")
+        raise
+    finally:
+        if env is not None:
+            env.close()
+
+    finalize_experiment(
+        db,
+        experiment,
+        cumulative_runtime=cumulative_runtime,
+        success_rate=success_rate if num_games_evaluated else 0.0,
+        error_adjusted_success_rate=error_adjusted_success_rate,
+        error_count=len(error_list),
+        avg_actions_per_successful_game=avg_actions_taken_per_successful_game,
+        avg_chat_rounds_per_successful_game=avg_chat_rounds_per_successful_game,
+        avg_runtime_per_successful_game=avg_runtime_per_successful_game,
+        avg_actions_per_failing_game=avg_actions_taken_per_failing_game,
+        avg_chat_rounds_per_failing_game=avg_chat_rounds_per_failing_game,
+        avg_runtime_per_failing_game=avg_runtime_per_failing_game,
+        status="CONCLUDED",
+    )
+    print("✅ AndroidWorld experiment finalized in the database.")
+
+
 def _discover_webarena_task_ids(task_id_args: list[int] | None) -> list[int]:
     if task_id_args:
         return list(dict.fromkeys(task_id_args))
@@ -2343,18 +2891,7 @@ def _make_webarena_env(task_id: int, *, render: bool, env_id: str):
 def run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db):
     render = getattr(args, "render", False)
     env_id = getattr(args, "webarena_env_id", "browsergym/webarena")
-    require_env_vars(
-        [
-            "WA_SHOPPING",
-            "WA_SHOPPING_ADMIN",
-            "WA_REDDIT",
-            "WA_GITLAB",
-            "WA_WIKIPEDIA",
-            "WA_MAP",
-            "WA_HOMEPAGE",
-        ],
-        context="WebArena startup",
-    )
+    validate_webarena_instance_urls()
     task_ids = _discover_webarena_task_ids(args.webarena_task_ids)
     if not task_ids:
         raise FileNotFoundError("No WebArena task ids were discovered.")
@@ -2747,6 +3284,18 @@ def main():
         db = SessionLocal()
         try:
             run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db)
+        except KeyboardInterrupt:
+            wandb.finish()
+            raise SystemExit(130)
+        finally:
+            db.close()
+        wandb.finish()
+        return
+
+    if args.env_type == "androidworld":
+        db = SessionLocal()
+        try:
+            run_androidworld_eval(agent, agent_name, args, llm_profile_name, s3, db)
         except KeyboardInterrupt:
             wandb.finish()
             raise SystemExit(130)

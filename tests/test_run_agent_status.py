@@ -1,4 +1,5 @@
 import importlib
+import os
 import signal
 import sys
 import types
@@ -7,6 +8,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+import src.config.webarena_validation as webarena_validation
 
 _STUBBED_MODULE_NAMES = [
     "autogen",
@@ -70,6 +73,7 @@ def _install_run_agent_stubs() -> None:
     env_adapter_module.TalesAdapter = type("TalesAdapter", (), {})
     env_adapter_module.NetHackAdapter = type("NetHackAdapter", (), {})
     env_adapter_module.WebArenaAdapter = type("WebArenaAdapter", (), {})
+    env_adapter_module.AndroidWorldAdapter = type("AndroidWorldAdapter", (), {})
     env_adapter_module.infer_task_type = lambda task: None
     sys.modules["src.agent.env_adapter"] = env_adapter_module
 
@@ -222,6 +226,316 @@ def test_parse_arguments_accepts_webarena_env(monkeypatch):
 
     assert args.env_type == "webarena"
     assert args.webarena_task_ids == [17, 42]
+
+
+def test_parse_arguments_accepts_androidworld_env(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_agent.py",
+            "src/agent/configs/androidworld.yaml",
+            "--gwt",
+            "--env-type",
+            "androidworld",
+            "--androidworld-tasks",
+            "BrowserOpenUrl",
+            "--androidworld-console-port",
+            "5556",
+        ],
+    )
+
+    args = run_agent.parse_arguments()
+
+    assert args.env_type == "androidworld"
+    assert args.androidworld_tasks == ["BrowserOpenUrl"]
+    assert args.androidworld_console_port == 5556
+
+
+def test_parse_arguments_accepts_androidworld_smoke_suite(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_agent.py",
+            "src/agent/configs/androidworld.yaml",
+            "--gwt",
+            "--env-type",
+            "androidworld",
+            "--androidworld-smoke-suite",
+            "core",
+        ],
+    )
+
+    args = run_agent.parse_arguments()
+
+    assert args.env_type == "androidworld"
+    assert args.androidworld_smoke_suite == "core"
+
+
+def test_parse_arguments_accepts_androidworld_install_timeout(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_agent.py",
+            "src/agent/configs/androidworld.yaml",
+            "--gwt",
+            "--env-type",
+            "androidworld",
+            "--androidworld-adb-install-timeout",
+            "900",
+        ],
+    )
+
+    args = run_agent.parse_arguments()
+
+    assert args.androidworld_adb_install_timeout == 900.0
+
+
+def test_build_androidworld_task_suite_rejects_unknown_task_names(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    android_world_module = types.ModuleType("android_world")
+    registry_module = types.ModuleType("android_world.registry")
+    suite_utils_module = types.ModuleType("android_world.suite_utils")
+
+    class _TaskRegistry:
+        def get_registry(self, family):
+            assert family == "android_world"
+            return {
+                "BrowserMaze": object(),
+                "BrowserDraw": object(),
+                "BrowserMultiply": object(),
+            }
+
+    def _unexpected_create_suite(**kwargs):
+        raise AssertionError("create_suite should not be called for unknown tasks")
+
+    registry_module.TaskRegistry = _TaskRegistry
+    suite_utils_module.create_suite = _unexpected_create_suite
+    android_world_module.registry = registry_module
+    android_world_module.suite_utils = suite_utils_module
+
+    monkeypatch.setitem(sys.modules, "android_world", android_world_module)
+    monkeypatch.setitem(sys.modules, "android_world.registry", registry_module)
+    monkeypatch.setitem(sys.modules, "android_world.suite_utils", suite_utils_module)
+
+    args = types.SimpleNamespace(
+        androidworld_suite_family="android_world",
+        androidworld_n_task_combinations=1,
+        androidworld_task_random_seed=13,
+        androidworld_tasks=["BrowserOpenUrl"],
+    )
+
+    with pytest.raises(ValueError, match="BrowserOpenUrl"):
+        run_agent._build_androidworld_task_suite(args)
+
+
+def test_build_androidworld_task_suite_expands_smoke_suite(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    android_world_module = types.ModuleType("android_world")
+    registry_module = types.ModuleType("android_world.registry")
+    suite_utils_module = types.ModuleType("android_world.suite_utils")
+
+    class _TaskRegistry:
+        def get_registry(self, family):
+            assert family == "android_world"
+            return {
+                "BrowserMaze": object(),
+                "MarkorCreateNote": object(),
+                "ContactsAddContact": object(),
+            }
+
+    captured = {}
+
+    def _create_suite(**kwargs):
+        captured.update(kwargs)
+        return {
+            "BrowserMaze": [object()],
+            "MarkorCreateNote": [object()],
+            "ContactsAddContact": [object()],
+        }
+
+    registry_module.TaskRegistry = _TaskRegistry
+    suite_utils_module.create_suite = _create_suite
+    android_world_module.registry = registry_module
+    android_world_module.suite_utils = suite_utils_module
+
+    monkeypatch.setitem(sys.modules, "android_world", android_world_module)
+    monkeypatch.setitem(sys.modules, "android_world.registry", registry_module)
+    monkeypatch.setitem(sys.modules, "android_world.suite_utils", suite_utils_module)
+
+    args = types.SimpleNamespace(
+        androidworld_suite_family="android_world",
+        androidworld_n_task_combinations=1,
+        androidworld_task_random_seed=13,
+        androidworld_tasks=None,
+        androidworld_smoke_suite="core",
+    )
+
+    _, task_items = run_agent._build_androidworld_task_suite(args)
+
+    assert captured["tasks"] == [
+        "BrowserMaze",
+        "MarkorCreateNote",
+        "ContactsAddContact",
+    ]
+    assert len(task_items) == 3
+
+
+def test_reset_androidworld_env_retries_once_for_offline_error(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    waits = []
+
+    def _fake_wait(**kwargs):
+        waits.append(kwargs["console_port"])
+
+    class FakeEnv:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset(self, go_home=True):
+            self.reset_calls += 1
+            if self.reset_calls == 1:
+                raise RuntimeError("adb: device offline")
+            return None
+
+    monkeypatch.setattr(run_agent, "wait_for_androidworld_device_ready", _fake_wait)
+
+    env = FakeEnv()
+    run_agent._reset_androidworld_env(
+        env,
+        adb_path="/usr/bin/adb",
+        console_port=5554,
+    )
+
+    assert env.reset_calls == 2
+    assert waits == [5554, 5554]
+
+
+def test_reset_androidworld_env_retries_once_for_a11y_tree_error(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    waits = []
+    monkeypatch.setattr(
+        run_agent,
+        "wait_for_androidworld_device_ready",
+        lambda **kwargs: waits.append(kwargs["console_port"]),
+    )
+
+    class FakeEnv:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset(self, go_home=True):
+            self.reset_calls += 1
+            if self.reset_calls == 1:
+                raise RuntimeError("Could not get a11y tree.")
+            return None
+
+    env = FakeEnv()
+    run_agent._reset_androidworld_env(
+        env,
+        adb_path="/usr/bin/adb",
+        console_port=5554,
+    )
+
+    assert env.reset_calls == 2
+    assert waits == [5554, 5554]
+
+
+def test_reset_androidworld_env_does_not_retry_non_transient_error(monkeypatch):
+    _install_run_agent_stubs()
+    run_agent = _load_run_agent_module()
+
+    waits = []
+    monkeypatch.setattr(
+        run_agent,
+        "wait_for_androidworld_device_ready",
+        lambda **kwargs: waits.append(kwargs["console_port"]),
+    )
+
+    class FakeEnv:
+        def reset(self, go_home=True):
+            raise RuntimeError("Permanent bad task state.")
+
+    with pytest.raises(RuntimeError, match="Permanent bad task state"):
+        run_agent._reset_androidworld_env(
+            FakeEnv(),
+            adb_path="/usr/bin/adb",
+            console_port=5554,
+        )
+
+    assert waits == [5554]
+
+
+def test_webarena_preflight_rejects_localhost_inside_container(monkeypatch):
+    _install_run_agent_stubs()
+    _load_run_agent_module()
+    monkeypatch.setattr(webarena_validation, "running_inside_container", lambda: True)
+    monkeypatch.setattr(
+        webarena_validation.socket, "create_connection", lambda *args, **kwargs: None
+    )
+    for env_var in (
+        "WA_SHOPPING",
+        "WA_SHOPPING_ADMIN",
+        "WA_REDDIT",
+        "WA_GITLAB",
+        "WA_WIKIPEDIA",
+        "WA_MAP",
+        "WA_HOMEPAGE",
+    ):
+        monkeypatch.setenv(env_var, "http://localhost:7770")
+
+    with pytest.raises(RuntimeError, match="host.docker.internal"):
+        webarena_validation.validate_webarena_instance_urls()
+
+
+def test_webarena_preflight_ignores_placeholder_extra_headers(monkeypatch):
+    _install_run_agent_stubs()
+    _load_run_agent_module()
+    monkeypatch.setattr(webarena_validation, "running_inside_container", lambda: False)
+
+    class _DummyConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        webarena_validation.socket,
+        "create_connection",
+        lambda *args, **kwargs: _DummyConnection(),
+    )
+    monkeypatch.setenv("PW_EXTRA_HEADERS", "/absolute/path/to/extra_headers.json")
+    for env_var in (
+        "WA_SHOPPING",
+        "WA_SHOPPING_ADMIN",
+        "WA_REDDIT",
+        "WA_GITLAB",
+        "WA_WIKIPEDIA",
+        "WA_MAP",
+        "WA_HOMEPAGE",
+    ):
+        monkeypatch.setenv(env_var, "http://example.test:7770")
+
+    webarena_validation.validate_webarena_instance_urls()
+
+    assert "PW_EXTRA_HEADERS" not in os.environ
 
 
 def test_persist_chat_artifacts_recovers_in_memory_group_chat(tmp_path):
