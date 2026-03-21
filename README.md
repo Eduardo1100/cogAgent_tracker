@@ -1,4 +1,4 @@
-# cogAgent Tracker
+# CogAgentLab
 
 [![CI](https://github.com/Eduardo1100/cogAgent_tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Eduardo1100/cogAgent_tracker/actions/workflows/ci.yml)
 
