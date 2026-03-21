@@ -1,7 +1,8 @@
 # AGENTS.md
 
 ## Purpose
-- This repo is a Python 3.11 `uv` project for running cognitive-agent evaluations and exposing experiment data through a FastAPI service.
+- This repo is `CogAgentLab`.
+- This repo is a Python 3.12 `uv` project for running cognitive-agent evaluations and exposing experiment data through a FastAPI service.
 - The stack is local-first but container-oriented: Postgres, Redis, MinIO, and Grafana run via Docker Compose; the app and agent runner depend on those services.
 - Treat this as an experiments + observability repo, not a generic CRUD API. Changes often affect runtime jobs, persisted metrics, and schema compatibility.
 
@@ -201,7 +202,7 @@
 - [scripts/iterate_agent.py](/home/eduardo/Projects/cogAgent_tracker/scripts/iterate_agent.py) is intentionally local-first. It expects a reachable Postgres instance; if the worktree is dirty it stops by default unless `--allow-dirty` / `ALLOW_DIRTY=1` is set. The `claudecode` agent (default) requires `claude` CLI authenticated via subscription — ANTHROPIC_API_KEY is intentionally stripped from the subprocess env so it does not accidentally use API credits. The `codex` agent requires a working `codex` CLI.
 - Hard action/chat limits are still enforced in runtime, but explicit remaining-count numbers should stay out of model-facing context in [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py). If you change budget handling, prefer hidden runtime pressure over prompting the model with raw remaining counts.
 - Full runtime bookkeeping belongs in analyst traces and persisted artifacts, not in model-facing percepts. When changing [src/agent/gwt_agent.py](/home/eduardo/Projects/cogAgent_tracker/src/agent/gwt_agent.py), keep the agent-facing percept and focus-recovery payload compact and architecture-relevant so prompt size does not grow with every new controller.
-- The README is sparse and the project metadata still uses the placeholder name `production-template`. Prefer the actual repo structure over marketing text.
+- The README is intentionally concise. Prefer the actual repo structure and runtime behavior over marketing text when they disagree.
 - Pytest CI runs via `uv run pytest tests/`. Keep [tests/conftest.py](/home/eduardo/Projects/cogAgent_tracker/tests/conftest.py) in mind for repo-root import resolution, and make test stubs override `sys.modules` directly instead of relying on import order.
 - [.pre-commit-config.yaml](/home/eduardo/Projects/cogAgent_tracker/.pre-commit-config.yaml) is intentionally tracked. Do not re-add it to `.gitignore`.
 

@@ -12,7 +12,7 @@ require_env_vars(
 )
 require_current_schema(context="API startup")
 
-app = FastAPI(title="cogAgent Tracker API")
+app = FastAPI(title="CogAgentLab API")
 
 app.include_router(v1_router, prefix="/api/v1")
 app.include_router(openclaw_runtime_router, prefix="/api/v1")

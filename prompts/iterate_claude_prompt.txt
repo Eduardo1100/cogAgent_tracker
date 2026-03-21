@@ -1,4 +1,4 @@
-You are continuing the cognitive-agent iteration workflow in {repo_root}.
+You are continuing the CogAgentLab cognitive-agent iteration workflow in {repo_root}.
 
 Experiment to analyze: {experiment_id}
 Current stacked base branch: {current_branch}

@@ -1,4 +1,4 @@
-You are continuing the cognitive-agent consolidation workflow in {repo_root}.
+You are continuing the CogAgentLab cognitive-agent consolidation workflow in {repo_root}.
 
 Regression anchor experiment to analyze: {experiment_id}
 Current stacked base branch: {current_branch}

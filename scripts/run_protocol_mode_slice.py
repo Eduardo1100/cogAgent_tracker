@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
-        help="Base URL for the cogAgent Tracker API.",
+        help="Base URL for the CogAgentLab API.",
     )
     parser.add_argument(
         "--field",
@@ -237,7 +237,7 @@ def main() -> int:
         parser.exit(
             2,
             (
-                "Could not reach the cogAgent Tracker API at "
+                "Could not reach the CogAgentLab API at "
                 f"{args.base_url.rstrip('/')}. "
                 f"Reason: {exc.reason}\n"
             ),
