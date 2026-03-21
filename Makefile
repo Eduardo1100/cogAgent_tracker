@@ -2,7 +2,7 @@
 PYTHON := uv run python
 SHELL  := /bin/zsh
 
-.PHONY: help setup dev train eval debug iterate-agent ablate-agent format lint test ci clean build-docker benchmark up down nuke sanity bootstrap-alfworld bootstrap-webarena bootstrap-androidworld webarena-check webarena-up webarena-down webarena-status androidworld-check androidworld-smoke db-upgrade db-revision db-current
+.PHONY: help setup dev train eval debug iterate-agent ablate-agent format lint test ci clean build-docker benchmark up down nuke sanity bootstrap-alfworld bootstrap-webarena bootstrap-androidworld webarena-check webarena-up webarena-down webarena-status androidworld-check androidworld-smoke protocol-slice protocol-slice-contacts protocol-slice-input-method db-upgrade db-revision db-current
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -142,6 +142,15 @@ androidworld-check: ## Validate local AndroidWorld Python runtime plus adb/emula
 
 androidworld-smoke: ## Run the small AndroidWorld transfer smoke suite (browser/text-entry/ui)
 	bash -lc 'set -eux; uv sync --frozen; bash scripts/bootstrap_androidworld.sh; exec env WANDB_MODE=offline PYTHONPATH=. uv run python scripts/run_agent.py src/agent/configs/androidworld.yaml --env-type androidworld --androidworld-smoke-suite core --num_games 3 $(if $(ANDROIDWORLD_CONSOLE_PORT),--androidworld-console-port $(ANDROIDWORLD_CONSOLE_PORT),) $(if $(ANDROIDWORLD_GRPC_PORT),--androidworld-grpc-port $(ANDROIDWORLD_GRPC_PORT),) $(if $(ANDROIDWORLD_ADB_PATH),--androidworld-adb-path $(ANDROIDWORLD_ADB_PATH),) $(if $(ANDROIDWORLD_ADB_INSTALL_TIMEOUT),--androidworld-adb-install-timeout $(ANDROIDWORLD_ADB_INSTALL_TIMEOUT),) $(if $(MAX_ACTIONS),--max_actions $(MAX_ACTIONS),) $(if $(MAX_CHATROUNDS),--max_chat_rounds $(MAX_CHATROUNDS),) $(if $(SHOW_RUNTIME_SUMMARY),--show_runtime_summary,) $(if $(filter baseline,$(AGENT)),--baseline,--gwt)'
+
+protocol-slice: ## Replay a JSON runtime trace into force_protocol vs auto cohorts. TRACE=fixtures/openclaw/contacts_focus_repair_trace.json FIELD=summary|json BASE_URL=http://localhost:8000
+	uv run python scripts/run_protocol_mode_slice.py $(or $(TRACE),fixtures/openclaw/contacts_focus_repair_trace.json) $(if $(FIELD),--field $(FIELD),) $(if $(BASE_URL),--base-url $(BASE_URL),)
+
+protocol-slice-contacts: ## Replay the checked-in contacts focus-repair fixture against the local runtime API
+	uv run python scripts/run_protocol_mode_slice.py fixtures/openclaw/contacts_focus_repair_trace.json $(if $(FIELD),--field $(FIELD),) $(if $(BASE_URL),--base-url $(BASE_URL),)
+
+protocol-slice-input-method: ## Replay the checked-in input-method detour fixture against the local runtime API
+	uv run python scripts/run_protocol_mode_slice.py fixtures/openclaw/input_method_detour_trace.json $(if $(FIELD),--field $(FIELD),) $(if $(BASE_URL),--base-url $(BASE_URL),)
 
 webarena-up: ## Start the upstream WebArena site stack on the host via the pinned source checkout
 	bash scripts/manage_webarena_stack.sh up

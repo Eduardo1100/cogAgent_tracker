@@ -1,0 +1,127 @@
+{
+  "task_text": "Add Hugo Pereira to contacts",
+  "capabilities": {
+    "adapter_name": "openclaw",
+    "observation_mode": "ui",
+    "supports_ui_context": true,
+    "supports_status_delta": true,
+    "supports_reward_delta": true,
+    "supports_operator_candidates": true
+  },
+  "session_metadata": {
+    "fixture": "contacts_focus_repair_trace",
+    "slice": "androidworld_contacts"
+  },
+  "steps": [
+    {
+      "event": {
+        "step_index": 1,
+        "task_text": "Add Hugo Pereira to contacts",
+        "raw_observation": "Contact editor visible with editable first name and phone fields.",
+        "normalized_observation": "Contact editor visible",
+        "operator_candidates": [
+          {
+            "operator_id": "openclaw:tap:first_name",
+            "family": "ui_click",
+            "action_label": "tap [7]",
+            "target_ids": ["ui-7"]
+          },
+          {
+            "operator_id": "openclaw:type:first_name",
+            "family": "ui_type",
+            "action_label": "type \"Hugo\" into [7]",
+            "target_ids": ["ui-7"],
+            "preconditions": ["text_entry_admissible"]
+          }
+        ],
+        "ui_context": {
+          "page_title": "Create contact",
+          "visible_elements": [
+            {
+              "element_id": "ui-7",
+              "role": "textbox",
+              "name": "First name"
+            },
+            {
+              "element_id": "ui-10",
+              "role": "textbox",
+              "name": "Phone"
+            }
+          ],
+          "action_scope": ["click", "type"],
+          "input_state": {
+            "active_input_target": null,
+            "input_modality": "text",
+            "input_surface": "none",
+            "input_surface_state": "hidden",
+            "text_entry_admissible": false,
+            "escape_actions": ["navigate back"]
+          }
+        },
+        "metadata": {
+          "fixture_step": "field_visible_not_focused"
+        }
+      },
+      "decide": true,
+      "apply": {
+        "action_text": "tap [7]",
+        "action_executed": true,
+        "metadata": {
+          "fixture_effect": "focus_first_name"
+        }
+      }
+    },
+    {
+      "event": {
+        "step_index": 2,
+        "task_text": "Add Hugo Pereira to contacts",
+        "raw_observation": "First name field focused and keyboard visible.",
+        "normalized_observation": "First name field focused",
+        "operator_candidates": [
+          {
+            "operator_id": "openclaw:type:first_name",
+            "family": "ui_type",
+            "action_label": "type \"Hugo\" into [7]",
+            "target_ids": ["ui-7"],
+            "preconditions": ["text_entry_admissible"]
+          },
+          {
+            "operator_id": "openclaw:tap:phone",
+            "family": "ui_click",
+            "action_label": "tap [10]",
+            "target_ids": ["ui-10"]
+          }
+        ],
+        "ui_context": {
+          "page_title": "Create contact",
+          "focused_element_id": "ui-7",
+          "visible_elements": [
+            {
+              "element_id": "ui-7",
+              "role": "textbox",
+              "name": "First name"
+            },
+            {
+              "element_id": "ui-10",
+              "role": "textbox",
+              "name": "Phone"
+            }
+          ],
+          "action_scope": ["click", "type"],
+          "input_state": {
+            "active_input_target": "ui-7",
+            "input_modality": "text",
+            "input_surface": "virtual_keyboard",
+            "input_surface_state": "visible",
+            "text_entry_admissible": true,
+            "escape_actions": ["navigate back"]
+          }
+        },
+        "metadata": {
+          "fixture_step": "focused_text_entry_ready"
+        }
+      },
+      "decide": true
+    }
+  ]
+}

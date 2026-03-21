@@ -31,6 +31,7 @@ from src.agent.env_adapter import (
     infer_task_type,
 )
 from src.agent.gwt_agent import GWTAutogenAgent
+from src.agent.runtime import RuntimeSession
 from src.config.androidworld_runtime import (
     androidworld_install_timeout_from_env,
     prepare_androidworld_runtime,
@@ -499,6 +500,26 @@ def run_game(agent, game_no: int, max_retries: int = 3):
 
     elapsed_minutes = (time.time() - start_time) / 60
     return chat_result, error_message, elapsed_minutes
+
+
+def initialize_runtime_session(
+    agent,
+    *,
+    env,
+    obs,
+    info: dict[str, object] | None,
+    game_no: int,
+    adapter=None,
+) -> RuntimeSession:
+    session = RuntimeSession(agent=agent)
+    session.initialize(
+        env=env,
+        obs=obs,
+        info=info,
+        game_no=game_no,
+        adapter=adapter,
+    )
+    return session
 
 
 def _write_text_file(path: str, text: str, *, mode: str = "w") -> None:
@@ -1578,7 +1599,14 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
             sw_env.load(task_name, var_idx)
             obs, info = sw_env.reset()
             adapter = ScienceWorldAdapter(sw_env, obs, info, task_name=task_name)
-            agent.set_environment(sw_env, obs, info, game_no, adapter=adapter)
+            runtime_session = initialize_runtime_session(
+                agent,
+                env=sw_env,
+                obs=obs,
+                info=info,
+                game_no=game_no,
+                adapter=adapter,
+            )
             configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
 
@@ -1588,7 +1616,9 @@ def run_scienceworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
             )
             try:
                 game_start_time = time.time()
-                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_result, error_message, elapsed_minutes = run_game(
+                    runtime_session, game_no
+                )
                 chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
                 chat_text = chat_artifacts["chat_text"]
                 transitions = chat_artifacts["transitions"]
@@ -1891,8 +1921,13 @@ def run_tales_eval(agent, agent_name, args, llm_profile_name, s3, db):
             env = gymnasium.make(f"tales/{env_name}-v0", **make_kwargs)
             obs, info = env.reset()
             adapter = TalesAdapter(env, obs, info, env_name=env_name)
-            agent.set_environment(
-                env, adapter.observation, info, game_no, adapter=adapter
+            runtime_session = initialize_runtime_session(
+                agent,
+                env=env,
+                obs=adapter.observation,
+                info=info,
+                game_no=game_no,
+                adapter=adapter,
             )
             configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
@@ -1903,7 +1938,9 @@ def run_tales_eval(agent, agent_name, args, llm_profile_name, s3, db):
             )
             try:
                 game_start_time = time.time()
-                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_result, error_message, elapsed_minutes = run_game(
+                    runtime_session, game_no
+                )
                 chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
                 chat_text = chat_artifacts["chat_text"]
                 transitions = chat_artifacts["transitions"]
@@ -2200,8 +2237,13 @@ def run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db):
             reset_kwargs = {"seed": seed} if seed is not None else {}
             obs, info = env.reset(**reset_kwargs)
             adapter = NetHackAdapter(env, obs, info, variant=variant, render=render)
-            agent.set_environment(
-                env, adapter.observation, info, game_no, adapter=adapter
+            runtime_session = initialize_runtime_session(
+                agent,
+                env=env,
+                obs=adapter.observation,
+                info=info,
+                game_no=game_no,
+                adapter=adapter,
             )
             configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
@@ -2213,7 +2255,9 @@ def run_nethack_eval(agent, agent_name, args, llm_profile_name, s3, db):
             )
             try:
                 game_start_time = time.time()
-                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_result, error_message, elapsed_minutes = run_game(
+                    runtime_session, game_no
+                )
                 chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
                 chat_text = chat_artifacts["chat_text"]
                 transitions = chat_artifacts["transitions"]
@@ -2600,8 +2644,13 @@ def run_androidworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 "suite_family": suite_family,
                 "template": template_text,
             }
-            agent.set_environment(
-                env, adapter.observation, info, game_no, adapter=adapter
+            runtime_session = initialize_runtime_session(
+                agent,
+                env=env,
+                obs=adapter.observation,
+                info=info,
+                game_no=game_no,
+                adapter=adapter,
             )
             configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
@@ -2611,7 +2660,9 @@ def run_androidworld_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 f"({num_games_evaluated}/{len(selected_task_items)}) task={task_label}"
             )
             try:
-                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_result, error_message, elapsed_minutes = run_game(
+                    runtime_session, game_no
+                )
                 chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
                 chat_text = chat_artifacts["chat_text"]
                 transitions = chat_artifacts["transitions"]
@@ -2975,8 +3026,13 @@ def run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db):
                 info,
                 task_config_path=f"{env_id}.{task_id}",
             )
-            agent.set_environment(
-                env, adapter.observation, info, game_no, adapter=adapter
+            runtime_session = initialize_runtime_session(
+                agent,
+                env=env,
+                obs=adapter.observation,
+                info=info,
+                game_no=game_no,
+                adapter=adapter,
             )
             configure_live_analyst_trace(agent, experiment.id)
             log_paths = agent.log_paths
@@ -2987,7 +3043,9 @@ def run_webarena_eval(agent, agent_name, args, llm_profile_name, s3, db):
             )
             try:
                 game_start_time = time.time()
-                chat_result, error_message, elapsed_minutes = run_game(agent, game_no)
+                chat_result, error_message, elapsed_minutes = run_game(
+                    runtime_session, game_no
+                )
                 chat_artifacts = persist_chat_artifacts(agent, chat_result=chat_result)
                 chat_text = chat_artifacts["chat_text"]
                 transitions = chat_artifacts["transitions"]
@@ -3496,7 +3554,13 @@ def main():
                                     current_game_number=i,
                                     current_game_label=f"Game #{i}",
                                 )
-                                agent.set_environment(env, obs, info, i)
+                                runtime_session = initialize_runtime_session(
+                                    agent,
+                                    env=env,
+                                    obs=obs,
+                                    info=info,
+                                    game_no=i,
+                                )
                                 configure_live_analyst_trace(agent, experiment.id)
                                 log_paths = agent.log_paths
                                 print(
@@ -3505,7 +3569,7 @@ def main():
                                 try:
                                     game_start_time = time.time()
                                     chat_result, error_message, elapsed_minutes = (
-                                        run_game(agent, i)
+                                        run_game(runtime_session, i)
                                     )
                                     chat_artifacts = persist_chat_artifacts(
                                         agent, chat_result=chat_result

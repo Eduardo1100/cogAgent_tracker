@@ -1,0 +1,122 @@
+{
+  "task_text": "Add Hugo Pereira to contacts",
+  "capabilities": {
+    "adapter_name": "openclaw",
+    "observation_mode": "ui",
+    "supports_ui_context": true,
+    "supports_status_delta": true,
+    "supports_reward_delta": true,
+    "supports_operator_candidates": true
+  },
+  "session_metadata": {
+    "fixture": "input_method_detour_trace",
+    "slice": "androidworld_input_detour"
+  },
+  "steps": [
+    {
+      "event": {
+        "step_index": 1,
+        "task_text": "Add Hugo Pereira to contacts",
+        "raw_observation": "Input method picker is open above the contact editor.",
+        "normalized_observation": "Input method picker visible",
+        "operator_candidates": [
+          {
+            "operator_id": "openclaw:back:detour",
+            "family": "navigate_back",
+            "action_label": "navigate back",
+            "target_ids": ["system-overlay"]
+          },
+          {
+            "operator_id": "openclaw:tap:ime-option",
+            "family": "ui_click",
+            "action_label": "tap [3]",
+            "target_ids": ["ui-ime-option"]
+          }
+        ],
+        "ui_context": {
+          "page_title": "Choose input method",
+          "overlay_kind": "system_input_picker",
+          "visible_elements": [
+            {
+              "element_id": "ui-ime-option",
+              "role": "menuitem",
+              "name": "Switch input method"
+            }
+          ],
+          "action_scope": ["click", "back"],
+          "input_state": {
+            "active_input_target": null,
+            "input_modality": "selection",
+            "input_surface": "system_input_picker",
+            "input_surface_state": "visible",
+            "overlay_kind": "system_input_picker",
+            "text_entry_admissible": false,
+            "escape_actions": ["navigate back"]
+          }
+        },
+        "metadata": {
+          "fixture_step": "input_method_detour_visible"
+        }
+      },
+      "decide": true,
+      "apply": {
+        "action_text": "navigate back",
+        "action_executed": true,
+        "metadata": {
+          "fixture_effect": "dismiss_input_method_picker"
+        }
+      }
+    },
+    {
+      "event": {
+        "step_index": 2,
+        "task_text": "Add Hugo Pereira to contacts",
+        "raw_observation": "Returned to contact editor after dismissing input method picker.",
+        "normalized_observation": "Contact editor visible after detour recovery",
+        "operator_candidates": [
+          {
+            "operator_id": "openclaw:tap:first_name",
+            "family": "ui_click",
+            "action_label": "tap [7]",
+            "target_ids": ["ui-7"]
+          },
+          {
+            "operator_id": "openclaw:type:first_name",
+            "family": "ui_type",
+            "action_label": "type \"Hugo\" into [7]",
+            "target_ids": ["ui-7"],
+            "preconditions": ["text_entry_admissible"]
+          }
+        ],
+        "ui_context": {
+          "page_title": "Create contact",
+          "visible_elements": [
+            {
+              "element_id": "ui-7",
+              "role": "textbox",
+              "name": "First name"
+            },
+            {
+              "element_id": "ui-10",
+              "role": "textbox",
+              "name": "Phone"
+            }
+          ],
+          "action_scope": ["click", "type"],
+          "input_state": {
+            "active_input_target": null,
+            "input_modality": "text",
+            "input_surface": "none",
+            "input_surface_state": "hidden",
+            "text_entry_admissible": false,
+            "escape_actions": ["navigate back"]
+          }
+        },
+        "metadata": {
+          "fixture_step": "task_surface_recovered"
+        }
+      },
+      "decide": true
+    }
+  ]
+}
