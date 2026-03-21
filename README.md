@@ -1,8 +1,8 @@
 # CogAgentLab
 
-[![CI](https://github.com/Eduardo1100/cogAgent_tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Eduardo1100/cogAgent_tracker/actions/workflows/ci.yml)
+[![CI](https://github.com/Eduardo1100/CogAgentLab/actions/workflows/ci.yml/badge.svg)](https://github.com/Eduardo1100/CogAgentLab/actions/workflows/ci.yml)
 
-`cogAgent_tracker` is a Python 3.11 project for running cognitive-agent evaluations and tracking experiment results through a FastAPI API backed by Postgres, Redis, and MinIO.
+`CogAgentLab` is a Python 3.11 project for running cognitive-agent evaluations and tracking experiment results through a FastAPI API backed by Postgres, Redis, and MinIO.
 
 ## What Is Here
 
